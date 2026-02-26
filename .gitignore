@@ -7,12 +7,12 @@ wheels/
 *.egg-info
 
 # uv and  virtual environments
-.venv
+.venv/
 uv.lock
 
 # Local settings
 .env
 
 # VScode
-.vscode
+.vscode/
 
