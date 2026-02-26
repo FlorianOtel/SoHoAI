@@ -1,0 +1,16 @@
+model_list:
+  - model_name: orchestrator # CPU-bound
+    litellm_params:
+      model: ollama/nemotron-orchestrator
+      api_base: http://192.168.1.93:11434
+
+  - model_name: specialist   # GPU-bound
+    litellm_params:
+      model: openai/Llama-3.1-8B-Instruct-NVFP4
+      api_base: http://192.168.1.95:8000/v1 # TRT-LLM OpenAI Wrapper
+      api_key: "dummy-key" # TRT-LLM local doesn't need a real key
+
+  - model_name: external     # Cloud API
+    litellm_params:
+      model: gemini/gemini-3-flash-preview
+      api_key: os.environ/GEMINI_API_KEY
