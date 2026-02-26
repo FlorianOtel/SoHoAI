@@ -6,8 +6,12 @@ dist/
 wheels/
 *.egg-info
 
-# Virtual environments
+# uv and  virtual environments
 .venv
+uv.lock
+
+# Local settings
+.env
 
 # VScode
 .vscode
