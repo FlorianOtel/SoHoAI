@@ -1,7 +1,7 @@
 model_list:
   - model_name: orchestrator # CPU-bound
     litellm_params:
-      model: ollama/nemotron-orchestrator
+      model: ollama/hf.co/MaziyarPanahi/Mistral-Nemo-Instruct-2407-GGUF:Q4_K_M
       api_base: http://192.168.1.93:11434
 
   - model_name: specialist   # GPU-bound
