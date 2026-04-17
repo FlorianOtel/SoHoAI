@@ -27,8 +27,8 @@ from rag_engine.collection import get_client
 from rag_engine.search import search_rag
 
 
-async def run(query: str, user_id: str | None, top_k: int, qdrant_path: str, rag_cfg: dict) -> None:
-    qdrant_client = get_client(qdrant_path)
+async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_cfg: dict) -> None:
+    qdrant_client = get_client(qdrant_url)
 
     results = await search_rag(
         query=query,
@@ -78,10 +78,8 @@ def main() -> None:
         config = yaml.safe_load(f)
 
     rag_cfg = config.get("rag", {})
-    db_base = config.get("db_base_path", "/mnt/nfs/__Backups/HomeAI-lab--databases")
-    qdrant_path = f"{db_base}/qdrant"
 
-    asyncio.run(run(args.query, user_id, args.top_k, qdrant_path, rag_cfg))
+    asyncio.run(run(args.query, user_id, args.top_k, rag_cfg.get("qdrant_url", "http://localhost:6333"), rag_cfg))
 
 
 if __name__ == "__main__":

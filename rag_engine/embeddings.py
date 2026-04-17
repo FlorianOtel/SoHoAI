@@ -16,8 +16,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _DEFAULT_OLLAMA_URL = "http://localhost:11434/api/embeddings"
-_DEFAULT_MODEL = "mxbai-embed-large"
-_BATCH_CONCURRENCY = 8      # max parallel Ollama requests (no native batch endpoint)
+_DEFAULT_MODEL = "bge-m3"
+_BATCH_CONCURRENCY = 5      # max parallel Ollama requests (no native batch endpoint)
 
 
 async def embed_text(

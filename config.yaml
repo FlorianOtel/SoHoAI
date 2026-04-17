@@ -47,7 +47,7 @@ model_list:
       description: "Claude Sonnet via Anthropic API (fallback / complex tasks)"
 
   # --- Embedding model on Server 1 (CPU) for RAG ---
-  # Note: Embeddings run via Ollama HTTP (mxbai-embed-large), not LiteLLM.
+  # Note: Embeddings run via Ollama HTTP (bge-m3), not LiteLLM.
   # See rag: section below and rag_engine/ for implementation.
 
 # -- Routing Policy ------------------------------------------------------------
@@ -62,14 +62,16 @@ routing:
 
 # -- RAG Settings (Phase 2) ---------------------------------------------------
 rag:
-  embedding_model: "mxbai-embed-large"           # 1024-dim, served by Ollama on Server 1
+  embedding_model: "bge-m3"                      # 1024-dim, 8192-tok context, served by Ollama on Server 1
   ollama_url: "http://localhost:11434/api/embeddings"
   top_k: 5
   # Parent-child chunking (see RAG-strategy.md §3.4):
   #   child: 200-300 tokens (embedded), parent: 800-1200 tokens (returned to LLM)
   #   Flat 512-token for PPTX / short TXT / YAML / config files
   qdrant_collection: "documents"
-  # rag_state_db and qdrant_path are derived from db_base_path in Python
+  qdrant_url: "http://192.168.1.93:6333"
+  # Active Qdrant storage: /var/lib/qdrant/storage (local NVMe, Server 1)
+  # Snapshots (DR):        /mnt/nfs/__Backups/HomeAI-lab--databases/qdrant-snapshots/
 
 # -- Multi-user NFS roots (maps Google email → owner + NFS paths) -------------
 users:

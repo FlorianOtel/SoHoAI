@@ -32,13 +32,17 @@ for family photos and RL training data collection from chat interactions.
 | Server 2 | 192.168.1.95 | LLM inference engine | 16GB RAM, Nvidia RTX 5070 12GB, llama-server |
 | NAS | NFS-mounted | Persistent storage for everything | 27TB |
 
-### Storage paths (all on NAS)
+### Storage paths
 
-> All three database paths are derived from `db_base_path` in `config.yaml`. Change that one key to relocate everything.
+> SQLite and Redis paths are derived from `db_base_path` in `config.yaml`. Qdrant active storage is local-only (see below).
 
-- Chat DB: `/mnt/nfs/__Backups/HomeAI-lab--databases/sqlite/chats.db` (SQLite)
-- RAG state DB: `/mnt/nfs/__Backups/HomeAI-lab--databases/sqlite/rag_state.db` (SQLite)
-- Vector store: `/mnt/nfs/__Backups/HomeAI-lab--databases/qdrant/` (Qdrant)
+- Chat DB: `/mnt/nfs/__Backups/HomeAI-lab--databases/sqlite/chats.db` (SQLite, NAS)
+- RAG state DB: `/mnt/nfs/__Backups/HomeAI-lab--databases/sqlite/rag_state.db` (SQLite, NAS)
+- Vector store (active): `/var/lib/qdrant/storage` (local NVMe, Server 1 only — **not NFS**)
+- Vector store (snapshots/DR): `/mnt/nfs/__Backups/HomeAI-lab--databases/qdrant-snapshots/` (NAS)
+  - **Note**: `/mnt/nfs/__Backups/HomeAI-lab--databases/qdrant/` is intentionally empty — it is NOT used.
+    Qdrant server uses RocksDB which is incompatible with NFS file locking. Active data must stay local.
+    Snapshots (passive files) are safe on NFS and taken daily at 03:00 via cron.
 - Redis persistence: `/mnt/nfs/__Backups/HomeAI-lab--databases/redis/`
 - KV cache slots: `/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v--caches/` (one `.bin` per chat_id)
 - LLM model cache: `/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/`
@@ -58,12 +62,14 @@ Server 1 (192.168.1.93)                    Server 2 (192.168.1.95)
 │    rolling summarization │               │  CLIP (Phase 4)          │
 │ SQLite (long-term)       │               └──────────────────────────┘
 │ MCP server :3001 (HTTP)  │                          │
-│ Qdrant (vector store)    │                          │
+│ Qdrant server :6333      │                          │
+│  active storage: NVMe    │                          │
+│  snapshots → NAS daily   │                          │
 └──────────────────────────┘                          │
            │                                          │
            └──── both mount ──→ NAS (27TB NFS) ───────┘
                                (Redis AOF, SQLite, KV .bin files,
-                                model cache, Qdrant, exports)
+                                model cache, Qdrant snapshots, exports)
 ```
 
 ### LLM routing (via LiteLLM)
@@ -173,6 +179,11 @@ HomeAI-Lab/
 │   ├── sync_to_notebook.py     # End-of-session sync: snapshot → delete old → upload
 │   ├── notebooklm_session.json # Saved Google session cookies (not committed)
 │   └── codebase_snapshot.md    # Generated snapshot (not committed)
+├── scripts/
+│   └── qdrant/
+│       ├── qdrant-config.yaml      # Qdrant server config (storage paths, ports)
+│       ├── qdrant.service          # systemd unit file (copy to /etc/systemd/system/)
+│       └── qdrant-snapshot.sh      # Snapshot + cleanup script (cron: daily 03:00)
 └── NFS-files--MCP-server/      # nfs-files MCP server (✅ complete)
     ├── nfs_files_mcp_server.py  # MCP server implementation
     ├── nfs_files_mcp_server.sh  # Launch script (HTTP mode, port 3001)
@@ -240,18 +251,18 @@ park(chat_id)        → save KV slot to NAS + refresh Redis TTL
   - `owner` field in every Qdrant point; search filtered by `MatchAny(any=[user_owner, "la-familia"])`
   - `user_id` field added to `ChatRequest`, `SearchRequest`, and SQLite `chats` table
   - User→NFS root mapping in `config.yaml` (`users:` + `shared:` sections)
-- Document ingestion via `docling` library (PDF, PPTX, DOCX, TXT) — replaces `unstructured`
+- Document ingestion: `docling` (PDF, PPTX, DOCX) + dedicated ipynb cell extractor + direct UTF-8 read (TXT, MD, YAML, CSV) — replaces `unstructured`
+  - **ipynb NOT handled by docling** — docling silently rejects `.ipynb` and falls back to raw JSON read, which embeds the notebook's JSON structure as text (garbage for RAG). Fix: `_parse_ipynb()` in `ingest.py` parses the JSON directly, extracts markdown cells as prose and code cells as fenced blocks, skips outputs and empty cells.
   - PST/Outlook archive parsing **de-prioritized** (only 2 `.msg` files found on NAS; `libpst` not needed)
 - Chunking — **parent-child strategy** (see design decision below):
-  - Child chunks (~200–300 tokens, 20 overlap) → embedded, stored in Qdrant as search index
+  - Child chunks (~250 tokens, 20 overlap) → embedded, stored in Qdrant as search index
   - Parent chunks (~800–1200 tokens, 100 overlap) → raw text only, stored in Qdrant payload (`parent_text` field)
   - Flat 512-token chunks used only for PPTX slides and short TXT/YAML/config files (already compact)
-- Embeddings via **mxbai-embed-large served by Ollama on Server 1**
-  - 1024 dimensions, 335M params, ~670MB — best MTEB accuracy of any Ollama-available model
-  - API: `POST http://localhost:11434/api/embeddings`; no batch endpoint — `embed_batch()` runs 8 concurrent requests via asyncio semaphore
-  - Config keys: `embedding_model: mxbai-embed-large`, `ollama_url: http://localhost:11434/api/embeddings`
-  - Query latency: ~10ms (vs ~150ms with sentence-transformers CPU)
-  - Batch ingestion: async background job
+- Embeddings via **bge-m3 served by Ollama on Server 1**
+  - 1024 dimensions, 570M params, ~1.2GB — top MTEB scores; 8192-token context window
+  - API: `POST http://localhost:11434/api/embeddings`; no batch endpoint — `embed_batch()` runs 5 concurrent requests via asyncio semaphore
+  - Config keys: `embedding_model: bge-m3`, `ollama_url: http://localhost:11434/api/embeddings`
+  - Query latency: ~650ms/chunk; batch ingestion via async background job
 - Qdrant vector store on Server 1, persisted to NAS — **confirmed right choice** (see design decisions)
 - RAG-augmented prompts (context injection before LLM call)
 - Package: `rag_engine/` — fully implemented (schema, collection, embeddings, state, scanner, ingest, search); `rag.py` deleted
@@ -259,11 +270,14 @@ park(chat_id)        → save KV slot to NAS + refresh Redis TTL
 
 #### Phase 2 design decisions (confirmed 2026-03-30)
 
-**Embedding model — mxbai-embed-large via Ollama (updated 2026-04-08)**
-`mxbai-embed-large` (1024-dim, 335M params) served by Ollama on Server 1 CPU.
-Chosen over `nomic-embed-text-v1.5` (768-dim) for higher accuracy (better MTEB score)
-and larger vector dimensions. Removes `sentence-transformers` as a Python dependency —
-Ollama manages model lifecycle. Query latency ~10ms vs ~150ms with sentence-transformers.
+**Embedding model — bge-m3 via Ollama (updated 2026-04-17)**
+`bge-m3` (1024-dim, 570M params, ~1.2GB) served by Ollama on Server 1 CPU.
+Chosen over `mxbai-embed-large` (512 BERT-token hard limit caused constant Ollama 500 errors
+for technical content — tiktoken BPE undercounts vs BERT WordPiece tokenizer).
+Chosen over `qwen3-embedding:8b` (4.7GB, best MTEB): Server 2 VRAM conflict —
+llama-server uses 11.6/12GB, leaving no room; Server 1 CPU inference at 8B params
+would add 6–10s to every RAG chat query. bge-m3 is the practical optimum:
+top MTEB quality, 8192-token context, 650ms/chunk on CPU, fits alongside all workloads.
 
 Server 2 RTX 5070 has only ~576 MiB free VRAM at idle (llama-server uses 11642/12227 MiB).
 KV cache grows dynamically during active turns (up to ~4.1 GB for a full 53248-token slot),
@@ -288,7 +302,7 @@ considered and rejected:
 **Qdrant collections — one per modality**
 Different embedding models per modality require separate collections:
 
-- `documents` — mxbai-embed-large via Ollama (1024-dim), text chunks
+- `documents` — bge-m3 via Ollama (1024-dim), text chunks
 - `images` — CLIP embeddings (Phase 4)
 - `videos` — CLIP or frame-level embeddings (Phase 4)
 
@@ -383,7 +397,7 @@ Other user directories (`/mnt/nfs/{Eva,Annika,Laura}`) and `/mnt/nfs/La-Familia`
 
 1. ~~Replace `unstructured` with `docling`~~ — ✅ done
 2. ~~Replace `sentence-transformers` with Ollama in `rag.py`~~ — ✅ done 2026-04-08
-3. ~~Fix `config.yaml` RAG section (mxbai-embed-large, ollama_url)~~ — ✅ done 2026-04-16
+3. ~~Fix `config.yaml` RAG section (bge-m3, ollama_url)~~ — ✅ done 2026-04-17
 4. ~~Add `owner` to Qdrant payload schema; `user_id` to `ChatRequest`/`SearchRequest`~~ — ✅ done 2026-04-16
 5. ~~Add multi-user config (`users:` + `shared:` sections) to `config.yaml`~~ — ✅ done 2026-04-16
 6. ~~Implement `rag_engine/` package (schema, collection, embeddings, state, scanner, ingest, search)~~ — ✅ done 2026-04-16
@@ -454,6 +468,13 @@ llama-server \
   --slot-save-path /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v--caches/ \
   --port 8000
 
+# Server 1 — Qdrant vector store (enabled at boot; restart after reboot)
+sudo systemctl start qdrant          # starts /usr/local/bin/qdrant on port 6333
+# Active storage: /var/lib/qdrant/storage (local NVMe — NOT NFS)
+# Snapshots (DR):  /mnt/nfs/__Backups/HomeAI-lab--databases/qdrant-snapshots/
+# Manual snapshot: bash scripts/qdrant/qdrant-snapshot.sh   (auto-runs daily 03:00 via cron)
+# Restore from snapshot: PUT http://192.168.1.93:6333/collections/documents/snapshots/recover
+
 # Server 1 — Redis
 redis-server --appendonly yes --dir /mnt/nfs/__Backups/HomeAI-lab--databases/redis
 
@@ -502,6 +523,6 @@ After modifying any orchestrator code:
 - **Redis for short-term memory** — fast, TTL-based, LLM context builder reads it every request (server-managed only)
 - **SQLite for long-term** — single file on NAS, zero ops overhead, plenty fast for ~10K chats (server-managed only)
 - **Qdrant for vectors** — persistent local mode (on NAS), gRPC + REST API; `qdrant-client` Python dep
-- **Embeddings via Ollama on Server 1** — `mxbai-embed-large` (1024-dim) served by Ollama; Server 2 GPU saturated with Mistral Nemo; ~10ms query latency; batch ingestion via 8-concurrent asyncio requests; `sentence-transformers` removed
+- **Embeddings via Ollama on Server 1** — `bge-m3` (1024-dim, 8192-tok context) served by Ollama; Server 2 GPU saturated with Mistral Nemo (11.6/12GB VRAM — no room for any embedding model); 5-concurrent asyncio requests; `sentence-transformers` removed
 - **Multi-tenancy via `owner` field + Google OAuth2** — every Qdrant point carries an `owner` derived from NFS path root at ingestion; search applies `MatchAny(any=[user_owner, "la-familia"])` filter; user identity from Google OIDC JWT mapped to `owner` via `config.yaml` `users:` section; data model designed before first ingestion to avoid re-ingesting
 - **MCP server uses path sandboxing** — all operations validated against ALLOWED_ROOTS, no escape possible

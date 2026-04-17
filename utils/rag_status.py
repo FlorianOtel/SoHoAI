@@ -37,8 +37,6 @@ def main() -> None:
     rag_cfg = config.get("rag", {})
     db_base = config.get("db_base_path", "/mnt/nfs/__Backups/HomeAI-lab--databases")
     db_path = f"{db_base}/sqlite/rag_state.db"
-    qdrant_path = f"{db_base}/qdrant"
-
     state_db = StateDB(db_path)
 
     # --- SQLite queue counts ---
@@ -77,7 +75,7 @@ def main() -> None:
 
     # --- Qdrant stats ---
     try:
-        qdrant = get_client(qdrant_path)
+        qdrant = get_client(rag_cfg.get("qdrant_url", "http://localhost:6333"))
         existing = {c.name for c in qdrant.get_collections().collections}
         if DOCUMENTS_COLLECTION in existing:
             total_pts = qdrant.count(DOCUMENTS_COLLECTION, exact=True).count

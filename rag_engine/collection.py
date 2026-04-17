@@ -16,7 +16,7 @@ from qdrant_client.models import Distance, VectorParams
 # ---------------------------------------------------------------------------
 
 DOCUMENTS_COLLECTION = "documents"
-VECTOR_SIZE = 1024          # mxbai-embed-large output dimension
+VECTOR_SIZE = 1024          # bge-m3 output dimension (same as mxbai-embed-large)
 DISTANCE = Distance.COSINE
 
 
@@ -24,9 +24,9 @@ DISTANCE = Distance.COSINE
 # Client factory
 # ---------------------------------------------------------------------------
 
-def get_client(qdrant_path: str) -> QdrantClient:
-    """Open a Qdrant client in local persistent mode (data stored on NAS)."""
-    return QdrantClient(path=qdrant_path)
+def get_client(url: str) -> QdrantClient:
+    """Connect to a running Qdrant server."""
+    return QdrantClient(url=url)
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,10 @@
+storage:
+  storage_path: /var/lib/qdrant/storage
+  snapshots_path: /mnt/nfs/__Backups/HomeAI-lab--databases/qdrant-snapshots
+
+service:
+  host: 0.0.0.0
+  http_port: 6333
+  grpc_port: 6334
+
+log_level: INFO

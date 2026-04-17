@@ -85,10 +85,8 @@ def main() -> None:
     rag_cfg = config.get("rag", {})
     db_base = config.get("db_base_path", "/mnt/nfs/__Backups/HomeAI-lab--databases")
     db_path = f"{db_base}/sqlite/rag_state.db"
-    qdrant_path = f"{db_base}/qdrant"
-
     state_db = StateDB(db_path)
-    qdrant_client = get_client(qdrant_path)
+    qdrant_client = get_client(rag_cfg.get("qdrant_url", "http://localhost:6333"))
     ensure_collection(qdrant_client)
 
     counts_before = state_db.get_counts()

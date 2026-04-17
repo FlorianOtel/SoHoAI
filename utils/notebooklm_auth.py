@@ -141,6 +141,10 @@ class NotebookLMSession:
                 "  DISPLAY=:1 python utils/notebooklm_auth.py --login"
             )
 
+        # Dismiss any "getting started" or welcome modal that appears on a fresh
+        # session — if not dismissed here it will block upload_source() clicks.
+        await self._dismiss_overlay()
+
         return self.page
 
     def is_authenticated(self) -> bool:
@@ -152,6 +156,33 @@ class NotebookLMSession:
         goto_notebook() to detect an expired session at runtime.
         """
         return self.session_file.exists()
+
+    # -- Overlay dismissal ----------------------------------------------------
+
+    async def _dismiss_overlay(self) -> None:
+        """
+        Press Escape until any visible CDK overlay backdrop is gone.
+
+        NotebookLM shows a dark-backdrop modal on fresh sessions ("getting
+        started" panel) and occasionally leaves one open between operations.
+        A single Escape + short wait is not always enough — this retries up
+        to 4 times with JS-based visibility checking so we never proceed with
+        a backdrop still blocking pointer events.
+        """
+        for attempt in range(4):
+            visible = await self.page.evaluate(
+                """() => Array.from(document.querySelectorAll('.cdk-overlay-backdrop'))
+                   .filter(el => {
+                       const s = window.getComputedStyle(el);
+                       return s.display !== 'none' && s.visibility !== 'hidden'
+                              && parseFloat(s.opacity) > 0;
+                   }).length"""
+            )
+            if visible == 0:
+                break
+            log.info("Dismissing overlay (attempt %d, %d visible backdrop(s))...", attempt + 1, visible)
+            await self.page.keyboard.press("Escape")
+            await self.page.wait_for_timeout(2_000)
 
     # -- Source management ----------------------------------------------------
 
@@ -189,15 +220,7 @@ class NotebookLMSession:
         # Dismiss any lingering CDK overlay (modal, menu, dialog) that would
         # intercept pointer events on the target container — common when
         # called in rapid succession after a previous deletion.
-        backdrop = self.page.locator(".cdk-overlay-backdrop")
-        if await backdrop.count() > 0:
-            log.info("Dismissing lingering overlay before delete attempt...")
-            await self.page.keyboard.press("Escape")
-            try:
-                await backdrop.first.wait_for(state="hidden", timeout=5_000)
-            except Exception:
-                pass
-            await self.page.wait_for_timeout(500)
+        await self._dismiss_overlay()
 
         containers = self.page.locator("div.single-source-container")
         count = await containers.count()
@@ -304,6 +327,10 @@ class NotebookLMSession:
           2. Click "Upload files" from the menu
           3. Set files via the file chooser (no OS dialog needed)
           4. Wait for [class*='source-title']:has-text(stem) to appear
+
+        NOTE: this method only confirms the source card appeared in the panel.
+        The source will still be indexing (spinner visible) after this returns.
+        Call wait_all_indexed() after all uploads to confirm indexing completes.
         """
         if not self.page:
             raise RuntimeError("Page not initialized — call goto_notebook() first.")
@@ -312,15 +339,7 @@ class NotebookLMSession:
 
         # Dismiss any open CDK overlay/dialog that would intercept pointer events
         # (e.g. the "getting started" modal on a fresh empty notebook)
-        backdrop = self.page.locator(".cdk-overlay-backdrop")
-        if await backdrop.count() > 0:
-            log.info("Dismissing open overlay before upload...")
-            await self.page.keyboard.press("Escape")
-            try:
-                await backdrop.first.wait_for(state="hidden", timeout=5_000)
-            except Exception:
-                pass
-            await self.page.wait_for_timeout(500)
+        await self._dismiss_overlay()
 
         async with self.page.expect_file_chooser(timeout=10_000) as fc_info:
             # Use CSS class selector — more stable than aria-label after DOM mutations
@@ -332,16 +351,220 @@ class NotebookLMSession:
         await fc.set_files(str(file_path))
         log.info("File submitted — waiting for NotebookLM to process...")
 
-        # Wait for the source title to appear in the panel
+        # Wait for the source title to appear in the panel (upload accepted).
+        # The source will still be indexing at this point — see wait_all_indexed().
         stem = file_path.stem
         try:
             await self.page.locator(
                 f"[class*='source-title']:has-text('{stem}')"
             ).first.wait_for(state="visible", timeout=timeout_ms)
-            log.info("Source '%s' confirmed in panel.", stem)
+            log.info("Source '%s' confirmed in panel (indexing may still be in progress).", stem)
         except Exception:
             log.warning("Could not confirm source by name — waiting 30s as fallback.")
             await self.page.wait_for_timeout(30_000)
+
+    # -- Indexing monitor -----------------------------------------------------
+    #
+    # Problem: after upload_source() returns, NotebookLM spins a
+    # mat-progress-spinner.loading-spinner on each card until its backend
+    # finishes parsing and embedding the file.  If the browser session is
+    # closed before indexing completes the source is left in a broken state
+    # (perpetual spinner, no content) and must be manually removed + re-uploaded.
+    #
+    # Solution: call wait_all_indexed() after all uploads are submitted.
+    # It polls every POLL_INTERVAL_MS and returns only when every source card
+    # has its spinner gone and its "More" button enabled — or the timeout fires.
+    # Failed sources (error indicator detected) are reported so the caller can
+    # handle them (e.g. retry or warn the user).
+
+    async def _snapshot_source_states(self) -> list[dict]:
+        """
+        Atomically read state for every div.single-source-container via a
+        single JS evaluation.  Using JS avoids race conditions that arise when
+        querying individual Playwright locators in a Python loop while Angular
+        is mutating the DOM.
+
+        Returns a list of dicts:
+            title       — display name (or "(source-N)" if title not found)
+            indexing    — True if a mat-progress-spinner.loading-spinner element
+                          exists in the container (visible OR hidden).
+                          NOTE: NotebookLM hides (display:none) the spinner when
+                          indexing completes rather than removing it, so this flag
+                          can be True for a fully-indexed source.  Use
+                          wait_all_indexed() — which checks :visible spinners — as
+                          the authoritative "still indexing" signal; this field is
+                          only used here for error-state cross-checking.
+            failed      — True if an error indicator is detected:
+                            • any class containing "error" or "failed"
+                            • mat-icon whose text content is "error"
+                            • aria-label containing "error" or "failed" (case-insensitive)
+                            • innerText containing "couldn't process" (NotebookLM backend error msg)
+            more_disabled — True if the "More" button is disabled (usually means still indexing
+                            or a failed state; cross-checked with the spinner flag above)
+        """
+        return await self.page.evaluate("""() => {
+            const results = [];
+            // querySelectorAll returns ALL matching elements including nested ones.
+            // Angular sometimes wraps each card in an outer div that also carries
+            // the same class, so we filter to only top-level containers — those
+            // that are NOT themselves descendants of another single-source-container.
+            const all = Array.from(document.querySelectorAll('div.single-source-container'));
+            const containers = all.filter(
+                c => !c.parentElement?.closest('div.single-source-container')
+            );
+            containers.forEach((c, i) => {
+                const titleEl = c.querySelector('[class*="source-title"]');
+                const title = titleEl?.innerText?.trim() || `(source-${i})`;
+
+                const hasSpinner = !!c.querySelector('mat-progress-spinner.loading-spinner');
+
+                // Error heuristics — NotebookLM has used several patterns across versions.
+                const hasError = !!(
+                    c.querySelector('[class*="error"]') ||
+                    c.querySelector('[class*="failed"]') ||
+                    Array.from(c.querySelectorAll('mat-icon')).some(
+                        el => el.textContent?.trim().toLowerCase() === 'error'
+                    ) ||
+                    Array.from(c.querySelectorAll('[aria-label]')).some(
+                        el => /error|failed/i.test(el.getAttribute('aria-label') || '')
+                    ) ||
+                    c.innerText?.toLowerCase().includes("couldn't process")
+                );
+
+                const moreBtn = c.querySelector('button[aria-label="More"]');
+                const moreDisabled = !!(
+                    moreBtn?.disabled ||
+                    moreBtn?.classList.contains('mat-mdc-button-disabled')
+                );
+
+                results.push({ title, indexing: hasSpinner, failed: hasError,
+                                more_disabled: moreDisabled });
+            });
+            return results;
+        }""")
+
+    async def wait_all_indexed(
+        self,
+        timeout_ms: int = 600_000,
+        poll_interval_ms: int = 8_000,
+    ) -> dict[str, str]:
+        """
+        Block until every source in the notebook finishes indexing, then return
+        a summary dict mapping source name → final state string:
+
+            "indexed"  — spinner gone, no error indicator detected
+            "failed"   — error indicator detected (source needs manual review)
+            "timeout"  — still spinning when the total timeout expired
+
+        Parameters
+        ----------
+        timeout_ms : int
+            Maximum total wait in milliseconds.  Default 600 000 (10 minutes).
+            NotebookLM's backend can be slow on large files; 10 min is generous
+            but avoids leaving the browser open indefinitely.
+        poll_interval_ms : int
+            How often to re-query the DOM.  Default 8 000 (8 seconds).
+            Shorter intervals just add log noise without helping.
+
+        Usage
+        -----
+            # After all upload_source() calls:
+            states = await session.wait_all_indexed()
+            if any(s != "indexed" for s in states.values()):
+                print("WARNING: some sources did not index cleanly", states)
+
+        Why this is necessary
+        ---------------------
+        Closing the browser before indexing completes leaves sources in a
+        broken state (perpetual spinner, no content) that requires manual
+        removal in the NotebookLM UI.  This is a recurring problem — always
+        call wait_all_indexed() before exiting the session after uploads.
+
+        Why spinner elements, not containers
+        -------------------------------------
+        NotebookLM's Angular component renders multiple nested
+        div.single-source-container wrappers around a single source card.
+        The number of nesting levels grows as Angular progressively builds
+        the component tree, so counting containers double- or triple-counts
+        each source in a way that changes over time.
+
+        Counting spinner ELEMENTS with a descendant selector works correctly:
+        each physical mat-progress-spinner element exists once in the DOM
+        regardless of how many container wrappers surround it.  When the
+        backend finishes processing a source the spinner element is removed,
+        reducing the count by exactly 1.
+        """
+        import time
+
+        # Count only VISIBLE spinner elements.
+        #
+        # When NotebookLM finishes indexing a source, its loading spinner may
+        # become hidden (display:none) rather than being removed from the DOM.
+        # Counting all spinner elements with .count() would incorrectly keep
+        # reporting "still indexing" forever.  The :visible pseudo-class in
+        # Playwright matches only elements that are rendered and occupying space,
+        # so it returns 0 once every spinner is hidden — which is the correct
+        # "all done" signal.
+        #
+        # Cross-reference: delete_source_by_name() uses wait_for(state="hidden")
+        # on the same spinner locator to block until indexing is done before
+        # attempting deletion — consistent with the spinner going hidden, not
+        # being removed, on completion.
+        spinner_visible = self.page.locator(
+            "div.single-source-container mat-progress-spinner.loading-spinner:visible"
+        )
+        # For diagnostic logging: total spinner elements (visible + hidden)
+        spinner_all = self.page.locator(
+            "div.single-source-container mat-progress-spinner.loading-spinner"
+        )
+
+        deadline = time.monotonic() + timeout_ms / 1000
+        log.info("Waiting for all sources to finish indexing (timeout %ds)...", timeout_ms // 1000)
+
+        while True:
+            n_visible = await spinner_visible.count()
+            if n_visible == 0:
+                n_total = await spinner_all.count()
+                log.info(
+                    "All spinners hidden/gone (%d total, 0 visible) — indexing complete.",
+                    n_total,
+                )
+                break
+
+            elapsed = int(timeout_ms / 1000 - (deadline - time.monotonic()))
+            log.info(
+                "  [%ds elapsed] %d visible spinner(s) — next check in %ds",
+                elapsed, n_visible, poll_interval_ms // 1000,
+            )
+
+            if time.monotonic() >= deadline:
+                log.warning("Indexing timeout — %d visible spinner(s) still active.", n_visible)
+                break
+
+            await self.page.wait_for_timeout(poll_interval_ms)
+
+        # Use list_sources() for final source names — it is reliable (proven)
+        # and unaffected by the container-nesting issue.
+        sources = await self.list_sources()
+        still_visible = await spinner_visible.count()
+        timed_out = still_visible > 0
+
+        # Error detection (best-effort): only run when spinners are gone so that
+        # _snapshot_source_states() isn't confused by in-progress indexing state.
+        failed_sources: set[str] = set()
+        if not timed_out:
+            raw = await self._snapshot_source_states()
+            failed_sources = {s["title"] for s in raw if s["failed"]}
+
+        states: dict[str, str] = {}
+        for name in sources:
+            if timed_out:
+                states[name] = "timeout"
+            elif name in failed_sources:
+                states[name] = "failed"
+            else:
+                states[name] = "indexed"
+        return states
 
 
 # ---------------------------------------------------------------------------

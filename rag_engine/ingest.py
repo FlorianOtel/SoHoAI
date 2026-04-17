@@ -11,14 +11,16 @@ Chunking strategy (RAG-strategy.md §3.4):
   - Flat 512-tok (PPTX, YAML, CSV, short docs): parent == child.
 
 Parsing:
-  - Structured formats (PDF, DOCX, PPTX, IPYNB): docling → markdown export.
+  - Structured formats (PDF, DOCX, PPTX): docling → markdown export.
+  - IPYNB: dedicated cell extractor (JSON parse → markdown + code cells).
   - Text formats (TXT, MD, YAML, CSV): direct UTF-8 read.
-  - docling failures fall back to raw text read.
+  - docling failures fall back to raw UTF-8 read.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from pathlib import Path
@@ -57,7 +59,7 @@ logger = logging.getLogger(__name__)
 
 _PARENT_CHUNK_SIZE    = 1000   # tokens — midpoint of 800–1200 range
 _PARENT_CHUNK_OVERLAP = 100
-_CHILD_CHUNK_SIZE     = 250    # tokens — midpoint of 200–300 range
+_CHILD_CHUNK_SIZE     = 250    # tokens — midpoint of 200–300 range; safe under bge-m3's 8192-token context
 _CHILD_CHUNK_OVERLAP  = 20
 _FLAT_CHUNK_SIZE      = 512
 _FLAT_CHUNK_OVERLAP   = 50
@@ -69,7 +71,7 @@ _ALWAYS_FLAT_TYPES = {"pptx", "yaml", "yml", "csv"}
 _SHORT_DOC_TOKENS = 600
 
 # Structured formats that go through docling; everything else is direct text read
-_DOCLING_TYPES = {"pdf", "docx", "pptx", "ipynb"}
+_DOCLING_TYPES = {"pdf", "docx", "pptx"}   # ipynb handled by _parse_ipynb()
 
 # tiktoken cl100k_base — consistent encoding across ingest and search
 _enc = tiktoken.get_encoding("cl100k_base")
@@ -82,19 +84,47 @@ _converter = DocumentConverter()
 # Parsing
 # ---------------------------------------------------------------------------
 
+def _parse_ipynb(path: Path) -> str:
+    """
+    Extract clean text from a Jupyter notebook.
+
+    Concatenates markdown and code cells in order, separated by blank lines.
+    Skips raw cells and empty cells. Cell outputs are ignored — source only.
+    Falls back to raw UTF-8 read if the file is not valid JSON.
+    """
+    try:
+        nb = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return path.read_text(encoding="utf-8", errors="replace")
+
+    parts: list[str] = []
+    for cell in nb.get("cells", []):
+        cell_type = cell.get("cell_type", "")
+        source = cell.get("source", [])
+        text = "".join(source).strip() if isinstance(source, list) else str(source).strip()
+        if not text:
+            continue
+        if cell_type == "markdown":
+            parts.append(text)
+        elif cell_type == "code":
+            parts.append(f"```python\n{text}\n```")
+    return "\n\n".join(parts)
+
+
 def _parse_to_text(file_path: str, file_type: str) -> str:
     """
     Extract full text from a document.
 
-    Structured formats (pdf, docx, pptx, ipynb) go through docling and are
-    exported as Markdown.  Text formats (txt, md, yaml, csv) are read directly.
-    If docling raises, falls back to raw UTF-8 read.
+    Structured formats (pdf, docx, pptx) go through docling → Markdown.
+    IPYNB: dedicated cell extractor (avoids docling which doesn't support it).
+    Text formats (txt, md, yaml, csv): direct UTF-8 read.
+    docling failures fall back to raw UTF-8 read.
 
-    Note: this function is synchronous and potentially slow (seconds to minutes
-    for large PDFs).  Callers must wrap it in asyncio.to_thread() when called
-    from an async context.
+    Synchronous and potentially slow for large PDFs; callers use asyncio.to_thread().
     """
     path = Path(file_path)
+    if file_type == "ipynb":
+        return _parse_ipynb(path)
     if file_type not in _DOCLING_TYPES:
         return path.read_text(encoding="utf-8", errors="replace")
 
@@ -207,7 +237,7 @@ async def ingest_file(
         qdrant_client: Qdrant client in local persistent mode (NAS).
         tag:           Optional tag derived by the NFS scanner (e.g. "certifications").
     """
-    model      = rag_cfg.get("embedding_model", "mxbai-embed-large")
+    model      = rag_cfg.get("embedding_model", "bge-m3")
     ollama_url = rag_cfg.get("ollama_url", "http://localhost:11434/api/embeddings")
 
     file_name = Path(file_path).name

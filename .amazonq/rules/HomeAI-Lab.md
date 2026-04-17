@@ -8,7 +8,7 @@ Distributed two-server AI orchestrator with:
 - Redis conversation cache + SQLite persistence
 - KV cache slot management for llama-server
 - Smart routing: local GPU → cloud fallback
-- RAG pipeline: docling + mxbai-embed-large (Ollama) + Qdrant vector store
+- RAG pipeline: docling + bge-m3 (Ollama) + Qdrant vector store
 
 Key files: main.py, config.yaml, router.py, conversation.py, kv_cache.py, chat_store.py
 

@@ -120,7 +120,33 @@ async def sync(regenerate: bool = True, delete_old: bool = True) -> None:
 
         log.info("Sources after sync: %s", await session.list_sources())
 
-    log.info("=== Sync complete. NotebookLM is up to date. ===")
+        # Step 6 — wait for indexing to complete before closing the browser.
+        #
+        # Closing the session while NotebookLM is still indexing leaves sources
+        # in a broken state (perpetual spinner, no content) that requires manual
+        # removal + re-upload.  This is a recurring problem — always wait here.
+        log.info("=== Step 6: Waiting for all sources to finish indexing ===")
+        states = await session.wait_all_indexed(timeout_ms=600_000, poll_interval_ms=8_000)
+
+        all_ok = True
+        for name, state in states.items():
+            icon = "OK" if state == "indexed" else "FAILED" if state == "failed" else "TIMEOUT"
+            log.info("  [%s] %s", icon, name)
+            if state != "indexed":
+                all_ok = False
+
+        if all_ok:
+            log.info("All sources indexed successfully.")
+            log.info("=== Sync complete. NotebookLM is up to date. ===")
+        else:
+            bad = [n for n, s in states.items() if s != "indexed"]
+            log.warning(
+                "Some sources did not index cleanly: %s\n"
+                "  → Check the NotebookLM UI.  Sources in a bad state must be\n"
+                "    removed manually (More → Remove source) and re-uploaded.",
+                bad,
+            )
+            log.warning("=== Sync finished with indexing errors — see warnings above. ===")
 
 
 def main() -> None:

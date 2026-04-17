@@ -124,9 +124,8 @@ async def lifespan(app: FastAPI):
 
     app.state.summarize_fn = summarize_fn
     app.state.rag_cfg = config.get("rag", {})
-    qdrant_path = f"{_db_base}/qdrant"
     try:
-        app.state.qdrant_client = get_client(qdrant_path)
+        app.state.qdrant_client = get_client(app.state.rag_cfg.get("qdrant_url", "http://localhost:6333"))
         ensure_collection(app.state.qdrant_client)
         logger.info("Qdrant connected and collection ready ✓")
     except Exception as exc:

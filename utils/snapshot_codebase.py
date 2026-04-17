@@ -69,14 +69,28 @@ def _lang(path: Path) -> str:
 
 def _sanitize_for_markdown(content: str) -> str:
     """
-    Replace chars that break NotebookLM's Markdown parser even inside code fences.
+    Replace or strip characters that cause NotebookLM's indexing to hang.
 
-    Empirically (2026-04-15): Unicode box-drawing block (U+2500–U+257F) and
-    non-BMP emoji (U+10000+) cause a perpetual stuck-indexing spinner with no
-    visible error in the NotebookLM UI.
+    Empirically confirmed problematic ranges (stuck-spinner, no visible error):
+      U+2500–U+257F  Box Drawing — ─, │, ┌, └, etc.  (replaced with dash)
+      U+2580–U+259F  Block Elements — █, ▓, ░, etc.   (replaced with dash)
+      U+2190–U+21FF  Arrows — →, ←, ↑, ↓, etc.        (stripped)
+      U+2600–U+26FF  Misc Symbols — ☁, ☺, ♠, ⚠, etc.  (stripped)
+      U+2700–U+27BF  Dingbats — ✅, ✓, ✗, ➜, etc.      (stripped)
+      U+10000+       Non-BMP emoji                      (stripped)
+
+    Box-drawing and block-elements are replaced with dash to preserve table
+    and border structure as ASCII.  All other symbol ranges are removed outright
+    because they have no prose equivalent.
+
+    NOTE: add new ranges here whenever NotebookLM is found to choke on a new
+    character class — do not rely on "it looked fine last time" since the
+    backend parser changes without notice.
     """
-    content = re.sub(r"[\u2500-\u257F]", "-", content)  # box-drawing → dash
-    content = re.sub(r"[^\u0000-\uFFFF]", "", content)  # non-BMP emoji → removed
+    content = re.sub(r"[\u2500-\u259F]", "-", content)  # box-drawing + block elements → dash
+    content = re.sub(r"[\u2190-\u21FF]", "", content)    # arrows → removed
+    content = re.sub(r"[\u2600-\u27BF]", "", content)    # misc symbols + dingbats → removed
+    content = re.sub(r"[^\u0000-\uFFFF]", "", content)   # non-BMP emoji → removed
     return content
 
 

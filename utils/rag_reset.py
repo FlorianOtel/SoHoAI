@@ -44,8 +44,6 @@ def main() -> None:
     rag_cfg = config.get("rag", {})
     db_base = config.get("db_base_path", "/mnt/nfs/__Backups/HomeAI-lab--databases")
     db_path = f"{db_base}/sqlite/rag_state.db"
-    qdrant_path = f"{db_base}/qdrant"
-
     scope = f"owner={args.user}" if args.user else "ALL USERS"
     action = (
         f"Delete Qdrant points for {scope} and reset SQLite rows to 'pending'."
@@ -61,7 +59,7 @@ def main() -> None:
             sys.exit(0)
 
     state_db = StateDB(db_path)
-    qdrant = get_client(qdrant_path)
+    qdrant = get_client(rag_cfg.get("qdrant_url", "http://localhost:6333"))
     existing = {c.name for c in qdrant.get_collections().collections}
 
     if args.user:

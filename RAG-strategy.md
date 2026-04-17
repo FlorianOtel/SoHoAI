@@ -1,7 +1,7 @@
 ---
 title: "HomeAI-Lab — RAG Strategy"
 date: 2026-03-30
-last_updated: 2026-04-17
+last_updated: 2026-04-17 (Qdrant server mode, NFS persistence, snapshot DR)
 created_by: Florian Otel
 last_updated_by: Claude Code (Claude Sonnet 4.6)
 context: >
@@ -92,42 +92,59 @@ Other user directories not yet surveyed — ingestion will scan all configured r
 
 ## 3. Architecture decisions
 
-### 3.1 Embedding model — mxbai-embed-large via Ollama (confirmed 2026-04-08)
+### 3.1 Embedding model — bge-m3 via Ollama (updated 2026-04-17)
 
-**Model**: `mxbai-embed-large` — 1024 dimensions, 335M params, ~670MB on disk.
-Best MTEB accuracy of any Ollama-available model.
+**Model**: `bge-m3` — 1024 dimensions, 570M params, ~1.2GB on disk.
+Top MTEB retrieval scores; 8192-token context window.
 
 **Server**: Ollama on **Server 1** (192.168.1.93) CPU.
 
 **API**: `POST http://localhost:11434/api/embeddings`
-No batch endpoint — `embed_batch()` runs 8 concurrent requests via asyncio semaphore.
+No batch endpoint — `embed_batch()` runs 5 concurrent requests via asyncio semaphore.
 
 **Config keys**:
 ```yaml
-embedding_model: mxbai-embed-large
+embedding_model: bge-m3
 ollama_url: http://localhost:11434/api/embeddings
 ```
 
-**Query latency**: ~10ms (vs ~150ms with sentence-transformers on CPU).
-**Batch ingestion**: async background job.
+**Query latency**: ~650ms/chunk on Server 1 CPU.
+**Batch ingestion**: async background job (~9 hours estimated for full NFS corpus).
 
 **Why not Server 2?**
 Server 2's RTX 5070 has only ~576 MiB free VRAM at idle (llama-server uses 11,642/12,227 MiB).
 KV cache grows dynamically during active turns (up to ~4.1 GB for a full 53,248-token slot),
-so free headroom effectively drops to zero under load. No embedding model fits safely on Server 2.
+so free headroom effectively drops to zero under load. No embedding model fits alongside
+llama-server on Server 2. A two-phase approach (bulk ingest on Server 2, incremental on Server 1)
+is also unworkable: embedding model must be consistent between ingestion and real-time query
+embedding — mixing models corrupts Qdrant search results.
 
-**Why not `sentence-transformers` / `nomic-embed-text-v1.5`?**
-`nomic-embed-text-v1.5` is 768-dim with lower MTEB accuracy. `sentence-transformers` adds a Python
-dependency and runs slower on CPU (~150ms/query). Ollama manages the model lifecycle externally —
-no Python dep, ~10ms query latency.
+**Why not `mxbai-embed-large`?**
+`mxbai-embed-large` uses a BERT WordPiece tokenizer with a hard 512-token limit. Chunk sizes are
+measured in tiktoken (GPT BPE), which undercounts relative to BERT — especially for dense
+technical content (identifiers, URLs, code). A 250-tiktoken child chunk can easily exceed 512
+BERT tokens, causing Ollama to return 500 with `{"error":"the input length exceeds the context
+length"}`. Every retry on the same chunk fails identically. bge-m3's 8192-token context
+eliminates this class of error entirely.
+
+**Why not `qwen3-embedding:8b`?**
+Best MTEB scores and 40K context, but not viable for this setup:
+- Server 2 VRAM: llama-server (11.6GB) + qwen3 Q4 (5GB) = 16.6GB > 12GB RTX 5070
+- Server 1 CPU inference at 8B params: ~6–10s per embedding vs ~650ms for bge-m3 —
+  adds 6–10s to every RAG-enabled chat query, unacceptable for interactive use
+- Would require stopping llama-server for bulk ingestion (hours of system downtime)
+
+bge-m3 is the practical optimum: near-top MTEB quality, 8192-token context, fits all workloads.
 
 ---
 
-### 3.2 Vector database — Qdrant (confirmed 2026-03-30)
+### 3.2 Vector database — Qdrant (confirmed 2026-03-30, updated 2026-04-17)
 
-**Instance**: Qdrant running on Server 1, persistent local mode.
-**Storage path (NAS)**: `/mnt/nfs/__Backups/HomeAI-lab--databases/qdrant/`
-**Access**: gRPC + REST API via `qdrant-client` Python library (no LangChain wrapper).
+**Deployment**: Qdrant v1.17.1 native binary, systemd service on Server 1, port 6333.
+**Access**: REST API via `qdrant-client` Python library (`QdrantClient(url="http://192.168.1.93:6333")`).
+No LangChain wrapper.
+
+Config key: `rag.qdrant_url: "http://192.168.1.93:6333"` in `config.yaml`.
 
 **Why Qdrant?**
 Qdrant's payload system stores arbitrary JSON per vector point and returns it with every
@@ -150,25 +167,195 @@ Different embedding models per modality require separate collections:
 
 | Collection | Embedding model | Dimensions | Phase |
 |------------|----------------|------------|-------|
-| `documents` | mxbai-embed-large via Ollama | 1024 | 2 |
+| `documents` | bge-m3 via Ollama | 1024 | 2 |
 | `images` | CLIP (openai/clip-vit-base-patch32) | 512 | 4 |
 | `videos` | CLIP or frame-level embeddings | 512 | 4 |
 
 #### Storage size estimates
 
-- `documents` collection: ~30K–50K chunks × 1024-dim float32 ≈ ~200MB on NAS
-- `images` collection (Phase 4): ~9,600 CLIP vectors × 512-dim ≈ ~19MB on NAS
-- HNSW index (~500–800MB) fits entirely in Server 1 RAM (32GB) after first load —
-  NFS latency only affects cold start and segment flushes, not query time
+- `documents` collection: ~30K–50K chunks × 1024-dim float32 ≈ ~200MB vectors + ~500–800MB HNSW index
+- `images` collection (Phase 4): ~9,600 CLIP vectors × 512-dim ≈ ~19MB
+- HNSW index fits entirely in Server 1 RAM (32GB) after first load
 
 ---
 
-### 3.3 Document parsing — docling (confirmed)
+### 3.2.1 Qdrant persistence, NFS incompatibility, and snapshot DR
+
+#### Why Qdrant active storage cannot be on NFS
+
+Qdrant's server binary uses **RocksDB** as its storage engine. RocksDB relies on POSIX
+`fcntl` advisory locks (`F_SETLK`/`F_SETLKW`) for segment file management and compaction
+coordination. NFS does not reliably honor these locks:
+
+- NFS lock requests go through a separate `lockd`/`rpc.statd` daemon pair. Under network
+  partitions, lockd may grant the same advisory lock to two processes simultaneously.
+- Linux NFS clients do not implement mandatory locking — advisory locks are best-effort.
+- The result is silent data corruption: two processes can write to the same RocksDB segment
+  concurrently, producing an unrecoverable database.
+
+Qdrant v1.x detects this at startup: it checks the filesystem type of the configured
+`storage_path` and refuses to start if it is `nfs` or `nfs4`:
+
+```
+ERROR qdrant: Filesystem check failed for storage path ...
+Details: NFS may cause data corruption due to inconsistent file locking
+```
+
+**Active storage must be on local disk.** Current path: `/var/lib/qdrant/storage` (NVMe on Server 1).
+
+#### Why the previous Python embedded client did not warn
+
+Before 2026-04-17, code used `QdrantClient(path=...)` — the embedded/local mode of the
+Python `qdrant-client` library. This mode uses **SQLite** (not RocksDB) as its storage
+backend (observable as `collection/documents/storage.sqlite` on disk). SQLite implements its
+own coarse-grained WAL locking that tolerates NFS for single-writer scenarios. The Python
+client also enforces single-process access at the Python level, so there is never concurrent
+RocksDB-style contention.
+
+The consequence: `QdrantClient(path=...)` on NFS worked without error, but it prevents
+concurrent access — any second process trying to open the same path gets a Python-level
+`already accessed by another instance` exception. This was the original cause of the
+`watch -n 30 python utils/rag_status.py` failure.
+
+Switching to server mode (HTTP API) eliminates the concurrency problem and moves the
+NFS-incompatibility issue from silent risk to an explicit startup refusal.
+
+**Data format note:** The SQLite-based local-mode storage (`collection/`) is a completely
+different format from the RocksDB-based server storage (`collections/`). Existing data
+ingested under the Python embedded client cannot be read by the server binary — a full
+re-ingest is required when switching modes. The NFS directory
+`/mnt/nfs/__Backups/HomeAI-lab--databases/qdrant/` was cleared of old SQLite data after
+the migration and is intentionally left empty.
+
+#### Storage architecture
+
+```
+Server 1 (192.168.1.93)
+│
+├── /var/lib/qdrant/storage/        ← active RocksDB store (local NVMe)
+│     Active Qdrant data: vectors, HNSW index, payloads.
+│     RocksDB requires local POSIX locking — cannot be NFS.
+│
+└── /var/lib/qdrant/snapshots/      ← (unused; Qdrant creates this internally)
+
+NAS (NFS-mounted)
+│
+├── /mnt/nfs/__Backups/HomeAI-lab--databases/qdrant-snapshots/
+│     ├── documents/
+│     │     ├── documents-<id>-<timestamp>.snapshot      ← snapshot archive
+│     │     ├── documents-<id>-<timestamp>.snapshot.checksum
+│     │     └── ... (up to 3 kept)
+│     └── (future: images/, videos/ as Phase 4 collections are added)
+│
+└── /mnt/nfs/__Backups/HomeAI-lab--databases/qdrant/
+      (intentionally empty — not used for anything)
+```
+
+Snapshots are **passive archive files** (tar-like archives). Qdrant writes them atomically
+and includes a SHA256 `.checksum` file alongside each one. No RocksDB locking is involved
+during snapshot reads or writes — the NFS risk does not apply.
+
+#### Snapshot mechanism
+
+Snapshots are created via the Qdrant REST API:
+
+```
+POST http://192.168.1.93:6333/collections/documents/snapshots
+```
+
+Qdrant freezes writes to the collection, serialises the current segment state into a
+self-contained archive, and writes it to `snapshots_path/{collection_name}/`. The response
+includes the snapshot name and creation timestamp. The entire process is online — no service
+downtime required.
+
+The snapshot directory is configured in `scripts/qdrant/qdrant-config.yaml`:
+
+```yaml
+storage:
+  storage_path: /var/lib/qdrant/storage
+  snapshots_path: /mnt/nfs/__Backups/HomeAI-lab--databases/qdrant-snapshots
+```
+
+#### Snapshot frequency and retention
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Schedule | Daily at **03:00** (cron) | Low-activity window; ingestion daemon typically idle |
+| Retention | Last **3** snapshots kept | ~3 days of rollback; older ones deleted via API |
+| Script | `scripts/qdrant/qdrant-snapshot.sh` | Calls REST API, then prunes via API |
+| Log | `/var/log/qdrant-snapshot.log` | Check with `tail -f` or `grep -i error` |
+
+**Maximum data loss exposure**: up to 24 hours of ingested documents if the local NVMe
+fails between snapshots. During an active ingestion run (~9 hours for the full NFS corpus),
+taking a manual mid-run snapshot is advisable:
+
+```bash
+bash scripts/qdrant/qdrant-snapshot.sh
+```
+
+Once bulk ingestion is complete, new documents enter only via incremental re-scans
+(`rag_sync_nfs.py` detecting mtime changes), so daily snapshots provide adequate protection.
+
+#### Snapshot script logic (`scripts/qdrant/qdrant-snapshot.sh`)
+
+```
+1. POST /collections/documents/snapshots  → Qdrant creates archive on NFS
+2. GET  /collections/documents/snapshots  → list all snapshots, sorted by creation_time
+3. DELETE oldest snapshots beyond KEEP=3  → via DELETE /collections/.../snapshots/{name}
+```
+
+All API calls use plain `curl` + `python3` (stdlib only, no extra dependencies).
+Run manually: `bash scripts/qdrant/qdrant-snapshot.sh [--keep N]`
+
+#### Recovery procedure
+
+If Server 1 is rebuilt or `/var/lib/qdrant/storage` is lost:
+
+```bash
+# 1. Install Qdrant and start the service (empty storage)
+sudo systemctl start qdrant
+
+# 2. Identify the latest snapshot on NFS
+ls -lt /mnt/nfs/__Backups/HomeAI-lab--databases/qdrant-snapshots/documents/
+
+# 3. Restore via the API (Qdrant reads the file path directly)
+curl -X PUT "http://192.168.1.93:6333/collections/documents/snapshots/recover" \
+  -H "Content-Type: application/json" \
+  -d '{"location": "file:///mnt/nfs/__Backups/HomeAI-lab--databases/qdrant-snapshots/documents/<snapshot-name>.snapshot"}'
+
+# 4. Verify
+curl -s http://192.168.1.93:6333/collections/documents | python3 -m json.tool
+python utils/rag_status.py
+```
+
+After recovery, only documents ingested after the last snapshot are missing. Run
+`rag_sync_nfs.py` (scanner detects mtime-changed files → resets to `pending`) followed by
+`rag_ingest_daemon.py` to re-ingest the gap.
+
+---
+
+### 3.3 Document parsing — docling + dedicated ipynb parser (updated 2026-04-17)
 
 **Library**: `docling` — replaces `unstructured`.
 
-Supported file types: PDF, PPTX, DOCX, TXT, Markdown, Jupyter notebooks (`.ipynb`), YAML/config.
-XLSX not directly supported by docling — treat as flat text or skip for now.
+Supported file types via docling: PDF, PPTX, DOCX.
+Text formats (TXT, MD, YAML, CSV): direct UTF-8 read.
+XLSX: not supported by docling — treated as flat text.
+
+**Jupyter notebooks (`.ipynb`) — dedicated parser, NOT docling.**
+docling does not support `.ipynb`. When given an ipynb file it logs an ERROR and the fallback
+was a raw UTF-8 read of the notebook file — which reads the notebook's raw JSON structure
+(`{"cell_type": "code", "source": [...]}`) as plain text. This is garbage for RAG: chunks
+contain JSON keys and array syntax rather than the actual content.
+
+Fix: `_parse_ipynb()` in `ingest.py` parses the notebook JSON directly:
+- Markdown cells → extracted as prose
+- Code cells → extracted as fenced ` ```python ``` ` blocks
+- Cell outputs ignored (only source matters for retrieval)
+- Empty cells skipped
+- Falls back to raw read only if the file is not valid JSON
+
+`ipynb` removed from `_DOCLING_TYPES`; the ERROR log from docling is eliminated entirely.
 
 ---
 
@@ -457,11 +644,12 @@ To prevent the Qdrant database from serving partial context during active buildi
    window where the file has zero results is acceptable for a home lab.
 1. **Lock State:** Fetch one `pending` file path from SQLite and immediately update to
    `processing`; set `started_at` and `progress_detail = "starting"`.
-2. **Extract & Parse:** Pass the file to `docling` to extract raw text and layout.
+2. **Extract & Parse:** Pass the file to the appropriate parser: docling (PDF/DOCX/PPTX),
+   `_parse_ipynb()` (ipynb), or direct UTF-8 read (MD/TXT/YAML/CSV).
    Update `progress_detail = "parsing"`.
 3. **Generate Chunks:** Execute parent-child split logic (or flat 512-token chunks) entirely
    in memory. Update `progress_detail = "chunking ({n} chunks)"`.
-4. **Vectorize:** Send child chunks to `mxbai-embed-large` via Ollama using 8-concurrent
+4. **Vectorize:** Send child chunks to `bge-m3` via Ollama using 5-concurrent
    `asyncio` batching. Update `progress_detail = "embedding {i}/{n}"` periodically.
 5. **Build Payloads:** Construct Qdrant point objects, binding the vector, UUID, and payload
    (`source_path`, `parent_text`, `owner` from SQLite row). All field names imported from

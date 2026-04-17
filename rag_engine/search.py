@@ -61,7 +61,7 @@ async def search_rag(
           file_name    — filename for display
           file_type    — pdf | md | ipynb | etc.
     """
-    model      = rag_cfg.get("embedding_model", "mxbai-embed-large")
+    model      = rag_cfg.get("embedding_model", "bge-m3")
     ollama_url = rag_cfg.get("ollama_url", "http://localhost:11434/api/embeddings")
 
     # -- 1. Embed the query ------------------------------------------------
