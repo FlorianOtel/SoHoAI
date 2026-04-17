@@ -1,0 +1,174 @@
+# Florian--NAS.ignore
+#
+# Directories to exclude from RAG ingestion / file search under /mnt/nfs/Florian
+# Patterns are relative to the NFS root (/mnt/nfs/Florian/).
+# One pattern per line; shell-glob wildcards supported.
+# Lines starting with # are comments.
+#
+# Symlink map (for reference):
+#   AWS--fotel        -> /mnt/nfs/__Backups/AWS--MacBookPro/fotel      (MacBook home backup)
+#   GitLab--fotel     -> /mnt/nfs/__Backups/GitLab--MacBookPro-M3/fotel (MacBook home backup)
+#   Microsoft--flotel -> /mnt/nfs/__Backups/Microsoft-flotel--20190617--last/flotel (2019 MacBook backup)
+#   Dropbox           -> /mnt/nfs/__Backups/Dropbox
+#   Gin-AI/LLMs-cache -> /mnt/nfs/Temp/Gin-AI--cache/LLMs-cache
+#   Gin-AI/certifications--training -> certifications--training/__private/Gin-AI (included via real path)
+
+
+# ── Synology NAS metadata ─────────────────────────────────────────────────────
+# Synology thumbnail / extended-attribute sidecar directories — pure NAS housekeeping
+@eaDir
+# Synology extended-attribute stream files
+@SynoEAStream
+# Synology temp directory
+@tmp
+
+
+# ── macOS Library (application data) ─────────────────────────────────────────
+# macOS user Library — contains app caches, keychains, preferences, sandboxed app containers
+# Present in all MacBook home directory backups (AWS--fotel, GitLab--fotel, Microsoft--flotel)
+*/Library
+Library
+
+
+# ── macOS system junk ─────────────────────────────────────────────────────────
+# Trash folders from macOS backups
+.Trash
+# macOS ZIP artifact directory created when unzipping on macOS
+__MACOSX
+# macOS Finder metadata — binary, not a document
+.DS_Store
+# macOS printer spool artifact
+.PrintScout
+# macOS browser lock artifact
+.BrowserLock
+
+
+# ── macOS Applications bundles ────────────────────────────────────────────────
+# App bundles are binary executables, not searchable documents
+Applications
+# Chrome/Edge PWA app stubs inside Applications/
+Applications/Chrome Apps.localized
+Applications/Edge Apps.localized
+
+
+# ── Python virtual environments ───────────────────────────────────────────────
+# uv / venv environments — thousands of small Python files, no RAG value
+.venv
+.Gin-AI-python-3.12
+# Conda environments
+.conda
+# Python bytecode cache
+__pycache__
+# pip wheel cache
+.cache/pip
+
+
+# ── Python / ML tool caches ───────────────────────────────────────────────────
+# uv package cache — downloaded wheel artifacts
+.cache/uv
+# PyTorch model cache (HuggingFace hub downloads, tokenizers, etc.)
+.cache/torch
+.cache/huggingface
+# Matplotlib font/figure cache
+.matplotlib
+# IPython / Jupyter runtime state (not notebooks — notebooks live in project dirs)
+.ipython
+
+
+# ── LLM model binaries ────────────────────────────────────────────────────────
+# Large binary GGUF / safetensors model files — not text, not indexable
+# Resolves to /mnt/nfs/Temp/Gin-AI--cache/LLMs-cache
+Gin-AI/LLMs-cache
+
+
+# ── AI tool session / telemetry data ─────────────────────────────────────────
+# Claude Code session files, telemetry, caches — internal tool state
+.claude
+# Amazon Q / AWS AI assistant session data
+.amazon-q
+.amazon-q.dotfiles.bak
+.amazonq
+# AWS Midway token cache (SSO auth)
+.midway
+
+
+# ── IDE and editor data ───────────────────────────────────────────────────────
+# VS Code extension binaries and extension marketplace data
+.vscode
+# Emacs compiled package cache and auto-save/backup files
+.emacs.d
+
+
+# ── Version control internals ─────────────────────────────────────────────────
+# Git object store — binary, not documents
+.git
+# git-defender audit data
+.git-defender
+
+
+# ── Home AI ChatBot runtime / generated data ─────────────────────────────────
+# SQLite chat database — runtime data, not source documents
+Gin-AI/projects/Home-AI-ChatBot/db_cache
+# Redis AOF persistence files
+Gin-AI/projects/Home-AI-ChatBot/redis
+# Qdrant vector store data files — binary index, not source documents
+Gin-AI/projects/Home-AI-ChatBot/qdrant
+# llama-server KV cache slot files — binary GPU state dumps
+Gin-AI/LLMs-cache/llama-server/k-v--caches
+# RL training JSONL exports — derived from chats, not source docs
+Gin-AI/projects/Home-AI-ChatBot/rl-data
+# Markdown chat exports — derived from chats
+Gin-AI/projects/Home-AI-ChatBot/exports
+# Temporary Gin-AI scratch directory
+Gin-AI/tmp
+
+
+# ── Credentials and private keys ─────────────────────────────────────────────
+# SSH private keys — never index
+.ssh
+# AWS credential files (access keys) — never index
+.aws
+# VNC viewer credential store
+.vnc
+
+
+# ── Dropbox daemon metadata ───────────────────────────────────────────────────
+# Dropbox internal state, crash reports, event logs — not documents
+.dropbox
+
+
+# ── Cisco VPN scan data ───────────────────────────────────────────────────────
+# Cisco AnyConnect host scan artifacts — binary compliance scan state
+.cisco/hostscan
+
+
+# ── WorkDocs desktop client ───────────────────────────────────────────────────
+# AWS WorkDocs sync daemon logs and metrics
+.workdocs-drive
+
+
+# ── Shell session history ─────────────────────────────────────────────────────
+# macOS per-session bash history blobs
+.bash_sessions
+# macOS per-session zsh history blobs
+.zsh_sessions
+
+
+# ── Go toolchain build artifacts ─────────────────────────────────────────────
+# Compiled Go binaries and module download cache
+go/pkg
+go/bin
+
+
+# ── Emacs package cache ───────────────────────────────────────────────────────
+# Emacs Lisp native-compiled cache (.eln files)
+.emacs.d/eln-cache
+# ELPA package archives (downloaded Emacs packages)
+.emacs.d/elpa
+
+
+# ── Jupyter / Arize Phoenix runtime state ────────────────────────────────────
+# Arize Phoenix traces DB (LangSmith-alternative observability)
+Gin-AI/tools/00--Arize-Phoenix
+# LangSmith trace exports
+Gin-AI/tools/langsmith-traces

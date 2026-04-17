@@ -13,6 +13,12 @@ uv.lock
 # Local settings
 .env
 
+# Browser session cookies (contain auth tokens — never commit)
+utils/notebooklm_session.json
+
+# Generated snapshot (large auto-generated file)
+utils/codebase_snapshot.md
+
 # VScode
 .vscode/
 

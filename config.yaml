@@ -1,0 +1,111 @@
+# =============================================================================
+# HomeAI-Lab Configuration
+# =============================================================================
+
+# -- Network ------------------------------------------------------------------
+server1_ip: &server1_ip "192.168.1.93"
+server2_ip: &server2_ip "192.168.1.95"
+
+# -- Storage (NAS mount point) ------------------------------------------------
+nas_mount: "/mnt/nfs/Florian/Gin-AI/projects/HomeAI-Lab"
+# Change db_base_path to relocate all databases in one place.
+# Python derives: {db_base_path}/sqlite/chats.db, {db_base_path}/sqlite/rag_state.db, {db_base_path}/qdrant/, {db_base_path}/redis/
+# Note: redis.dir below must be updated manually if db_base_path changes (not auto-derived in Python).
+db_base_path: "/mnt/nfs/__Backups/HomeAI-lab--databases"
+rl_export_dir: "/mnt/nfs/Florian/Gin-AI/projects/HomeAI-Lab/rl-data"
+
+# -- Redis (conversation short-term memory) ------------------------------------
+redis:
+  host: "127.0.0.1"  # Localhost - orchestrator and Redis on same server. (!!!) Neeed to specify localhost since redis is in protected mode. 
+  port: 6379
+  db: 0
+  # Persist to NAS for reboot survival
+  appendonly: true
+  dir: "/mnt/nfs/__Backups/HomeAI-lab--databases/redis"
+  default_ttl_seconds: 86400  # 24 hours
+
+# -- LiteLLM Model Routing ----------------------------------------------------
+# Fallback order: specialist (GPU Server 2) → external (cloud)
+model_list:
+  # --- Primary: GPU inference on Server 2 ---
+  - model_name: specialist
+    litellm_params:
+      model: openai/mistral-nemo
+      api_base: "http://${server2_ip}:8000/v1"
+      api_key: "dummy-key"
+    model_info:
+      id: "specialist-llama-server"
+      description: "Mistral Nemo 12B Q4 on RTX 5070 via llama-server"
+
+  # --- Fallback: Cloud API ---
+  - model_name: external
+    litellm_params:
+      model: anthropic/claude-sonnet-4-20250514
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      id: "external-claude"
+      description: "Claude Sonnet via Anthropic API (fallback / complex tasks)"
+
+  # --- Embedding model on Server 1 (CPU) for RAG ---
+  # Note: Embeddings run via Ollama HTTP (mxbai-embed-large), not LiteLLM.
+  # See rag: section below and rag_engine/ for implementation.
+
+# -- Routing Policy ------------------------------------------------------------
+routing:
+  default_model: "specialist"
+  fallback_chain: ["specialist", "external"]
+  # Route to cloud when context exceeds threshold.
+  # Hard limit: --ctx-size 53248 (~52K tokens). At 50K we route to cloud,
+  # leaving ~2K headroom for the output (default max_tokens=1024 + safety margin).
+  complexity_threshold_tokens: 50000
+  cloud_model: "external"
+
+# -- RAG Settings (Phase 2) ---------------------------------------------------
+rag:
+  embedding_model: "mxbai-embed-large"           # 1024-dim, served by Ollama on Server 1
+  ollama_url: "http://localhost:11434/api/embeddings"
+  top_k: 5
+  # Parent-child chunking (see RAG-strategy.md §3.4):
+  #   child: 200-300 tokens (embedded), parent: 800-1200 tokens (returned to LLM)
+  #   Flat 512-token for PPTX / short TXT / YAML / config files
+  qdrant_collection: "documents"
+  # rag_state_db and qdrant_path are derived from db_base_path in Python
+
+# -- Multi-user NFS roots (maps Google email → owner + NFS paths) -------------
+users:
+  florian.otel@gmail.com:
+    owner: "florian"
+    nfs_roots: ["/mnt/nfs/Florian"]
+  # eva.otel@gmail.com
+  #   owner: "eva"
+  #   nfs_roots: ["/mnt/nfs/Eva"]
+  # annika@example.com:
+  #   owner: "annika"
+  #   nfs_roots: ["/mnt/nfs/Annika"]
+  # laura@example.com:
+  #   owner: "laura"
+  #   nfs_roots: ["/mnt/nfs/Laura"]
+shared:
+  owner: "la-familia"
+  nfs_roots: ["/mnt/nfs/La-Familia"]
+
+# -- llama-server native API (KV cache slot management) -----------------------
+llama_server:
+  base_url: "http://${server2_ip}:8000"
+  # Must match --slot-save-path passed to llama-server on Server 2
+  slot_save_path: "/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v--caches/"
+  # Number of parallel slots (must match --parallel N on llama-server).
+  # VRAM cost: ~400 MB per additional slot at q8_0 / 53248 ctx.
+  num_slots: 1
+  timeout_seconds: 120
+
+# -- Chat Persistence ----------------------------------------------------------
+chat:
+  max_turns_in_context: 50
+  export_format: "markdown"  # markdown | jsonl
+  # Rolling summarization: when total Redis context size exceeds threshold,
+  # summarize older turns and keep only the most recent N turns verbatim.
+  # ~200K chars ≈ 50K tokens (4 chars/token). Hard limit is 53248 tokens;
+  # 50K input + 1024 output = ~51K, leaving ~2K safety margin.
+  summarize_threshold_chars: 200000
+  summarize_keep_turns: 20

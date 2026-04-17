@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(claude --resume 5bf9752b-f631-42ec-a796-7c45c888bccf)"
+    ]
+  }
+}

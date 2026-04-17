@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__gin-ai-files__list_directory",
+      "mcp__gin-ai-files__get_file_info",
+      "mcp__gin-ai-files__read_file",
+      "mcp__context-bridge__list_contexts",
+      "mcp__context-bridge__get_context",
+      "mcp__gin-ai-files__search_files",
+      "Bash(python3:*)",
+      "Bash(google-chrome:*)",
+      "Bash(pip show:*)",
+      "Bash(source:*)",
+      "Bash(echo \"DISPLAY=$DISPLAY\")",
+      "Read(//tmp/**)",
+      "Bash(xdpyinfo)",
+      "Bash(echo DISPLAY=$DISPLAY:*)",
+      "Bash(python -c \"import schemas; print\\('schemas OK'\\)\" && python -c \"import ast; ast.parse\\(open\\('main.py'\\).read\\(\\)\\); print\\('main.py syntax OK'\\)\")",
+      "Bash(source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate && python -c \"import schemas; print\\('schemas OK'\\)\" && python -c \"import ast; ast.parse\\(open\\('main.py'\\).read\\(\\)\\); print\\('main.py syntax OK'\\)\")",
+      "Bash(source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate && python -c \"\nimport ast, sys\nfor f in ['main.py', 'schemas.py', 'router.py', 'conversation.py', 'kv_cache.py', 'chat_store.py', 'rag.py', 'mcp_gateway.py']:\n    ast.parse\\(open\\(f\\).read\\(\\)\\)\n    print\\(f'{f} syntax OK'\\)\n\")",
+      "Bash(source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate && python -c \"import ast, sys; ast.parse\\(open\\('main.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate && python -c \"\nimport yaml\nwith open\\('config.yaml'\\) as f:\n    cfg = yaml.safe_load\\(f\\)\nllama = cfg['llama_server']\nprint\\('num_slots:', llama['num_slots']\\)\nprint\\('owui_cache_ttl_days:', llama['owui_cache_ttl_days']\\)\nprint\\('config OK'\\)\n\")",
+      "Bash(source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate && python -c \"\nimport ast\nfor f in ['main.py', 'schemas.py', 'kv_cache.py', 'conversation.py']:\n    ast.parse\\(open\\(f\\).read\\(\\)\\)\n    print\\(f'{f}: OK'\\)\n\")",
+      "Bash(claude mcp:*)",
+      "Bash(mv gin_ai_files_mcp_server.py nfs_files_mcp_server.py)",
+      "Bash(mv gin_ai_files_mcp_server.sh nfs_files_mcp_server.sh)",
+      "Bash(mv /home/florian/Gin-AI/projects/HomeAI-Lab/.amazonq/rules/Home-AI-Chatbot.md /home/florian/Gin-AI/projects/HomeAI-Lab/.amazonq/rules/HomeAI-Lab.md)",
+      "Bash(sed -i -e 's|Home-AI-Chatbot|HomeAI-Lab|g' -e 's|Home-AI-ChatBot|HomeAI-Lab|g' -e 's|/home/florian/Gin-AI/projects/Home-AI-ChatBot|/home/florian/Gin-AI/projects/HomeAI-Lab|g' /home/florian/Gin-AI/projects/HomeAI-Lab/.amazonq/rules/HomeAI-Lab.md)",
+      "Bash(cp:*)",
+      "Bash(grep -iE '\\\\.\\(docx|pptx|xlsx|pst|eml|msg\\)$')",
+      "Bash(ls -la /mnt/nfs/Florian/Gin-AI/projects/HomeAI-Lab/utils/codebase_snapshot*.md /mnt/nfs/Florian/Gin-AI/projects/HomeAI-Lab/utils/nfs_files_mcp_server.txt)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "gin-ai-files"
+  ]
+}

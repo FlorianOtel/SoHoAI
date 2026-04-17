@@ -1,0 +1,47 @@
+"""
+Qdrant collection configuration — single source of truth.
+
+All code that creates, opens, or queries the documents collection imports
+constants and helpers from here. No collection names, vector dimensions,
+or distance metrics are hardcoded anywhere else.
+"""
+
+from __future__ import annotations
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams
+
+# ---------------------------------------------------------------------------
+# Collection constants
+# ---------------------------------------------------------------------------
+
+DOCUMENTS_COLLECTION = "documents"
+VECTOR_SIZE = 1024          # mxbai-embed-large output dimension
+DISTANCE = Distance.COSINE
+
+
+# ---------------------------------------------------------------------------
+# Client factory
+# ---------------------------------------------------------------------------
+
+def get_client(qdrant_path: str) -> QdrantClient:
+    """Open a Qdrant client in local persistent mode (data stored on NAS)."""
+    return QdrantClient(path=qdrant_path)
+
+
+# ---------------------------------------------------------------------------
+# Collection lifecycle
+# ---------------------------------------------------------------------------
+
+def ensure_collection(client: QdrantClient) -> None:
+    """
+    Create the documents collection if it does not already exist.
+
+    Safe to call on every startup — no-op when the collection is already present.
+    """
+    existing = {c.name for c in client.get_collections().collections}
+    if DOCUMENTS_COLLECTION not in existing:
+        client.create_collection(
+            collection_name=DOCUMENTS_COLLECTION,
+            vectors_config=VectorParams(size=VECTOR_SIZE, distance=DISTANCE),
+        )

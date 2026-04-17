@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+     "nfs-files": {
+        "type": "http",
+        "url": "http://192.168.1.93:3001/mcp"
+      }
+   }
+}

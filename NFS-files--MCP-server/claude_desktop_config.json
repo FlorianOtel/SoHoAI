@@ -1,0 +1,18 @@
+{
+  "preferences": {
+    "coworkWebSearchEnabled": true,
+    "sidebarMode": "task",
+    "coworkScheduledTasksEnabled": true
+  },
+  "mcpServers": {
+    "NFS-files": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://192.168.1.93:3001/mcp",
+        "--allow-http"
+      ]
+    }
+  }
+}
