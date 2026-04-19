@@ -23,7 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml  # noqa: E402  (after sys.path fix)
 
+from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
+
+from rag_engine.collection import DOCUMENTS_COLLECTION, get_client
 from rag_engine.scanner import scan_nfs_roots
+from rag_engine.schema import FIELD_SOURCE_PATH
 from rag_engine.state import StateDB
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -43,6 +47,26 @@ def main() -> None:
     state_db = StateDB(db_path)
 
     result = scan_nfs_roots(state_db, config, user_filter=args.user)
+
+    deleted_paths = result.get("deleted_paths", [])
+    if deleted_paths:
+        qdrant_url = config.get("rag", {}).get("qdrant_url", "http://localhost:6333")
+        qdrant_client = get_client(qdrant_url)
+        for path in deleted_paths:
+            qdrant_client.delete(
+                collection_name=DOCUMENTS_COLLECTION,
+                points_selector=FilterSelector(
+                    filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key=FIELD_SOURCE_PATH,
+                                match=MatchValue(value=path),
+                            )
+                        ]
+                    )
+                ),
+            )
+        logger.info("Deleted Qdrant points for %d removed file(s)", len(deleted_paths))
 
     counts = state_db.get_counts()
     print()

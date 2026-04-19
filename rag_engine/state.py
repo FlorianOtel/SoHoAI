@@ -118,27 +118,31 @@ class StateDB:
 
     def handle_deleted(self, existing_paths: set[str]) -> list[str]:
         """
-        Identify completed rows whose files no longer exist on disk.
+        Remove rows for files that are no longer present in the scan.
 
-        Removes those rows from SQLite and returns their file paths so the
-        caller can delete the corresponding Qdrant points.
+        Deletes ALL rows (any status) whose file_path is absent from
+        existing_paths. Returns only the paths that were 'completed' so
+        the caller can delete the corresponding Qdrant points (only
+        completed files have been ingested into Qdrant).
 
         Args:
             existing_paths: Set of all file paths currently present on NFS.
         """
         cur = self._conn.execute(
-            "SELECT file_path FROM ingestion_queue WHERE status = 'completed'"
+            "SELECT file_path, status FROM ingestion_queue"
         )
-        completed = [row["file_path"] for row in cur.fetchall()]
-        deleted = [p for p in completed if p not in existing_paths]
-        if deleted:
-            self._conn.executemany(
-                "DELETE FROM ingestion_queue WHERE file_path = ?",
-                [(p,) for p in deleted],
-            )
-            self._conn.commit()
-            logger.info("Removed %d deleted file(s) from queue", len(deleted))
-        return deleted
+        all_rows = [(row["file_path"], row["status"]) for row in cur.fetchall()]
+        gone = [(p, s) for p, s in all_rows if p not in existing_paths]
+        if not gone:
+            return []
+        gone_paths = [p for p, _ in gone]
+        self._conn.executemany(
+            "DELETE FROM ingestion_queue WHERE file_path = ?",
+            [(p,) for p in gone_paths],
+        )
+        self._conn.commit()
+        logger.info("Removed %d deleted file(s) from queue", len(gone_paths))
+        return [p for p, s in gone if s == "completed"]
 
     # ------------------------------------------------------------------
     # Worker state transitions

@@ -1,7 +1,7 @@
 ---
 title: "HomeAI-Lab — RAG Strategy"
 date: 2026-03-30
-last_updated: 2026-04-17 (Qdrant server mode, NFS persistence, snapshot DR)
+last_updated: 2026-04-19 (incremental sync deletes from Qdrant; exclusion filters moved to config.yaml)
 created_by: Florian Otel
 last_updated_by: Claude Code (Claude Sonnet 4.6)
 context: >
@@ -9,7 +9,8 @@ context: >
   RAG pipeline design: embedding model, vector DB, chunking strategy,
   NFS corpus survey, Qdrant payload schema, multi-tenancy (Google OAuth2),
   rag_engine/ package layout, fail-safe ingestion (crash recovery, retry,
-  delete-before-insert idempotency), Phase 2 implementation plan
+  delete-before-insert idempotency), incremental sync (additions + deletions),
+  Phase 2 implementation plan, ingestion runbook
 ---
 
 # RAG Strategy — HomeAI-Lab
@@ -57,14 +58,41 @@ Other user directories not yet surveyed — ingestion will scan all configured r
     `certifications--training` directory (may overlap with employer backups)
   - Other users (Eva, Annika, Laura): not yet surveyed — to be scanned at ingestion time
 
-### 1.2 Exclusion filters (applied at ingestion time)
+### 1.2 Exclusion filters
 
-| Filter | Reason |
-|--------|--------|
-| `*/Gin-AI/.Gin-AI-python-3.12/**` | Python virtualenv (~46K `.py`, 37K `.pyc`, 15K `.h`/`.hpp`) |
-| `**/*.pyc`, `**/*.so`, `**/*.mo` | Compiled artifacts |
-| `**/*@synoeastream` | Synology NAS streaming metadata |
-| `**/*.dist-info/**` | Package metadata |
+Exclusion filters are configured in `config.yaml` under `rag.scanner` (required — no
+hardcoded fallback). `rag_engine/scanner.py` validates all four keys at startup and
+raises `ValueError` immediately if any are missing.
+
+```yaml
+rag:
+  scanner:
+    include_extensions:      # file extension whitelist
+      - .pdf
+      - .pptx
+      - .docx
+      - .md
+      - .txt
+      - .csv
+      - .yaml
+      - .yml
+      - .ipynb
+
+    exclude_dir_names:       # directory names os.walk will not descend into
+      - .Gin-AI-python-3.12  # Python virtualenv
+      - __pycache__
+      - .git
+      - node_modules
+
+    exclude_dir_suffixes:    # directory name suffixes (matched with str.endswith)
+      - .dist-info           # pip package metadata
+
+    exclude_file_patterns:   # filename substrings — any match → file skipped
+      - "@synoeastream"      # Synology NAS streaming metadata
+```
+
+To add or remove an exclusion, edit `config.yaml` and re-run `rag_sync_nfs.py`.
+No code change is required.
 
 ---
 
@@ -101,6 +129,11 @@ Top MTEB retrieval scores; 8192-token context window.
 
 **API**: `POST http://localhost:11434/api/embeddings`
 No batch endpoint — `embed_batch()` runs 5 concurrent requests via asyncio semaphore.
+`embed_batch()` accepts an optional `progress_cb(done, total)` callback fired every
+`_PROGRESS_INTERVAL` (50) completions and on the final chunk. `ingest.py` wires this
+to `logger.info("Embedding progress: %d/%d  %s", done, total, file_name)` so that
+`rag_status.py --watch` can parse the timestamps and compute a real-time chunk rate
+and ETA for the current file.
 
 **Config keys**:
 ```yaml
@@ -108,7 +141,12 @@ embedding_model: bge-m3
 ollama_url: http://localhost:11434/api/embeddings
 ```
 
-**Query latency**: ~650ms/chunk on Server 1 CPU.
+**Query latency**: ~650ms/chunk unloaded; up to ~28–30s under full ingestion load.
+Ollama serializes model computation — when the ingestion daemon is running at full
+concurrency (5), search queries queue behind the batch. The `embed_text()` HTTP timeout
+is **120s** to survive this wait. Do not reduce below 60s while the ingest daemon may
+be running.
+
 **Batch ingestion**: async background job (~9 hours estimated for full NFS corpus).
 
 **Why not Server 2?**
@@ -542,7 +580,9 @@ Google OAuth requires internet. For a home lab this means:
 | Add `POST /v1/rag/ingest/*` endpoints with user scoping | ✅ done (2026-04-16) |
 | Add `db_base_path` global config variable | ✅ done (2026-04-16) |
 | Configure `users:` section in `config.yaml` with real Google emails | ✅ done (2026-04-17) — `florian.otel@gmail.com` active; others commented out |
-| Run initial NFS scan + data ingestion | ⏳ pending — see `RAG-ingestion-process.md` |
+| Move exclusion filters to config.yaml (`rag.scanner` subsection) | ✅ done (2026-04-19) |
+| Incremental sync deletes orphaned Qdrant points (not just SQLite rows) | ✅ done (2026-04-19) |
+| Run initial NFS scan + data ingestion | ⏳ in progress — see §5 |
 | Implement Google OAuth2 middleware (Phase 3, not blocking for RAG) | ⏳ Phase 3 |
 
 ### 4.2 Decoupled RAG Pipeline Architecture
@@ -622,15 +662,23 @@ On daemon startup, before entering the worker loop:
 
 This prevents files from being permanently stuck in `processing` after a crash, OOM, or NFS timeout.
 
-#### Discovery function
+#### Discovery function — incremental sync handles additions AND deletions
 
-Scans all configured NFS roots (per-user + shared), applies exclusion filters, derives `owner`
-from path prefix via `schema.py:derive_owner()`, and:
-- **New files:** inserts as `pending`
-- **Modified files:** if `os.path.getmtime()` > stored `last_modified`, resets to `pending`
+`scan_nfs_roots()` (called by `rag_sync_nfs.py` and `POST /v1/rag/ingest/sync`) performs a
+full incremental reconciliation on every run:
+
+- **New files:** inserted as `pending`
+- **Modified files:** if `os.path.getmtime()` > stored `last_modified`, reset to `pending`
   (the worker loop handles Qdrant cleanup before re-ingestion — see §4.4 step 0)
-- **Deleted files:** if a `completed` file no longer exists on disk, marks for Qdrant point
-  deletion (filter by `source_path`) and removes the SQLite row
+- **Deleted or excluded files:** if a previously `completed` file no longer appears in the
+  scan results — whether because it was physically deleted from NFS, or because it is now
+  matched by an exclusion filter in `config.yaml` — its SQLite row is removed **and** all
+  corresponding Qdrant points are deleted immediately, filtered by `source_path`.
+
+The third case covers the config-driven exclusion scenario: adding a new pattern to
+`rag.scanner.exclude_dir_names`, `exclude_dir_suffixes`, or `exclude_file_patterns` and
+re-running `rag_sync_nfs.py` is sufficient to remove previously ingested content from the
+vector store. No manual Qdrant cleanup is needed.
 
 ### 4.4 Atomic Document Embedding (Worker Loop)
 
@@ -651,6 +699,8 @@ To prevent the Qdrant database from serving partial context during active buildi
    in memory. Update `progress_detail = "chunking ({n} chunks)"`.
 4. **Vectorize:** Send child chunks to `bge-m3` via Ollama using 5-concurrent
    `asyncio` batching. Update `progress_detail = "embedding {i}/{n}"` periodically.
+   `embed_batch()` fires `progress_cb` every 50 chunks, which logs
+   `"Embedding progress: N/M  filename"` — consumed by `rag_status.py --watch`.
 5. **Build Payloads:** Construct Qdrant point objects, binding the vector, UUID, and payload
    (`source_path`, `parent_text`, `owner` from SQLite row). All field names imported from
    `rag_engine/schema.py` constants — no string literals.
@@ -672,9 +722,9 @@ chunking changes produce a different number of chunks.
 ### 4.5 Standalone Utilities (`utils/`)
 
 Standalone CLI scripts enable independent progress monitoring and RAG pipeline management without launching the FastAPI server:
-* `utils/rag_sync_nfs.py`: Scans all configured NFS roots (per-user + shared), derives `owner` per file, applies filters, and populates SQLite with `pending` files. Accepts `--user florian` to scan a single user's root only.
+* `utils/rag_sync_nfs.py`: Scans all configured NFS roots (per-user + shared), derives `owner` per file, applies filters from `config.yaml`, and populates SQLite with `pending` files. For previously ingested files that are no longer found (deleted from NFS or newly excluded by config), removes the SQLite row and deletes the corresponding Qdrant points. Accepts `--user florian` to scan a single user's root only.
 * `utils/rag_ingest_daemon.py`: The worker loop executing the 7-step atomic embedding process (includes `owner` in every Qdrant payload).
-* `utils/rag_status.py`: Dashboard querying SQLite/Qdrant to output ingestion metrics (`pending`, `completed`, `failed`). Accepts `--user` to filter by owner.
+* `utils/rag_status.py`: Dashboard querying SQLite/Qdrant to output ingestion metrics (`pending`, `completed`, `failed`). Accepts `--user` to filter by owner. `--watch LOG_FILE` mode: refreshes every 2s, shows per-file chunk progress bar, elapsed time, chunk rate, and ETA (absolute clock + remaining duration) derived from log timestamps.
 * `utils/rag_search_cli.py`: Query tester returning `parent_text` and cosine similarity scores. Requires `--user` flag to apply the ownership filter (simulates authenticated search).
 * `utils/rag_reset.py`: Drops the Qdrant collection and resets SQLite to `pending` for clean re-ingestion. Accepts `--user` to reset a single user's documents only.
 
@@ -684,16 +734,312 @@ The FastAPI orchestrator exposes the SQLite tracker state for client interfaces.
 All endpoints require an authenticated user (Google OAuth2 JWT). Ingestion endpoints
 are admin-only (Florian); search is scoped to the authenticated user's `owner` + `"la-familia"`.
 
-* `POST /v1/rag/ingest/sync`: Triggers the NFS scanner across all configured roots.
+* `POST /v1/rag/ingest/sync`: Triggers the NFS scanner across all configured roots. As with `rag_sync_nfs.py`, removes SQLite rows and deletes Qdrant points for any previously ingested files that are no longer present or are now excluded by config.
 * `POST /v1/rag/ingest/start`: Spawns the ingestion daemon as an asyncio background task.
 * `POST /v1/rag/ingest/stop`: Gracefully halts the ingestion worker.
 * `GET /v1/rag/ingest/status`: Returns metrics (`total_files`, `progress_percentage`, etc.) based on SQLite rows. Accepts optional `?user=florian` filter.
 
+---
 
+## 5. Ingestion runbook
+
+This section covers how to populate the Qdrant vector store with documents from the NFS
+corpus, and how to keep it up to date. All commands are run on **Server 1 (192.168.1.93)**
+from the project root.
+
+### 5.1 Prerequisites
+
+#### Activate the virtualenv
+
+```bash
+source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
+cd ~/Gin-AI/projects/HomeAI-Lab
+```
+
+#### Verify Ollama is running with bge-m3
+
+```bash
+ollama list | grep bge-m3
+```
+
+Expected: `bge-m3:latest`. If missing:
+
+```bash
+ollama pull bge-m3
+```
+
+#### Verify Qdrant is running
+
+```bash
+curl -s http://localhost:6333/collections
+# Expected: {"result":{"collections":[...]},"status":"ok",...}
+```
+
+If not running: `sudo systemctl start qdrant`
+
+#### Verify database directories exist on NAS
+
+```bash
+ls /mnt/nfs/__Backups/HomeAI-lab--databases/
+# Expected: qdrant-snapshots/  sqlite/  redis/
+```
+
+All directories must exist and be writable. They are all under `db_base_path` in
+`config.yaml` — change that single key to relocate everything (also update `redis.dir`
+manually, as it is not auto-derived in Python).
+
+### 5.2 Configure NFS roots in `config.yaml`
+
+`florian.otel@gmail.com` is already active. The `shared:` section (`/mnt/nfs/La-Familia`)
+is already active. Other users (Eva, Annika, Laura) remain commented out until ready.
+
+To add another user, uncomment their block and fill in the real Google email:
+
+```yaml
+  # eva.otel@gmail.com:
+  #   owner: "eva"
+  #   nfs_roots: ["/mnt/nfs/Eva"]
+```
+
+To adjust exclusion filters (add or remove paths), edit `config.yaml` under `rag.scanner`
+(see §1.2). No code change required — the scanner reads these at runtime.
+
+### 5.3 Populate the ingestion queue (NFS scan)
+
+```bash
+python utils/rag_sync_nfs.py
+```
+
+This walks `/mnt/nfs/Florian` and `/mnt/nfs/La-Familia`, applies all exclusion filters
+from `config.yaml` (`rag.scanner`), and inserts discovered files into the SQLite ingestion
+queue (`rag_state.db`) as `pending`. Takes 1–3 minutes — filesystem `stat()` calls only,
+no embedding yet.
+
+**Incremental behaviour** (safe to re-run at any time):
+- New files → inserted as `pending`
+- Modified files (mtime changed) → reset to `pending` for re-ingestion
+- Previously ingested files no longer found (deleted from NFS, or now matched by an
+  exclusion filter) → SQLite row removed **and** Qdrant points deleted immediately
+
+To scan only one user's root:
+
+```bash
+python utils/rag_sync_nfs.py --user florian
+```
+
+Check the result:
+
+```bash
+python utils/rag_status.py
+# Expected on first run: ~2800 pending, 0 completed
+```
+
+### 5.4 Run the ingestion daemon
+
+```bash
+python utils/rag_ingest_daemon.py --batch 20
+```
+
+For each file the daemon:
+1. Deletes any stale Qdrant points for that file (idempotency)
+2. Marks the file as `processing` in SQLite
+3. Parses with `docling` → full text (or `_parse_ipynb()` for notebooks)
+4. Chunks text (parent-child for PDF/IPYNB/MD; flat 512-tok for PPTX/YAML/CSV)
+5. Embeds child chunks via Ollama (`bge-m3`, 5 concurrent)
+6. Upserts all points atomically to Qdrant
+7. Marks the file as `completed`
+
+#### Timing estimates
+
+| File type | Time per file |
+|-----------|--------------|
+| Short MD / YAML / TXT | ~1–3 s |
+| Long Markdown (>50 sections) | ~5–15 s |
+| Jupyter notebook | ~5–20 s |
+| PDF (10–50 pages) | ~15–60 s |
+| PDF (100+ pages) | ~60–180 s |
+
+For ~2,800 files the full run takes **several hours**. Run it in a persistent session:
+
+```bash
+screen -S rag-ingest
+python utils/rag_ingest_daemon.py --batch 20
+# Ctrl-A D to detach; screen -r rag-ingest to reattach
+```
+
+The daemon is **crash-safe**: if killed, restart it and it resumes from where it left off.
+Rows stuck in `processing` are automatically reset to `pending` on startup (crash recovery).
+
+### 5.5 Monitor progress
+
+From a separate terminal:
+
+```bash
+# One-shot status
+python utils/rag_status.py
+
+# Live watch (every 30 s)
+watch -n 30 python utils/rag_status.py
+
+# Show permanently failed files with error messages
+python utils/rag_status.py --failed
+
+# Filter to one user
+python utils/rag_status.py --user florian
+```
+
+Sample output once partially complete:
+
+```
+Ingestion queue (all users):
+  pending    : 1842
+  processing : 1
+  completed  : 947
+  failed     : 3
+  ─────────────────
+  total      : 2793
+  progress   : 33.9%
+
+Qdrant 'documents' collection:
+  total points    : 12483
+```
+
+### 5.6 Test search before full ingestion is complete
+
+You do not need to wait for the full corpus. Once a few hundred files are done, test the
+search pipeline:
+
+```bash
+python utils/rag_search_cli.py \
+  --query "what AWS certifications do I have" \
+  --user florian
+
+python utils/rag_search_cli.py \
+  --query "docker networking" \
+  --user florian \
+  --top-k 10
+```
+
+Output shows ranked results with cosine similarity scores, source paths, and the
+`parent_text` that would be injected into the LLM prompt.
+
+**Note**: if the ingest daemon is running, the search embedding call may take up to 30s
+to return (Ollama queues the request behind the batch). This is normal — the 120s timeout
+in `embed_text()` covers it.
+
+Search without ownership filter (returns all documents):
+
+```bash
+python utils/rag_search_cli.py --query "family trip" --no-filter
+```
+
+### 5.7 Enable RAG in the chat client
+
+Once satisfied with search quality, enable RAG in the CLI chat:
+
+```bash
+python utils/cli_chat.py --server http://192.168.1.93:8000
+# In the chat session:
+/rag on
+```
+
+Or pass `"use_rag": true` in the `ChatRequest` JSON. The orchestrator will call
+`search_rag()` before every LLM call, prepend the top-5 `parent_text` chunks to the user
+message, and return `rag_sources` in the response.
+
+### 5.8 API control (via the orchestrator)
+
+```bash
+# Trigger NFS scan (also cleans up Qdrant for deleted/excluded files)
+curl -X POST http://192.168.1.93:8000/v1/rag/ingest/sync
+
+# Scan only one user's roots
+curl -X POST "http://192.168.1.93:8000/v1/rag/ingest/sync?user=florian"
+
+# Start background ingestion worker
+curl -X POST http://192.168.1.93:8000/v1/rag/ingest/start
+
+# Stop ingestion worker (after current file completes)
+curl -X POST http://192.168.1.93:8000/v1/rag/ingest/stop
+
+# Status
+curl http://192.168.1.93:8000/v1/rag/ingest/status
+```
+
+### 5.9 Troubleshooting
+
+#### Search times out while ingestion is running
+
+Ollama serializes model computation. When the ingest daemon runs at full concurrency (5
+concurrent embedding requests), search queries queue behind the batch and can wait 28–30s
+before being served. The `embed_text()` timeout is 120s — the query will eventually
+succeed. This is expected behaviour during bulk ingestion.
+
+#### Large PDF parsing failures
+
+`docling` occasionally fails on malformed or encrypted PDFs. The daemon auto-retries up to
+3 times, then marks the file as permanently `failed`.
+
+```bash
+python utils/rag_status.py --failed
+```
+
+Permanently failed files are skipped on subsequent runs. To retry after fixing the issue:
+
+```bash
+# Reset all failed rows to pending for one user
+python utils/rag_reset.py --user florian
+# Then re-run the daemon
+```
+
+#### Ollama goes offline mid-ingestion
+
+If `bge-m3` is evicted (e.g. another model loaded), embedding calls fail. The daemon marks
+the file as `failed` and moves on. Restart Ollama with the model loaded and re-run the
+daemon — it will retry the failed files automatically (up to `max_retries=3`).
+
+#### Qdrant not accessible
+
+If Qdrant is unreachable, the orchestrator logs a warning and sets
+`app.state.qdrant_client = None` (RAG is disabled, chat still works). Check:
+
+```bash
+sudo systemctl status qdrant
+curl -s http://localhost:6333/collections
+```
+
+#### Clean restart
+
+To drop everything and start fresh:
+
+```bash
+# Full reset — drops Qdrant collection + resets all SQLite rows to pending
+python utils/rag_reset.py
+
+# Partial reset — only one user's data
+python utils/rag_reset.py --user florian
+```
+
+### 5.10 File type coverage
+
+| Type | Strategy | Notes |
+|------|----------|-------|
+| `.pdf` | Parent-child | High benefit — certifications, work docs |
+| `.ipynb` | Parent-child | High benefit — code + markdown context |
+| `.md` | Parent-child (if long) | Medium benefit |
+| `.docx` | Parent-child | Medium benefit |
+| `.pptx` | Flat 512-tok | Slides already compact |
+| `.txt` | Flat (short) / Parent-child (long) | Auto-detected by token count |
+| `.yaml` / `.yml` / `.csv` | Flat 512-tok | Config files already compact |
+| `.xlsx` | Skipped | Not supported by docling |
+| `.jpg` / `.png` / `.mp4` | Skipped | Phase 4 (CLIP embeddings) |
+
+Exclusion filters (directories and file patterns) are configured in `config.yaml` under
+`rag.scanner` — see §1.2 for the full list and how to add new exclusions.
 
 ---
 
-## 5. Phase 4 — Images and videos (future)
+## 6. Phase 4 — Images and videos (future)
 
 - **CLIP model** (`openai/clip-vit-base-patch32`) on Server 2 GPU
 - Family photo ingestion → CLIP embeddings → separate Qdrant `images` collection
@@ -707,7 +1053,7 @@ are admin-only (Florian); search is scoped to the authenticated user's `owner` +
 
 ---
 
-## 6. Use cases supported
+## 7. Use cases supported
 
 | Use case | Phase | Notes |
 |----------|-------|-------|

@@ -73,6 +73,36 @@ rag:
   # Active Qdrant storage: /var/lib/qdrant/storage (local NVMe, Server 1)
   # Snapshots (DR):        /mnt/nfs/__Backups/HomeAI-lab--databases/qdrant-snapshots/
 
+  # -- NFS scanner filters ------------------------------------------------------
+  scanner:
+    # File extensions to ingest (whitelist).
+    include_extensions:
+      - .pdf
+      - .pptx
+      - .docx
+      - .md
+      - .txt
+      - .csv
+      - .yaml
+      - .yml
+      - .ipynb
+
+    # Directory names that os.walk will not descend into.
+    exclude_dir_names:
+      - .Gin-AI-python-3.12   # Python virtualenv
+      - __pycache__
+      - .git
+      - node_modules
+      - .claude      
+
+    # Directory name suffixes to skip (matched with str.endswith).
+    exclude_dir_suffixes:
+      - .dist-info             # pip package metadata
+
+    # Substrings — any filename containing one of these is skipped.
+    exclude_file_patterns:
+      - "@synoeastream"        # Synology NAS streaming metadata
+
 # -- Multi-user NFS roots (maps Google email → owner + NFS paths) -------------
 users:
   florian.otel@gmail.com:

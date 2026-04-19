@@ -301,11 +301,18 @@ async def ingest_file(
             return
 
         # ------------------------------------------------------------------
-        # Step 4: embed child texts via Ollama (8-concurrent semaphore)
+        # Step 4: embed child texts via Ollama (5-concurrent semaphore)
         # ------------------------------------------------------------------
         child_texts = [child for child, _ in pairs]
+
+        def _log_embed_progress(done: int, total: int) -> None:
+            logger.info("Embedding progress: %d/%d  %s", done, total, file_name)
+
         state_db.set_progress(file_path, f"embedding 0/{n}")
-        vectors = await embed_batch(child_texts, model=model, ollama_url=ollama_url)
+        vectors = await embed_batch(
+            child_texts, model=model, ollama_url=ollama_url,
+            progress_cb=_log_embed_progress,
+        )
         state_db.set_progress(file_path, f"embedding {n}/{n}")
 
         # ------------------------------------------------------------------

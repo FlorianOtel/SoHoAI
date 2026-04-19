@@ -6,12 +6,17 @@ Usage (run from project root):
     python utils/rag_status.py
     python utils/rag_status.py --user florian
     python utils/rag_status.py --failed        # list permanently failed files
+    python utils/rag_status.py --watch /tmp/ingest.log   # live monitor
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import sys
+import time
+from datetime import datetime as _DT
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -25,10 +30,300 @@ from rag_engine.schema import FIELD_OWNER
 from rag_engine.state import StateDB
 
 
+# ---------------------------------------------------------------------------
+# Log parsing patterns for --watch mode
+# ---------------------------------------------------------------------------
+
+_RE_TIMESTAMP = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+)')
+
+
+def _parse_ts(line: str) -> float | None:
+    """Return Unix timestamp from the log-line prefix, or None."""
+    m = _RE_TIMESTAMP.match(line)
+    if not m:
+        return None
+    try:
+        return _DT.strptime(m.group(1), '%Y-%m-%d %H:%M:%S,%f').timestamp()
+    except ValueError:
+        return None
+
+
+# "Starting ingest: 507 files pending"  (stdout, may appear after logger lines)
+_RE_START = re.compile(r'Starting ingest: (\d+) files pending')
+
+# "Processing [270 done / 10 failed]: /mnt/nfs/Florian/.../stockdata2.csv"
+_RE_PROCESSING = re.compile(r'Processing \[(\d+) done / (\d+) failed\]: (.+)')
+
+# "Chunked stockdata2.csv → 6806 chunks  strategy=flat  file_type=csv"
+_RE_CHUNKED = re.compile(r'Chunked .+? → (\d+) chunks\s+strategy=(\S+)\s+file_type=(\S+)')
+
+# "Ingested stockdata2.csv: 6806 points  owner=florian  tag=—"
+_RE_INGESTED = re.compile(r'Ingested .+?: (\d+) points')
+
+# "Embedding progress: 50/6806  stockdata2.csv"  (emitted by ingest.py every 50 chunks)
+_RE_EMBED_PROG = re.compile(r'Embedding progress: (\d+)/(\d+)')
+
+# Fallback for older logs: count httpx HTTP response lines for Ollama embedding calls
+_RE_EMBED_HTTP = re.compile(r'HTTP Request: POST .+/embeddings "HTTP/1.1 200 OK"')
+
+
+def parse_log(log_path: str) -> dict:
+    """
+    Single-pass scan of a rag_ingest_daemon log file.
+
+    Returns current file-level ingestion state derived from log events.
+    Prefers explicit 'Embedding progress' lines (new format from ingest.py);
+    falls back to counting HTTP embedding responses for older logs.
+
+    Keys in the returned dict:
+      files_done        int|None   -- files completed at start of current file
+      files_failed      int|None   -- files failed at start of current file
+      current_file_path str|None   -- full NFS path currently being processed
+      total_chunks      int|None   -- total chunks (None if still parsing)
+      chunks_embedded   int        -- chunks embedded so far for this file
+      initial_pending   int|None   -- from "Starting ingest: N files pending"
+      phase             str        -- idle | parsing | embedding | done
+      file_type         str|None
+      strategy          str|None
+    """
+    state: dict = {
+        'files_done': None,
+        'files_failed': None,
+        'current_file_path': None,
+        'total_chunks': None,
+        'chunks_embedded': 0,
+        '_last_embed_prog': None,  # (done, total) from most-recent explicit progress line
+        'initial_pending': None,
+        'phase': 'idle',
+        'file_type': None,
+        'strategy': None,
+        'embed_start_ts': None,    # Unix ts from the Chunked line (embedding begins)
+        'last_progress_ts': None,  # Unix ts from the most-recent Embedding progress line
+    }
+
+    in_file = False   # seen at least one Processing line
+    chunked = False   # seen Chunked line for current file
+    ingested = False  # seen Ingested line for current file
+
+    with open(log_path, 'r', errors='replace') as fh:
+        for line in fh:
+            m = _RE_START.search(line)
+            if m:
+                state['initial_pending'] = int(m.group(1))
+                continue
+
+            m = _RE_PROCESSING.search(line)
+            if m:
+                state['files_done']        = int(m.group(1))
+                state['files_failed']      = int(m.group(2))
+                state['current_file_path'] = m.group(3).strip()
+                state['total_chunks']      = None
+                state['chunks_embedded']   = 0
+                state['_last_embed_prog']  = None
+                state['phase']             = 'parsing'
+                state['file_type']         = None
+                state['strategy']          = None
+                state['embed_start_ts']    = None
+                state['last_progress_ts']  = None
+                in_file  = True
+                chunked  = False
+                ingested = False
+                continue
+
+            if not in_file:
+                continue
+
+            if not chunked:
+                m = _RE_CHUNKED.search(line)
+                if m:
+                    state['total_chunks']   = int(m.group(1))
+                    state['strategy']       = m.group(2)
+                    state['file_type']      = m.group(3)
+                    state['phase']          = 'embedding'
+                    state['embed_start_ts'] = _parse_ts(line)
+                    chunked = True
+                continue
+
+            if not ingested:
+                m = _RE_INGESTED.search(line)
+                if m:
+                    state['chunks_embedded'] = state['total_chunks'] or int(m.group(1))
+                    state['phase']           = 'done'
+                    ingested = True
+                    continue
+
+                # Explicit progress line from ingest.py (new format)
+                m = _RE_EMBED_PROG.search(line)
+                if m:
+                    state['_last_embed_prog']  = (int(m.group(1)), int(m.group(2)))
+                    state['last_progress_ts']  = _parse_ts(line)
+                    continue
+
+                # Fallback: count successful HTTP embedding responses
+                if _RE_EMBED_HTTP.search(line):
+                    state['chunks_embedded'] += 1
+
+    # Explicit progress lines are more reliable than HTTP counting
+    lp = state.pop('_last_embed_prog')
+    if lp is not None and state['phase'] == 'embedding':
+        state['chunks_embedded'] = lp[0]
+
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Display helpers
+# ---------------------------------------------------------------------------
+
+def _clear() -> None:
+    sys.stdout.write('\033[2J\033[H')
+    sys.stdout.flush()
+
+
+def _fmt_duration(secs: float) -> str:
+    """Format a duration in seconds as '1h 23m 45s' or '23m 45s'."""
+    secs = max(0.0, secs)
+    h = int(secs // 3600)
+    m = int((secs % 3600) // 60)
+    s = int(secs % 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    return f"{m}m {s:02d}s"
+
+
+def _bar(done: int, total: int, width: int = 38) -> str:
+    """ASCII progress bar: [####···]"""
+    if total <= 0:
+        return '[' + '·' * width + ']'
+    filled = int(width * done / total)
+    return '[' + '#' * filled + '·' * (width - filled) + ']'
+
+
+def _row(label: str, value: str, lw: int = 12) -> str:
+    return f"  {label:<{lw}}: {value}"
+
+
+# ---------------------------------------------------------------------------
+# Watch mode
+# ---------------------------------------------------------------------------
+
+def watch_mode(log_path: str, state_db: StateDB, interval: int = 2) -> None:
+    """
+    Continuously display per-file chunk progress and overall queue stats.
+
+    Reads log_path on every refresh for file-level chunk progress.
+    Reads SQLite (state_db) for overall queue counts.
+    Refreshes every `interval` seconds until Ctrl-C.
+    """
+    if not Path(log_path).exists():
+        sys.exit(f"ERROR: log file not found: {log_path}")
+
+    try:
+        while True:
+            log = parse_log(log_path)
+
+            try:
+                db = state_db.get_counts()
+                db_err = None
+            except Exception as exc:
+                db = {}
+                db_err = str(exc)
+
+            _clear()
+            now = time.strftime('%H:%M:%S')
+            print(f"=== RAG Ingest Monitor  (refresh: {interval}s · Ctrl-C to stop) ===\n")
+
+            # ---- Current file ----------------------------------------
+            if log['current_file_path']:
+                path  = log['current_file_path']
+                fname = Path(path).name
+                parts = Path(path).parts
+                # Show last 4 path components to keep it readable
+                short = os.path.join(*parts[-4:]) if len(parts) > 4 else path
+
+                print(_row("Ingesting", fname))
+                print(_row("Path", f".../{short}"))
+                if log['file_type']:
+                    strat = f"  ({log['strategy']})" if log['strategy'] else ""
+                    print(_row("Type", f"{log['file_type']}{strat}"))
+                print(_row("Phase", log['phase']))
+                print()
+
+                total = log['total_chunks']
+                done  = log['chunks_embedded']
+
+                if total is None:
+                    print("  Chunks    : parsing in progress…")
+                else:
+                    pct_done      = done / total * 100 if total else 0.0
+                    pct_left      = 100.0 - pct_done
+                    remaining_cnt = total - done
+                    print(_row("Chunks", f"{done:,} / {total:,}"))
+                    print(f"  {_bar(done, total)}  {pct_done:.1f}% done · {pct_left:.1f}% remaining  ({remaining_cnt:,} left)")
+
+                    # ETA: derived from embed_start_ts (Chunked line) and last progress ts
+                    embed_start_ts   = log.get('embed_start_ts')
+                    last_progress_ts = log.get('last_progress_ts')
+                    if (
+                        embed_start_ts and last_progress_ts
+                        and last_progress_ts > embed_start_ts
+                        and done > 0
+                    ):
+                        rate = done / (last_progress_ts - embed_start_ts)  # chunks/sec
+                        elapsed_secs  = time.time() - embed_start_ts
+                        eta_secs      = remaining_cnt / rate
+                        eta_abs_str   = time.strftime('%H:%M:%S', time.localtime(time.time() + eta_secs))
+                        print(
+                            f"  Elapsed : {_fmt_duration(elapsed_secs)}"
+                            f"  ·  Rate: {rate * 60:.1f} chunks/min"
+                            f"  ·  ETA: ~{_fmt_duration(eta_secs)} ({eta_abs_str})"
+                        )
+            else:
+                print("  No file currently being processed.")
+
+            # ---- Overall progress ------------------------------------
+            print()
+            print("Overall (from DB):")
+
+            if db_err:
+                print(f"  DB unavailable: {db_err}")
+            else:
+                total_f = db.get('total', 0)
+                done_f  = db.get('completed', 0)
+                pend_f  = db.get('pending', 0)
+                fail_f  = db.get('failed', 0)
+                proc_f  = db.get('processing', 0)
+                pct_f   = done_f / total_f * 100 if total_f else 0.0
+
+                print(_row("Files", f"{done_f:,} / {total_f:,}  ({pct_f:.1f}%)"))
+                print(f"  {_bar(done_f, total_f)}")
+                print()
+                print(f"  {'pending':<12}: {pend_f:>6,}")
+                print(f"  {'processing':<12}: {proc_f:>6,}")
+                print(f"  {'completed':<12}: {done_f:>6,}")
+                print(f"  {'failed':<12}: {fail_f:>6,}")
+                print(f"  {'─' * 20}")
+                print(f"  {'total':<12}: {total_f:>6,}")
+
+            print(f"\n  Updated: {now}")
+            time.sleep(interval)
+
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+
+# ---------------------------------------------------------------------------
+# Original one-shot status display
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Show RAG pipeline status")
     parser.add_argument("--user", metavar="OWNER", help="Filter counts by owner (e.g. florian)")
     parser.add_argument("--failed", action="store_true", help="List permanently failed files")
+    parser.add_argument(
+        "--watch", metavar="LOG_FILE",
+        help="Continuously monitor a rag_ingest_daemon log file (error if not given)",
+    )
     args = parser.parse_args()
 
     with open(Path(__file__).resolve().parent.parent / "config.yaml") as f:
@@ -39,9 +334,14 @@ def main() -> None:
     db_path = f"{db_base}/sqlite/rag_state.db"
     state_db = StateDB(db_path)
 
+    # --watch mode: live monitor from a log file
+    if args.watch is not None:
+        watch_mode(args.watch, state_db, interval=2)
+        state_db.close()
+        return
+
     # --- SQLite queue counts ---
     if args.user:
-        # Count only for this owner by querying directly
         conn = state_db._conn
         cur = conn.execute(
             "SELECT status, COUNT(*) AS n FROM ingestion_queue "

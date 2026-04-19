@@ -162,16 +162,16 @@ HomeAI-Lab/
 │   ├── __init__.py             # exports search_rag(query, user_id, limit)
 │   ├── schema.py               # Qdrant payload field constants + derive_owner()
 │   ├── collection.py           # Collection name, vector size, get_client(), ensure_collection()
-│   ├── embeddings.py           # embed_text(), embed_batch() via Ollama
+│   ├── embeddings.py           # embed_text(), embed_batch(progress_cb) via Ollama
 │   ├── state.py                # StateDB — ingestion queue CRUD + crash recovery
-│   ├── scanner.py              # NFS filesystem scanner → populates StateDB
+│   ├── scanner.py              # NFS filesystem scanner → populates StateDB; filters read from config.yaml rag.scanner
 │   ├── ingest.py               # docling parse + parent-child chunking + Qdrant upsert
 │   └── search.py               # query → embed → Qdrant query_points → parent_text + provenance
 ├── utils/
 │   ├── cli_chat.py             # Terminal chat client
-│   ├── rag_sync_nfs.py         # CLI: scan NFS roots → populate ingestion queue
+│   ├── rag_sync_nfs.py         # CLI: scan NFS roots → populate ingestion queue + delete Qdrant points for removed files
 │   ├── rag_ingest_daemon.py    # CLI: process pending files (parse → chunk → embed → upsert)
-│   ├── rag_status.py           # CLI: queue counts + Qdrant point stats
+│   ├── rag_status.py           # CLI: queue counts + Qdrant point stats; --watch LOG_FILE for live ETA monitor
 │   ├── rag_search_cli.py       # CLI: test search pipeline from command line
 │   ├── rag_reset.py            # CLI: reset Qdrant collection + ingestion queue
 │   ├── notebooklm_auth.py      # NotebookLM browser automation (Playwright + system Chrome)
@@ -261,8 +261,10 @@ park(chat_id)        → save KV slot to NAS + refresh Redis TTL
 - Embeddings via **bge-m3 served by Ollama on Server 1**
   - 1024 dimensions, 570M params, ~1.2GB — top MTEB scores; 8192-token context window
   - API: `POST http://localhost:11434/api/embeddings`; no batch endpoint — `embed_batch()` runs 5 concurrent requests via asyncio semaphore
+  - `embed_batch()` accepts optional `progress_cb(done, total)` — called every 50 chunks (`_PROGRESS_INTERVAL`) + on the final chunk; used by `ingest.py` to log `"Embedding progress: N/M  filename"` lines read by `rag_status.py --watch`
   - Config keys: `embedding_model: bge-m3`, `ollama_url: http://localhost:11434/api/embeddings`
-  - Query latency: ~650ms/chunk; batch ingestion via async background job
+  - Query latency: ~650ms/chunk unloaded; **~28–30s under full ingest load** (Ollama serializes, search query queues behind ingest batch)
+  - HTTP timeout in `embed_text()`: **120s** — must be this high or search times out while ingest daemon is running
 - Qdrant vector store on Server 1, persisted to NAS — **confirmed right choice** (see design decisions)
 - RAG-augmented prompts (context injection before LLM call)
 - Package: `rag_engine/` — fully implemented (schema, collection, embeddings, state, scanner, ingest, search); `rag.py` deleted
@@ -407,7 +409,7 @@ Other user directories (`/mnt/nfs/{Eva,Annika,Laura}`) and `/mnt/nfs/La-Familia`
 10. ~~Add `db_base_path` global config variable (single place to relocate all databases)~~ — ✅ done 2026-04-16
 11. ~~Configure `users:` section in `config.yaml` with real Google emails~~ — ✅ done 2026-04-17 (`florian.otel@gmail.com` active; others commented out until ready)
 
-**→ NOW**: Run initial NFS scan and ingestion — see `/home/florian/Gin-AI/RAG-ingestion-process.md`.
+**→ NOW**: Run initial NFS scan and ingestion — see `RAG-strategy.md §5`.
 
 12. Implement Google OAuth2 middleware (Phase 3, not blocking for RAG)
 
@@ -488,10 +490,11 @@ bash NFS-files--MCP-server/nfs_files_mcp_server.sh
 # CLI chat
 python utils/cli_chat.py --server http://192.168.1.93:8000
 
-# RAG ingestion (see /home/florian/Gin-AI/RAG-ingestion-process.md for full walkthrough)
-python utils/rag_sync_nfs.py                   # scan NFS → populate queue
+# RAG ingestion (see RAG-strategy.md §5 for full walkthrough)
+python utils/rag_sync_nfs.py                   # scan NFS → populate queue + purge Qdrant for removed files
 python utils/rag_ingest_daemon.py --batch 20   # process queue (runs for hours)
-python utils/rag_status.py                     # monitor progress
+python utils/rag_status.py                     # one-shot queue counts + Qdrant stats
+python utils/rag_status.py --watch /tmp/rag-ingestion.log   # live monitor: chunk progress bar + ETA
 python utils/rag_search_cli.py --query "certifications" --user florian
 
 # NotebookLM — first-time login (requires X display)
@@ -523,6 +526,6 @@ After modifying any orchestrator code:
 - **Redis for short-term memory** — fast, TTL-based, LLM context builder reads it every request (server-managed only)
 - **SQLite for long-term** — single file on NAS, zero ops overhead, plenty fast for ~10K chats (server-managed only)
 - **Qdrant for vectors** — persistent local mode (on NAS), gRPC + REST API; `qdrant-client` Python dep
-- **Embeddings via Ollama on Server 1** — `bge-m3` (1024-dim, 8192-tok context) served by Ollama; Server 2 GPU saturated with Mistral Nemo (11.6/12GB VRAM — no room for any embedding model); 5-concurrent asyncio requests; `sentence-transformers` removed
+- **Embeddings via Ollama on Server 1** — `bge-m3` (1024-dim, 8192-tok context) served by Ollama; Server 2 GPU saturated with Mistral Nemo (11.6/12GB VRAM — no room for any embedding model); 5-concurrent asyncio requests (`_BATCH_CONCURRENCY`); `sentence-transformers` removed. Ollama serializes model computation — when ingest daemon runs at full concurrency, search queries queue behind it and can wait 28–30s; `embed_text()` timeout is 120s to survive this. `embed_batch()` fires a `progress_cb(done, total)` every 50 chunks (`_PROGRESS_INTERVAL`); `ingest.py` wires this to a logger call; `rag_status.py --watch` parses those log lines to compute real-time chunk rate + ETA.
 - **Multi-tenancy via `owner` field + Google OAuth2** — every Qdrant point carries an `owner` derived from NFS path root at ingestion; search applies `MatchAny(any=[user_owner, "la-familia"])` filter; user identity from Google OIDC JWT mapped to `owner` via `config.yaml` `users:` section; data model designed before first ingestion to avoid re-ingesting
 - **MCP server uses path sandboxing** — all operations validated against ALLOWED_ROOTS, no escape possible

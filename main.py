@@ -37,10 +37,13 @@ from schemas import (
 )
 from chat_store import ChatStore
 from conversation import ConversationCache
+from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
+
 from rag_engine import search_rag
-from rag_engine.collection import ensure_collection, get_client
+from rag_engine.collection import DOCUMENTS_COLLECTION, ensure_collection, get_client
 from rag_engine.ingest import ingest_file
 from rag_engine.scanner import scan_nfs_roots
+from rag_engine.schema import FIELD_SOURCE_PATH
 from rag_engine.state import StateDB
 from router import SmartRouter
 from kv_cache import KVCacheManager, apply_mistral_template
@@ -431,6 +434,25 @@ async def rag_ingest_sync(user: str | None = Query(None)):
         config,
         user,
     )
+
+    deleted_paths = result.pop("deleted_paths", [])
+    if deleted_paths and app.state.qdrant_client is not None:
+        for path in deleted_paths:
+            app.state.qdrant_client.delete(
+                collection_name=DOCUMENTS_COLLECTION,
+                points_selector=FilterSelector(
+                    filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key=FIELD_SOURCE_PATH,
+                                match=MatchValue(value=path),
+                            )
+                        ]
+                    )
+                ),
+            )
+        logger.info("Deleted Qdrant points for %d removed file(s)", len(deleted_paths))
+
     counts = app.state.state_db.get_counts()
     return {**result, "queue": counts}
 
@@ -501,7 +523,6 @@ async def rag_ingest_status(user: str | None = Query(None)):
     qdrant_points: int | None = None
     if app.state.qdrant_client is not None:
         try:
-            from rag_engine.collection import DOCUMENTS_COLLECTION
             qdrant_points = app.state.qdrant_client.count(
                 DOCUMENTS_COLLECTION, exact=True
             ).count
