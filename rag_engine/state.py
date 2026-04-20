@@ -3,7 +3,11 @@ SQLite-backed ingestion queue for the RAG pipeline.
 
 Tracks every NFS file through its ingestion lifecycle:
   pending → processing → completed
-                       → failed  (auto-retried up to max_retries, then permanent)
+                       → pending  (auto-retry; retry_count < max_retries)
+                       → ignored  (exhausted max_retries; skip_reason = last error)
+
+'failed' is not used by the automatic path. It only appears if set manually via SQL.
+discover_or_update() resets any 'failed' row to 'pending' as a safety net.
 
 Uses a dedicated rag_state.db so chat_store.db stays unaffected.
 All methods are synchronous, matching the ChatStore pattern in chat_store.py.
@@ -26,12 +30,21 @@ CREATE TABLE IF NOT EXISTS ingestion_queue (
     status          TEXT NOT NULL DEFAULT 'pending',
     error_msg       TEXT,
     retry_count     INTEGER NOT NULL DEFAULT 0,
-    max_retries     INTEGER NOT NULL DEFAULT 3,
+    max_retries     INTEGER NOT NULL DEFAULT 5,
     started_at      TEXT,
     completed_at    TEXT,
-    progress_detail TEXT
+    progress_detail TEXT,
+    skip_reason     TEXT
 );
 """
+
+# Schema migrations applied in __init__ after CREATE TABLE IF NOT EXISTS.
+_MIGRATIONS = [
+    # (1) Add skip_reason column introduced with the 'ignored' status.
+    "ALTER TABLE ingestion_queue ADD COLUMN skip_reason TEXT",
+    # (2) Raise max_retries from 3 to 5 for all existing rows that still have the old default.
+    "UPDATE ingestion_queue SET max_retries = 5 WHERE max_retries < 5",
+]
 
 
 def _now() -> str:
@@ -48,6 +61,11 @@ class StateDB:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        for migration in _MIGRATIONS:
+            try:
+                self._conn.execute(migration)
+            except sqlite3.OperationalError:
+                pass  # ALTER TABLE fails if column already exists — safe to ignore
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -87,15 +105,22 @@ class StateDB:
         self, file_path: str, owner: str, last_modified: float
     ) -> None:
         """
-        Register a newly discovered file or re-queue a modified one.
+        Register a newly discovered file or re-queue it for ingestion.
 
-        - New file:      inserted as 'pending'.
-        - Modified file: disk mtime > stored mtime → reset to 'pending' so the
-                         worker re-ingests it with fresh content.
-        - Unchanged file (completed / pending / failed): no-op.
+        - New file:    inserted as 'pending'.
+        - Modified:    disk mtime > stored mtime → reset to 'pending' (any status,
+                       including 'ignored' — the file was replaced on disk).
+        - Failed:      status = 'failed' (mtime unchanged) → reset to 'pending'
+                       with retry_count = 0 so the daemon gives it a fresh set of
+                       retries. Failed files have no Qdrant points (step 0 of the
+                       worker loop deleted them before the failure), so no Qdrant
+                       cleanup is needed.
+        - Ignored:     status = 'ignored' (mtime unchanged) → no-op. The file is
+                       permanently skipped until it changes on disk.
+        - Everything else (pending / processing / completed, mtime unchanged): no-op.
         """
         cur = self._conn.execute(
-            "SELECT last_modified FROM ingestion_queue WHERE file_path = ?",
+            "SELECT last_modified, status FROM ingestion_queue WHERE file_path = ?",
             (file_path,),
         )
         row = cur.fetchone()
@@ -106,6 +131,17 @@ class StateDB:
                 (file_path, owner, last_modified),
             )
         elif last_modified > row["last_modified"]:
+            # File changed on disk — re-queue regardless of current status (including ignored).
+            self._conn.execute(
+                "UPDATE ingestion_queue "
+                "SET status = 'pending', last_modified = ?, "
+                "    error_msg = NULL, retry_count = 0, skip_reason = NULL, "
+                "    started_at = NULL, completed_at = NULL, progress_detail = NULL "
+                "WHERE file_path = ?",
+                (last_modified, file_path),
+            )
+        elif row["status"] == "failed":
+            # Permanently failed but file unchanged — give it a fresh set of retries.
             self._conn.execute(
                 "UPDATE ingestion_queue "
                 "SET status = 'pending', last_modified = ?, "
@@ -114,6 +150,7 @@ class StateDB:
                 "WHERE file_path = ?",
                 (last_modified, file_path),
             )
+        # ignored (mtime unchanged), pending, processing, completed → no-op
         self._conn.commit()
 
     def handle_deleted(self, existing_paths: set[str]) -> list[str]:
@@ -198,8 +235,11 @@ class StateDB:
         """
         Record a failure and decide whether to auto-retry.
 
-        - retry_count < max_retries  → status = 'pending'  (will be retried)
-        - retry_count >= max_retries → status = 'failed'   (permanent until manual reset)
+        - retry_count < max_retries  → status = 'pending'   (will be retried)
+        - retry_count >= max_retries → status = 'ignored'   (skip_reason = last error)
+
+        'ignored' files are never re-queued by discover_or_update() unless the file
+        changes on disk. Use rag_status.py --ignored to review them.
         """
         cur = self._conn.execute(
             "SELECT retry_count, max_retries FROM ingestion_queue WHERE file_path = ?",
@@ -211,21 +251,52 @@ class StateDB:
             return
 
         new_count = row["retry_count"] + 1
-        new_status = "pending" if new_count < row["max_retries"] else "failed"
+        if new_count < row["max_retries"]:
+            self._conn.execute(
+                "UPDATE ingestion_queue "
+                "SET status = 'pending', retry_count = ?, error_msg = ?, progress_detail = NULL "
+                "WHERE file_path = ?",
+                (new_count, error[:2000], file_path),
+            )
+            logger.warning(
+                "Retry %d/%d queued: %s — %s",
+                new_count, row["max_retries"], file_path, error[:120],
+            )
+        else:
+            self._conn.execute(
+                "UPDATE ingestion_queue "
+                "SET status = 'ignored', retry_count = ?, skip_reason = ?, "
+                "    error_msg = NULL, progress_detail = NULL "
+                "WHERE file_path = ?",
+                (new_count, error[:2000], file_path),
+            )
+            logger.error(
+                "Ignored after %d retries: %s — %s",
+                new_count, file_path, error[:200],
+            )
+        self._conn.commit()
+
+    def mark_ignored(self, file_path: str, reason: str) -> None:
+        """
+        Permanently skip a file — never re-queued by discover_or_update() unless
+        the file is replaced on disk (mtime change).
+
+        Use for files that fundamentally cannot be parsed regardless of retries:
+        IRM/DRM-encrypted, corrupted, unsupported proprietary format.
+
+        The file must have no Qdrant points at the time of this call (i.e. it
+        should currently be 'failed' or 'pending', not 'completed'). mark_ignored()
+        does not touch Qdrant — the caller is responsible for any cleanup.
+        """
         self._conn.execute(
             "UPDATE ingestion_queue "
-            "SET status = ?, retry_count = ?, error_msg = ?, progress_detail = NULL "
+            "SET status = 'ignored', skip_reason = ?, "
+            "    error_msg = NULL, progress_detail = NULL "
             "WHERE file_path = ?",
-            (new_status, new_count, error[:2000], file_path),
+            (reason[:2000], file_path),
         )
         self._conn.commit()
-        if new_status == "failed":
-            logger.error(
-                "Permanently failed after %d retries: %s — %s",
-                new_count,
-                file_path,
-                error[:200],
-            )
+        logger.info("Marked as ignored: %s — %s", file_path, reason)
 
     # ------------------------------------------------------------------
     # Reporting
@@ -241,15 +312,40 @@ class StateDB:
             "processing": counts.get("processing", 0),
             "completed":  counts.get("completed", 0),
             "failed":     counts.get("failed", 0),
+            "ignored":    counts.get("ignored", 0),
             "total":      sum(counts.values()),
         }
 
-    def get_failed(self) -> list[dict]:
+    def get_failed(self, owner: str | None = None) -> list[dict]:
         """Return all permanently failed files with their error messages."""
-        cur = self._conn.execute(
-            "SELECT file_path, owner, retry_count, error_msg "
-            "FROM ingestion_queue WHERE status = 'failed' ORDER BY file_path"
-        )
+        if owner:
+            cur = self._conn.execute(
+                "SELECT file_path, owner, retry_count, error_msg "
+                "FROM ingestion_queue WHERE status = 'failed' AND owner = ? "
+                "ORDER BY file_path",
+                (owner,),
+            )
+        else:
+            cur = self._conn.execute(
+                "SELECT file_path, owner, retry_count, error_msg "
+                "FROM ingestion_queue WHERE status = 'failed' ORDER BY file_path"
+            )
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_ignored(self, owner: str | None = None) -> list[dict]:
+        """Return all ignored files with their retry count and skip reason (last error)."""
+        if owner:
+            cur = self._conn.execute(
+                "SELECT file_path, owner, retry_count, skip_reason "
+                "FROM ingestion_queue WHERE status = 'ignored' AND owner = ? "
+                "ORDER BY file_path",
+                (owner,),
+            )
+        else:
+            cur = self._conn.execute(
+                "SELECT file_path, owner, retry_count, skip_reason "
+                "FROM ingestion_queue WHERE status = 'ignored' ORDER BY file_path"
+            )
         return [dict(row) for row in cur.fetchall()]
 
     def close(self) -> None:

@@ -128,7 +128,10 @@ Top MTEB retrieval scores; 8192-token context window.
 **Server**: Ollama on **Server 1** (192.168.1.93) CPU.
 
 **API**: `POST http://localhost:11434/api/embeddings`
-No batch endpoint — `embed_batch()` runs 5 concurrent requests via asyncio semaphore.
+No batch endpoint — `embed_batch()` runs up to N concurrent requests via asyncio semaphore,
+where N is controlled by the `--batch` argument of `rag_ingest_daemon.py` (default 5).
+Lower values reduce Ollama queue depth and prevent `httpx.ReadTimeout` under heavy load;
+higher values improve throughput when Ollama has headroom.
 `embed_batch()` accepts an optional `progress_cb(done, total)` callback fired every
 `_PROGRESS_INTERVAL` (50) completions and on the final chunk. `ingest.py` wires this
 to `logger.info("Embedding progress: %d/%d  %s", done, total, file_name)` so that
@@ -142,10 +145,11 @@ ollama_url: http://localhost:11434/api/embeddings
 ```
 
 **Query latency**: ~650ms/chunk unloaded; up to ~28–30s under full ingestion load.
-Ollama serializes model computation — when the ingestion daemon is running at full
-concurrency (5), search queries queue behind the batch. The `embed_text()` HTTP timeout
-is **120s** to survive this wait. Do not reduce below 60s while the ingest daemon may
-be running.
+Ollama serializes model computation — when the ingest daemon is running, search queries
+queue behind the embedding batch. The `embed_text()` HTTP timeout is **120s** to survive
+this wait. Do not reduce below 60s while the ingest daemon may be running.
+To reduce search latency during ingestion, lower `--batch` (e.g. `--batch 2`) to shrink
+the Ollama queue depth.
 
 **Batch ingestion**: async background job (~9 hours estimated for full NFS corpus).
 
@@ -372,7 +376,7 @@ After recovery, only documents ingested after the last snapshot are missing. Run
 
 ---
 
-### 3.3 Document parsing — docling + dedicated ipynb parser (updated 2026-04-17)
+### 3.3 Document parsing — docling + dedicated parsers (updated 2026-04-19)
 
 **Library**: `docling` — replaces `unstructured`.
 
@@ -394,6 +398,30 @@ Fix: `_parse_ipynb()` in `ingest.py` parses the notebook JSON directly:
 - Falls back to raw read only if the file is not valid JSON
 
 `ipynb` removed from `_DOCLING_TYPES`; the ERROR log from docling is eliminated entirely.
+
+**PPTX — python-pptx fallback when docling format detection fails (2026-04-19).**
+docling can fail to detect `.pptx` format (logs `format None`) for files where the internal
+ZIP/OpenXML structure doesn't match what docling's format detector expects — e.g. older `.ppt`
+binaries renamed to `.pptx`, or files with non-standard headers. The prior fallback was a raw
+UTF-8 read of the binary container, which produced binary garbage for RAG (6053 garbage chunks
+observed for one file).
+
+Fix: `_parse_pptx()` in `ingest.py` is now the secondary fallback for PPTX:
+- Reads first 4 bytes to detect OLE2 magic (`\xD0\xCF\x11\xE0`)
+- **OLE2 path**: runs `libreoffice --headless --convert-to pptx` into a temp dir, then parses
+  the converted file with `python-pptx`; temp dir always cleaned up in `finally`
+- **OpenXML path** (genuine .pptx that docling rejected): parsed directly with `python-pptx`
+- Both paths: iterate slides/shapes, collect text frame content, prefix with `Slide N` headers
+- If `_parse_pptx()` raises, the exception propagates — **no raw-read fallback for binary PPTX**.
+  The file is marked `failed` in StateDB, not filled with binary garbage chunks.
+
+**IRM/DRM-encrypted .ppt files (2 found: Azure PaaS 20180510 + 20180511):**
+Root cause: both are Composite Document File V2 (OLE2) with `EncryptedPackage` stream and
+`DRMEncryptedDataSpace`/`DRMEncryptedTransform` — Microsoft IRM enterprise encryption.
+Content is inaccessible without the original Azure AD credentials. LibreOffice cannot convert them.
+These 2 files will exhaust retries and remain permanently `failed` in StateDB — correct behaviour.
+
+29 completed PPTX files force-reset to `failed` on 2026-04-19 for clean re-ingestion.
 
 ---
 
@@ -636,22 +664,24 @@ CREATE TABLE ingestion_queue (
     file_path       TEXT PRIMARY KEY,
     owner           TEXT NOT NULL,           -- derived from NFS root at discovery
     last_modified   REAL NOT NULL,           -- os.path.getmtime() at discovery time
-    status          TEXT NOT NULL DEFAULT 'pending',  -- pending | processing | completed | failed
-    error_msg       TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending',  -- pending | processing | completed | ignored
+    error_msg       TEXT,                    -- last transient error (cleared on completion)
     retry_count     INTEGER NOT NULL DEFAULT 0,
-    max_retries     INTEGER NOT NULL DEFAULT 3,
+    max_retries     INTEGER NOT NULL DEFAULT 5,
     started_at      TEXT,                    -- ISO timestamp; set when status → processing
     completed_at    TEXT,                    -- ISO timestamp; set when status → completed
-    progress_detail TEXT                     -- e.g. "parsing", "embedding 34/120", "upserting"
+    progress_detail TEXT,                    -- e.g. "parsing", "embedding 34/120", "upserting"
+    skip_reason     TEXT                     -- set when status → ignored (last error message)
 );
 ```
 
 **Status transitions:**
 - `pending → processing` — worker picks up file, sets `started_at`
 - `processing → completed` — all 7 steps succeeded, sets `completed_at`
-- `processing → failed` — any step failed, writes `error_msg`, increments `retry_count`
-- `failed → pending` — auto-retry if `retry_count < max_retries`; otherwise stays `failed` (permanent)
+- `processing → pending` — step failed with `retry_count < max_retries`; writes `error_msg`, increments `retry_count`
+- `processing → ignored` — step failed with `retry_count >= max_retries`; writes `skip_reason` (last error); never re-queued by `rag_sync_nfs.py` unless file changes on disk
 - `completed → pending` — re-discovery detects `last_modified` on disk > `last_modified` in SQLite
+- `ignored → pending` — re-discovery detects `last_modified` on disk > `last_modified` in SQLite (file was replaced)
 
 #### Crash recovery
 
@@ -693,22 +723,28 @@ To prevent the Qdrant database from serving partial context during active buildi
 1. **Lock State:** Fetch one `pending` file path from SQLite and immediately update to
    `processing`; set `started_at` and `progress_detail = "starting"`.
 2. **Extract & Parse:** Pass the file to the appropriate parser: docling (PDF/DOCX/PPTX),
+   `_parse_pptx()` python-pptx fallback (PPTX when docling format detection fails),
    `_parse_ipynb()` (ipynb), or direct UTF-8 read (MD/TXT/YAML/CSV).
    Update `progress_detail = "parsing"`.
 3. **Generate Chunks:** Execute parent-child split logic (or flat 512-token chunks) entirely
    in memory. Update `progress_detail = "chunking ({n} chunks)"`.
-4. **Vectorize:** Send child chunks to `bge-m3` via Ollama using 5-concurrent
-   `asyncio` batching. Update `progress_detail = "embedding {i}/{n}"` periodically.
+4. **Vectorize:** Send child chunks to `bge-m3` via Ollama using `--batch`-concurrent
+   `asyncio` requests (default 5). Update `progress_detail = "embedding {i}/{n}"` periodically.
    `embed_batch()` fires `progress_cb` every 50 chunks, which logs
    `"Embedding progress: N/M  filename"` — consumed by `rag_status.py --watch`.
 5. **Build Payloads:** Construct Qdrant point objects, binding the vector, UUID, and payload
    (`source_path`, `parent_text`, `owner` from SQLite row). All field names imported from
    `rag_engine/schema.py` constants — no string literals.
-6. **Atomic Upsert:** Execute a *single* `client.upsert()` call to Qdrant containing all
-   points for the document. Update `progress_detail = "upserting"`.
+6. **Batched Upsert:** Send all points for the document to Qdrant in batches of
+   `_UPSERT_BATCH_SIZE` (256) points per `client.upsert()` call. Update `progress_detail = "upserting"`.
+   A single upsert with all points can exceed Qdrant's HTTP body limit for large files
+   (large PDFs, big CSVs) — Qdrant returns HTTP 400 `"Payload error: JSON payload (N bytes)"`.
+   Batching keeps each request well under the limit. If one batch fails mid-file, the retry
+   will re-run from step 0 (delete-before-insert), cleaning up any partial set.
 7. **Finalize State:** Upon successful upsert, update the SQLite row to `completed` with
-   `completed_at` timestamp. If any step fails: write the exception to `error_msg`, increment
-   `retry_count`, and set status to `pending` if `retry_count < max_retries`, else `failed`.
+   `completed_at` timestamp. If any step fails: increment `retry_count` and set status to
+   `pending` if `retry_count < max_retries` (auto-retry), else `ignored` with `skip_reason`
+   set to the last error message (permanent skip — `rag_sync_nfs.py` will not re-queue it).
 
 **Idempotency guarantee:** Step 0 (delete-before-insert) ensures that re-processing a file
 — whether due to modification, crash recovery, or retry after partial failure — always
@@ -722,9 +758,9 @@ chunking changes produce a different number of chunks.
 ### 4.5 Standalone Utilities (`utils/`)
 
 Standalone CLI scripts enable independent progress monitoring and RAG pipeline management without launching the FastAPI server:
-* `utils/rag_sync_nfs.py`: Scans all configured NFS roots (per-user + shared), derives `owner` per file, applies filters from `config.yaml`, and populates SQLite with `pending` files. For previously ingested files that are no longer found (deleted from NFS or newly excluded by config), removes the SQLite row and deletes the corresponding Qdrant points. Accepts `--user florian` to scan a single user's root only.
+* `utils/rag_sync_nfs.py`: Scans all configured NFS roots (per-user + shared), derives `owner` per file, applies filters from `config.yaml`, and populates SQLite with `pending` files. New files → `pending`; modified files (mtime changed) → `pending`; `ignored` files (mtime unchanged) → no-op (permanent skip); `ignored` files (mtime changed, i.e. file replaced) → reset to `pending`. For files removed from NFS or newly excluded by config, removes the SQLite row and deletes the corresponding Qdrant points. Accepts `--user florian` to scan a single user's root only. Always run this before restarting the daemon after failures.
 * `utils/rag_ingest_daemon.py`: The worker loop executing the 7-step atomic embedding process (includes `owner` in every Qdrant payload).
-* `utils/rag_status.py`: Dashboard querying SQLite/Qdrant to output ingestion metrics (`pending`, `completed`, `failed`). Accepts `--user` to filter by owner. `--watch LOG_FILE` mode: refreshes every 2s, shows per-file chunk progress bar, elapsed time, chunk rate, and ETA (absolute clock + remaining duration) derived from log timestamps.
+* `utils/rag_status.py`: Dashboard querying SQLite/Qdrant to output ingestion metrics (`pending`, `processing`, `completed`, `ignored`). `ignored` count always shown; `--ignored` for full detail listing with retry count and last error. Accepts `--user` to filter by owner. `--watch LOG_FILE` mode: refreshes every 2s, shows per-file chunk progress bar, elapsed time, chunk rate, and ETA (absolute clock + remaining duration) derived from log timestamps.
 * `utils/rag_search_cli.py`: Query tester returning `parent_text` and cosine similarity scores. Requires `--user` flag to apply the ownership filter (simulates authenticated search).
 * `utils/rag_reset.py`: Drops the Qdrant collection and resets SQLite to `pending` for clean re-ingestion. Accepts `--user` to reset a single user's documents only.
 
@@ -837,15 +873,22 @@ python utils/rag_status.py
 ### 5.4 Run the ingestion daemon
 
 ```bash
-python utils/rag_ingest_daemon.py --batch 20
+python utils/rag_ingest_daemon.py           # default: --batch 5
+python utils/rag_ingest_daemon.py --batch 2 # conservative: fewer timeouts, lower throughput
+python utils/rag_ingest_daemon.py --batch 8 # aggressive: more throughput, higher timeout risk
 ```
+
+`--batch` controls the **Ollama embedding concurrency** (max parallel requests per file),
+not the number of files fetched. Files are always fetched from SQLite in groups of 10.
+Lower `--batch` if you see `httpx.ReadTimeout` errors in the log; raise it if Ollama has
+headroom and you want faster ingestion.
 
 For each file the daemon:
 1. Deletes any stale Qdrant points for that file (idempotency)
 2. Marks the file as `processing` in SQLite
-3. Parses with `docling` → full text (or `_parse_ipynb()` for notebooks)
+3. Parses with `docling` → full text (or `_parse_pptx()` python-pptx fallback for PPTX format detection failures; or `_parse_ipynb()` for notebooks)
 4. Chunks text (parent-child for PDF/IPYNB/MD; flat 512-tok for PPTX/YAML/CSV)
-5. Embeds child chunks via Ollama (`bge-m3`, 5 concurrent)
+5. Embeds child chunks via Ollama (`bge-m3`, `--batch` concurrent requests)
 6. Upserts all points atomically to Qdrant
 7. Marks the file as `completed`
 
@@ -881,8 +924,8 @@ python utils/rag_status.py
 # Live watch (every 30 s)
 watch -n 30 python utils/rag_status.py
 
-# Show permanently failed files with error messages
-python utils/rag_status.py --failed
+# Show ignored files with retry count and last error (rationale)
+python utils/rag_status.py --ignored
 
 # Filter to one user
 python utils/rag_status.py --user florian
@@ -895,9 +938,9 @@ Ingestion queue (all users):
   pending    : 1842
   processing : 1
   completed  : 947
-  failed     : 3
+  ignored    : 2
   ─────────────────
-  total      : 2793
+  total      : 2792
   progress   : 33.9%
 
 Qdrant 'documents' collection:
@@ -970,33 +1013,95 @@ curl http://192.168.1.93:8000/v1/rag/ingest/status
 
 #### Search times out while ingestion is running
 
-Ollama serializes model computation. When the ingest daemon runs at full concurrency (5
-concurrent embedding requests), search queries queue behind the batch and can wait 28–30s
-before being served. The `embed_text()` timeout is 120s — the query will eventually
-succeed. This is expected behaviour during bulk ingestion.
+Ollama serializes model computation. When the ingest daemon is running, search queries
+queue behind the embedding batch and can wait 28–30s before being served. The
+`embed_text()` timeout is 120s — the query will eventually succeed. This is expected
+behaviour during bulk ingestion.
 
-#### Large PDF parsing failures
+To reduce search wait time, lower the daemon's `--batch` value (e.g. `--batch 2`),
+which shrinks the Ollama queue depth. The trade-off is slower ingestion throughput.
+
+#### Embedding timeouts (httpx.ReadTimeout)
+
+If Ollama's queue depth is too high, embedding requests time out after 120s. The daemon
+auto-retries each file up to `max_retries` (5) times; after that the file becomes `ignored`
+in SQLite with the last error as `skip_reason`.
+
+**Observed in production (2026-04-19):** 78 out of ~3,000 files failed this way during the
+initial bulk ingest. All were large CSVs and notebooks from a data-science course directory
+that generated many chunks per file. `str(httpx.ReadTimeout()) == ''`, so `skip_reason` in
+SQLite is blank for these files — they show up in `rag_status.py --ignored` with no message.
+
+Remedy: lower `--batch` (e.g. `--batch 2`) and re-queue via `rag_sync_nfs.py`. Because
+`ignored` files are not automatically re-queued, force-reset them in SQLite first:
+
+```bash
+# Force-reset ignored files to pending (run before rag_sync_nfs.py)
+sqlite3 /mnt/nfs/__Backups/HomeAI-lab--databases/sqlite/rag_state.db \
+  "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL WHERE status='ignored' AND (skip_reason IS NULL OR skip_reason='')"
+python utils/rag_sync_nfs.py
+python utils/rag_ingest_daemon.py --batch 2
+```
+
+#### Qdrant HTTP 400 — oversized upsert payload
+
+Qdrant rejects `upsert` requests whose JSON body exceeds its HTTP limit. Error in SQLite
+`error_msg`: `Unexpected Response: 400 … "Payload error: JSON payload (N bytes)"`.
+
+**Observed in production (2026-04-19):** 10 files failed this way — large PDF textbooks
+(`Hands_On_Machine_Learning`, `Python for Data Analysis`) and large CSVs
+(`house_sales.csv`, `lc_loans.csv`). Step 6 of the worker loop now batches upserts into
+groups of `_UPSERT_BATCH_SIZE = 256` points (`ingest.py`), which eliminates this error.
+
+Re-queue after the fix is deployed:
+
+```bash
+python utils/rag_sync_nfs.py
+python utils/rag_ingest_daemon.py --batch 2
+```
+
+#### Ignored files — review and selective retry
+
+After exhausting `max_retries` (5), files become `ignored` with `skip_reason` = last error.
+`rag_sync_nfs.py` never re-queues them automatically.
+
+```bash
+python utils/rag_status.py --ignored  # list files, retry count, and last error
+```
+
+**Key property:** ignored files have **zero Qdrant points** — step 0 of the worker loop
+deletes existing points before processing begins, and the upsert step never completed on
+any of the failed attempts. No Qdrant cleanup is needed before retrying.
+
+To retry specific files after fixing the underlying issue:
+
+```bash
+sqlite3 /mnt/nfs/__Backups/HomeAI-lab--databases/sqlite/rag_state.db \
+  "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL WHERE file_path='<path>'"
+python utils/rag_ingest_daemon.py --batch 2
+```
+
+Do NOT use `rag_reset.py` for retrying — it resets all rows including `completed` ones,
+forcing a full re-ingest of thousands of already-processed files.
+
+#### Large PDF / docling parsing failures
 
 `docling` occasionally fails on malformed or encrypted PDFs. The daemon auto-retries up to
-3 times, then marks the file as permanently `failed`.
+`max_retries` (5) times, then marks the file as `ignored` with the last error as `skip_reason`.
 
 ```bash
-python utils/rag_status.py --failed
+python utils/rag_status.py --ignored
 ```
 
-Permanently failed files are skipped on subsequent runs. To retry after fixing the issue:
-
-```bash
-# Reset all failed rows to pending for one user
-python utils/rag_reset.py --user florian
-# Then re-run the daemon
-```
+After fixing or excluding the file, force-reset it to `pending` in SQLite and re-queue
+with `rag_sync_nfs.py` (see "Ignored files — review and selective retry" above).
 
 #### Ollama goes offline mid-ingestion
 
 If `bge-m3` is evicted (e.g. another model loaded), embedding calls fail. The daemon marks
-the file as `failed` and moves on. Restart Ollama with the model loaded and re-run the
-daemon — it will retry the failed files automatically (up to `max_retries=3`).
+the file as `pending` for auto-retry if `retry_count < max_retries` (5), or `ignored` once
+retries are exhausted. Restart Ollama with the model loaded, then re-queue any ignored files
+manually (see "Ignored files — review and selective retry" above) and restart the daemon.
 
 #### Qdrant not accessible
 

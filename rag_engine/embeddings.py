@@ -42,12 +42,13 @@ async def embed_batch(
     model: str = _DEFAULT_MODEL,
     ollama_url: str = _DEFAULT_OLLAMA_URL,
     progress_cb: Callable[[int, int], None] | None = None,
+    concurrency: int = _BATCH_CONCURRENCY,
 ) -> list[list[float]]:
     """
     Generate embeddings for a list of texts.
 
-    Runs up to _BATCH_CONCURRENCY requests concurrently — Ollama has no
-    native batch endpoint. Order is preserved (asyncio.gather guarantee).
+    Runs up to `concurrency` requests concurrently — Ollama has no native
+    batch endpoint. Order is preserved (asyncio.gather guarantee).
 
     Args:
         texts:       Texts to embed.
@@ -57,8 +58,11 @@ async def embed_batch(
                      and on the final chunk. Signature: (done: int, total: int).
                      asyncio is single-threaded so the callback is safe to call
                      without locks.
+        concurrency: Max parallel Ollama requests. Lower values reduce Ollama
+                     queue depth and prevent httpx.ReadTimeout under heavy load.
+                     Controlled by --batch in rag_ingest_daemon.py (default 5).
     """
-    sem = asyncio.Semaphore(_BATCH_CONCURRENCY)
+    sem = asyncio.Semaphore(concurrency)
     total = len(texts)
     _done = [0]  # mutable counter; no lock needed in asyncio single-thread model
 

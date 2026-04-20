@@ -169,9 +169,9 @@ HomeAI-Lab/
 │   └── search.py               # query → embed → Qdrant query_points → parent_text + provenance
 ├── utils/
 │   ├── cli_chat.py             # Terminal chat client
-│   ├── rag_sync_nfs.py         # CLI: scan NFS roots → populate ingestion queue + delete Qdrant points for removed files
+│   ├── rag_sync_nfs.py         # CLI: scan NFS roots → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files
 │   ├── rag_ingest_daemon.py    # CLI: process pending files (parse → chunk → embed → upsert)
-│   ├── rag_status.py           # CLI: queue counts + Qdrant point stats; --watch LOG_FILE for live ETA monitor
+│   ├── rag_status.py           # CLI: queue counts + Qdrant point stats; --ignored for detail; --watch LOG_FILE for live ETA monitor
 │   ├── rag_search_cli.py       # CLI: test search pipeline from command line
 │   ├── rag_reset.py            # CLI: reset Qdrant collection + ingestion queue
 │   ├── notebooklm_auth.py      # NotebookLM browser automation (Playwright + system Chrome)
@@ -251,8 +251,9 @@ park(chat_id)        → save KV slot to NAS + refresh Redis TTL
   - `owner` field in every Qdrant point; search filtered by `MatchAny(any=[user_owner, "la-familia"])`
   - `user_id` field added to `ChatRequest`, `SearchRequest`, and SQLite `chats` table
   - User→NFS root mapping in `config.yaml` (`users:` + `shared:` sections)
-- Document ingestion: `docling` (PDF, PPTX, DOCX) + dedicated ipynb cell extractor + direct UTF-8 read (TXT, MD, YAML, CSV) — replaces `unstructured`
+- Document ingestion: `docling` (PDF, PPTX, DOCX) + dedicated ipynb cell extractor + `python-pptx` PPTX fallback + direct UTF-8 read (TXT, MD, YAML, CSV) — replaces `unstructured`
   - **ipynb NOT handled by docling** — docling silently rejects `.ipynb` and falls back to raw JSON read, which embeds the notebook's JSON structure as text (garbage for RAG). Fix: `_parse_ipynb()` in `ingest.py` parses the JSON directly, extracts markdown cells as prose and code cells as fenced blocks, skips outputs and empty cells.
+  - **PPTX docling format detection failure** — docling can fail to detect `.pptx` format (`format None`) for older `.ppt` binaries renamed to `.pptx` or files with unusual internal structure. Prior fallback was raw UTF-8 read of the binary ZIP container — garbage for RAG. Fix: `_parse_pptx()` in `ingest.py` uses `python-pptx` as a secondary fallback; iterates slides/shapes, extracts all text frame content with `Slide N` headers. Raw UTF-8 read is last resort only if `python-pptx` also fails. 29 affected files force-re-queued (2026-04-19).
   - PST/Outlook archive parsing **de-prioritized** (only 2 `.msg` files found on NAS; `libpst` not needed)
 - Chunking — **parent-child strategy** (see design decision below):
   - Child chunks (~250 tokens, 20 overlap) → embedded, stored in Qdrant as search index
@@ -260,7 +261,7 @@ park(chat_id)        → save KV slot to NAS + refresh Redis TTL
   - Flat 512-token chunks used only for PPTX slides and short TXT/YAML/config files (already compact)
 - Embeddings via **bge-m3 served by Ollama on Server 1**
   - 1024 dimensions, 570M params, ~1.2GB — top MTEB scores; 8192-token context window
-  - API: `POST http://localhost:11434/api/embeddings`; no batch endpoint — `embed_batch()` runs 5 concurrent requests via asyncio semaphore
+  - API: `POST http://localhost:11434/api/embeddings`; no batch endpoint — `embed_batch()` runs up to N concurrent requests via asyncio semaphore, where N is `--batch` in `rag_ingest_daemon.py` (default 5)
   - `embed_batch()` accepts optional `progress_cb(done, total)` — called every 50 chunks (`_PROGRESS_INTERVAL`) + on the final chunk; used by `ingest.py` to log `"Embedding progress: N/M  filename"` lines read by `rag_status.py --watch`
   - Config keys: `embedding_model: bge-m3`, `ollama_url: http://localhost:11434/api/embeddings`
   - Query latency: ~650ms/chunk unloaded; **~28–30s under full ingest load** (Ollama serializes, search query queues behind ingest batch)
@@ -491,9 +492,10 @@ bash NFS-files--MCP-server/nfs_files_mcp_server.sh
 python utils/cli_chat.py --server http://192.168.1.93:8000
 
 # RAG ingestion (see RAG-strategy.md §5 for full walkthrough)
-python utils/rag_sync_nfs.py                   # scan NFS → populate queue + purge Qdrant for removed files
-python utils/rag_ingest_daemon.py --batch 20   # process queue (runs for hours)
-python utils/rag_status.py                     # one-shot queue counts + Qdrant stats
+python utils/rag_sync_nfs.py                   # scan NFS → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files
+python utils/rag_ingest_daemon.py              # process queue (runs for hours); --batch controls Ollama concurrency (default 5)
+python utils/rag_status.py                     # one-shot queue counts + Qdrant stats (ignored count always shown)
+python utils/rag_status.py --ignored           # detail listing of ignored files + rationale
 python utils/rag_status.py --watch /tmp/rag-ingestion.log   # live monitor: chunk progress bar + ETA
 python utils/rag_search_cli.py --query "certifications" --user florian
 
@@ -526,6 +528,6 @@ After modifying any orchestrator code:
 - **Redis for short-term memory** — fast, TTL-based, LLM context builder reads it every request (server-managed only)
 - **SQLite for long-term** — single file on NAS, zero ops overhead, plenty fast for ~10K chats (server-managed only)
 - **Qdrant for vectors** — persistent local mode (on NAS), gRPC + REST API; `qdrant-client` Python dep
-- **Embeddings via Ollama on Server 1** — `bge-m3` (1024-dim, 8192-tok context) served by Ollama; Server 2 GPU saturated with Mistral Nemo (11.6/12GB VRAM — no room for any embedding model); 5-concurrent asyncio requests (`_BATCH_CONCURRENCY`); `sentence-transformers` removed. Ollama serializes model computation — when ingest daemon runs at full concurrency, search queries queue behind it and can wait 28–30s; `embed_text()` timeout is 120s to survive this. `embed_batch()` fires a `progress_cb(done, total)` every 50 chunks (`_PROGRESS_INTERVAL`); `ingest.py` wires this to a logger call; `rag_status.py --watch` parses those log lines to compute real-time chunk rate + ETA.
+- **Embeddings via Ollama on Server 1** — `bge-m3` (1024-dim, 8192-tok context) served by Ollama; Server 2 GPU saturated with Mistral Nemo (11.6/12GB VRAM — no room for any embedding model); `sentence-transformers` removed. `embed_batch()` concurrency controlled by `--batch` in `rag_ingest_daemon.py` (default 5, `_BATCH_CONCURRENCY`); lower `--batch` to reduce `httpx.ReadTimeout` errors, raise it for more throughput. Ollama serializes model computation — when ingest daemon runs, search queries queue behind it and can wait 28–30s; `embed_text()` timeout is 120s to survive this. `embed_batch()` fires a `progress_cb(done, total)` every 50 chunks (`_PROGRESS_INTERVAL`); `ingest.py` wires this to a logger call; `rag_status.py --watch` parses those log lines to compute real-time chunk rate + ETA. SQLite fetch batch size is hardcoded to 10 files per iteration (`_FETCH_BATCH_SIZE` in `rag_ingest_daemon.py`). Qdrant upsert is batched in groups of `_UPSERT_BATCH_SIZE=256` points (`ingest.py`) to avoid HTTP 400 on large files.
 - **Multi-tenancy via `owner` field + Google OAuth2** — every Qdrant point carries an `owner` derived from NFS path root at ingestion; search applies `MatchAny(any=[user_owner, "la-familia"])` filter; user identity from Google OIDC JWT mapped to `owner` via `config.yaml` `users:` section; data model designed before first ingestion to avoid re-ingesting
 - **MCP server uses path sandboxing** — all operations validated against ALLOWED_ROOTS, no escape possible

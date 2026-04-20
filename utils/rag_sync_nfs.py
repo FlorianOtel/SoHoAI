@@ -2,9 +2,18 @@
 """
 Scan configured NFS roots and populate the RAG ingestion queue.
 
-Reads 'users' and 'shared' sections from config.yaml. New files are inserted
-as 'pending'; modified files (mtime changed) are reset to 'pending'; deleted
-files are removed from the queue.
+Handles all cases uniformly:
+
+  - New file:    not yet in SQLite → inserted as 'pending'.
+  - Modified:    disk mtime > stored mtime → reset to 'pending' (any status,
+                 including 'ignored' — the file was replaced on disk).
+  - Failed:      status = 'failed', mtime unchanged → reset to 'pending'
+                 with retry_count = 0 so the daemon gives it a fresh run.
+  - Ignored:     status = 'ignored', mtime unchanged → no-op (permanent skip).
+  - Completed / pending / processing, mtime unchanged: no-op.
+
+Files removed from NFS (or newly matched by an exclusion filter in config.yaml)
+are deleted from SQLite and their Qdrant points purged.
 
 Usage (run from project root):
     python utils/rag_sync_nfs.py
@@ -71,13 +80,14 @@ def main() -> None:
     counts = state_db.get_counts()
     print()
     print(f"Scan complete:")
-    print(f"  Files discovered : {result['scanned']}")
+    print(f"  Files discovered  : {result['scanned']}")
     print(f"  Stale rows removed: {result['deleted']}")
     print()
     print(f"Queue status:")
     print(f"  pending    : {counts['pending']}")
     print(f"  completed  : {counts['completed']}")
     print(f"  failed     : {counts['failed']}")
+    print(f"  ignored    : {counts['ignored']}")
     print(f"  total      : {counts['total']}")
 
     state_db.close()

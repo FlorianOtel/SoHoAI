@@ -12,9 +12,10 @@ Chunking strategy (RAG-strategy.md §3.4):
 
 Parsing:
   - Structured formats (PDF, DOCX, PPTX): docling → markdown export.
+  - PPTX fallback: OLE2 detection → LibreOffice conversion → python-pptx when docling fails.
   - IPYNB: dedicated cell extractor (JSON parse → markdown + code cells).
   - Text formats (TXT, MD, YAML, CSV): direct UTF-8 read.
-  - docling failures fall back to raw UTF-8 read.
+  - docling failures fall back to python-pptx (PPTX) or raw UTF-8 read (others).
 """
 
 from __future__ import annotations
@@ -22,6 +23,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
+import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -63,6 +67,13 @@ _CHILD_CHUNK_SIZE     = 250    # tokens — midpoint of 200–300 range; safe un
 _CHILD_CHUNK_OVERLAP  = 20
 _FLAT_CHUNK_SIZE      = 512
 _FLAT_CHUNK_OVERLAP   = 50
+
+# Qdrant rejects upsert requests whose JSON payload exceeds its HTTP body limit.
+# Large files (textbooks, big CSVs) can produce thousands of points whose combined
+# parent_text fields push well past that limit. Splitting into smaller batches keeps
+# each request well under the threshold while preserving all-or-nothing semantics
+# at the file level (step 0 already deleted stale points before we get here).
+_UPSERT_BATCH_SIZE = 256   # points per qdrant_client.upsert() call
 
 # Always use flat chunking for these types (compact; parent-child overhead not worth it)
 _ALWAYS_FLAT_TYPES = {"pptx", "yaml", "yml", "csv"}
@@ -111,14 +122,91 @@ def _parse_ipynb(path: Path) -> str:
     return "\n\n".join(parts)
 
 
+# OLE2 magic bytes — Composite Document File V2 (binary .ppt format)
+_OLE2_MAGIC = b"\xD0\xCF\x11\xE0"
+
+
+def _parse_pptx(path: Path) -> str:
+    """
+    Extract text from a PowerPoint file using python-pptx.
+
+    Used as fallback when docling fails to detect the PPTX format. Handles
+    two cases:
+
+    1. OLE2 binary .ppt disguised as .pptx (Composite Document File V2,
+       detected by magic bytes): convert to real .pptx via LibreOffice
+       headless, then parse with python-pptx.
+    2. Genuine OpenXML .pptx that docling rejected: parse directly with
+       python-pptx.
+
+    Each slide is prefixed with "Slide N" so chunk boundaries remain
+    interpretable during retrieval. Temp files are always cleaned up.
+    """
+    from pptx import Presentation  # docling dep — always present in this venv
+
+    # Detect OLE2 binary .ppt by magic bytes
+    with open(path, "rb") as fh:
+        magic = fh.read(4)
+
+    tmp_dir: str | None = None
+    pptx_path = path
+    if magic == _OLE2_MAGIC:
+        logger.info(
+            "OLE2 binary .ppt detected for %s — attempting LibreOffice conversion", path.name
+        )
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            result = subprocess.run(
+                [
+                    "libreoffice", "--headless",
+                    "--convert-to", "pptx",
+                    "--outdir", tmp_dir,
+                    str(path),
+                ],
+                check=False,
+                timeout=120,
+                capture_output=True,
+            )
+            pptx_path = Path(tmp_dir) / f"{path.stem}.pptx"
+            if result.returncode != 0 or not pptx_path.exists():
+                stderr = result.stderr.decode(errors="replace").strip()
+                raise ValueError(
+                    f"LibreOffice could not convert OLE2 .ppt '{path.name}' "
+                    f"(file may be IRM/DRM-encrypted or corrupted): "
+                    f"{stderr or 'no stderr'}"
+                )
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
+
+    try:
+        prs = Presentation(str(pptx_path))
+        parts: list[str] = []
+        for slide_num, slide in enumerate(prs.slides, start=1):
+            slide_lines: list[str] = []
+            for shape in slide.shapes:
+                if not shape.has_text_frame:
+                    continue
+                for para in shape.text_frame.paragraphs:
+                    text = "".join(run.text for run in para.runs).strip()
+                    if text:
+                        slide_lines.append(text)
+            if slide_lines:
+                parts.append(f"Slide {slide_num}\n" + "\n".join(slide_lines))
+        return "\n\n".join(parts)
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def _parse_to_text(file_path: str, file_type: str) -> str:
     """
     Extract full text from a document.
 
     Structured formats (pdf, docx, pptx) go through docling → Markdown.
+    PPTX fallback: python-pptx when docling format detection fails.
     IPYNB: dedicated cell extractor (avoids docling which doesn't support it).
     Text formats (txt, md, yaml, csv): direct UTF-8 read.
-    docling failures fall back to raw UTF-8 read.
 
     Synchronous and potentially slow for large PDFs; callers use asyncio.to_thread().
     """
@@ -132,6 +220,14 @@ def _parse_to_text(file_path: str, file_type: str) -> str:
         result = _converter.convert(source=str(path))
         return result.document.export_to_markdown()
     except Exception as exc:
+        if file_type == "pptx":
+            logger.warning(
+                "docling failed for %s (%s) — trying python-pptx fallback: %s",
+                path.name, file_type, exc,
+            )
+            # No raw-read fallback for binary PPTX: if _parse_pptx raises, let it
+            # propagate so ingest_file() marks the file failed rather than embedding garbage.
+            return _parse_pptx(path)
         logger.warning(
             "docling failed for %s (%s) — falling back to raw read: %s",
             path.name, file_type, exc,
@@ -212,6 +308,7 @@ async def ingest_file(
     state_db: StateDB,
     qdrant_client: QdrantClient,
     tag: str = "",
+    embed_concurrency: int = 5,
 ) -> None:
     """
     Atomically parse, chunk, embed, and upsert one document into Qdrant.
@@ -230,12 +327,14 @@ async def ingest_file(
     StateDB) and re-raises so the daemon loop can move to the next file.
 
     Args:
-        file_path:     Absolute NFS path to the file.
-        owner:         Owner string (e.g. "florian") — from StateDB row.
-        rag_cfg:       config["rag"] dict — embedding_model, ollama_url.
-        state_db:      StateDB instance for ingestion status tracking.
-        qdrant_client: Qdrant client in local persistent mode (NAS).
-        tag:           Optional tag derived by the NFS scanner (e.g. "certifications").
+        file_path:        Absolute NFS path to the file.
+        owner:            Owner string (e.g. "florian") — from StateDB row.
+        rag_cfg:          config["rag"] dict — embedding_model, ollama_url.
+        state_db:         StateDB instance for ingestion status tracking.
+        qdrant_client:    Qdrant client in local persistent mode (NAS).
+        tag:              Optional tag derived by the NFS scanner (e.g. "certifications").
+        embed_concurrency: Max parallel Ollama embedding requests per file.
+                          Controlled by --batch in rag_ingest_daemon.py (default 5).
     """
     model      = rag_cfg.get("embedding_model", "bge-m3")
     ollama_url = rag_cfg.get("ollama_url", "http://localhost:11434/api/embeddings")
@@ -301,7 +400,7 @@ async def ingest_file(
             return
 
         # ------------------------------------------------------------------
-        # Step 4: embed child texts via Ollama (5-concurrent semaphore)
+        # Step 4: embed child texts via Ollama (embed_concurrency-concurrent semaphore)
         # ------------------------------------------------------------------
         child_texts = [child for child, _ in pairs]
 
@@ -312,6 +411,7 @@ async def ingest_file(
         vectors = await embed_batch(
             child_texts, model=model, ollama_url=ollama_url,
             progress_cb=_log_embed_progress,
+            concurrency=embed_concurrency,
         )
         state_db.set_progress(file_path, f"embedding {n}/{n}")
 
@@ -341,13 +441,25 @@ async def ingest_file(
         ]
 
         # ------------------------------------------------------------------
-        # Step 6: single atomic upsert
+        # Step 6: batched upsert
+        #
+        # A single upsert with all points can exceed Qdrant's HTTP body limit
+        # for large files (Qdrant returns HTTP 400 "Payload error: JSON payload
+        # (N bytes)"). Splitting into _UPSERT_BATCH_SIZE-point batches keeps
+        # each request well under the limit.
+        #
+        # Atomicity note: step 0 deleted all stale points for this file before
+        # processing began, so the collection is already clean. Individual batch
+        # failures leave a partial set of points for this file — the daemon's
+        # mark_failed() + retry logic will re-run from step 0 on the next
+        # attempt, deleting the partial set before re-inserting cleanly.
         # ------------------------------------------------------------------
         state_db.set_progress(file_path, "upserting")
-        qdrant_client.upsert(
-            collection_name=DOCUMENTS_COLLECTION,
-            points=points,
-        )
+        for batch_start in range(0, len(points), _UPSERT_BATCH_SIZE):
+            qdrant_client.upsert(
+                collection_name=DOCUMENTS_COLLECTION,
+                points=points[batch_start : batch_start + _UPSERT_BATCH_SIZE],
+            )
 
         # ------------------------------------------------------------------
         # Step 7: mark completed

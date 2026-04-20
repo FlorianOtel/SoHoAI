@@ -5,7 +5,7 @@ Show RAG ingestion queue status and Qdrant collection stats.
 Usage (run from project root):
     python utils/rag_status.py
     python utils/rag_status.py --user florian
-    python utils/rag_status.py --failed        # list permanently failed files
+    python utils/rag_status.py --ignored        # detailed listing: ignored files + rationale
     python utils/rag_status.py --watch /tmp/ingest.log   # live monitor
 """
 
@@ -288,12 +288,12 @@ def watch_mode(log_path: str, state_db: StateDB, interval: int = 2) -> None:
             if db_err:
                 print(f"  DB unavailable: {db_err}")
             else:
-                total_f = db.get('total', 0)
-                done_f  = db.get('completed', 0)
-                pend_f  = db.get('pending', 0)
-                fail_f  = db.get('failed', 0)
-                proc_f  = db.get('processing', 0)
-                pct_f   = done_f / total_f * 100 if total_f else 0.0
+                total_f  = db.get('total', 0)
+                done_f   = db.get('completed', 0)
+                pend_f   = db.get('pending', 0)
+                proc_f   = db.get('processing', 0)
+                ignor_f  = db.get('ignored', 0)
+                pct_f    = done_f / total_f * 100 if total_f else 0.0
 
                 print(_row("Files", f"{done_f:,} / {total_f:,}  ({pct_f:.1f}%)"))
                 print(f"  {_bar(done_f, total_f)}")
@@ -301,7 +301,7 @@ def watch_mode(log_path: str, state_db: StateDB, interval: int = 2) -> None:
                 print(f"  {'pending':<12}: {pend_f:>6,}")
                 print(f"  {'processing':<12}: {proc_f:>6,}")
                 print(f"  {'completed':<12}: {done_f:>6,}")
-                print(f"  {'failed':<12}: {fail_f:>6,}")
+                print(f"  {'ignored':<12}: {ignor_f:>6,}")
                 print(f"  {'─' * 20}")
                 print(f"  {'total':<12}: {total_f:>6,}")
 
@@ -319,7 +319,7 @@ def watch_mode(log_path: str, state_db: StateDB, interval: int = 2) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Show RAG pipeline status")
     parser.add_argument("--user", metavar="OWNER", help="Filter counts by owner (e.g. florian)")
-    parser.add_argument("--failed", action="store_true", help="List permanently failed files")
+    parser.add_argument("--ignored", action="store_true", help="Detailed listing of ignored files with retry count and last error")
     parser.add_argument(
         "--watch", metavar="LOG_FILE",
         help="Continuously monitor a rag_ingest_daemon log file (error if not given)",
@@ -353,7 +353,7 @@ def main() -> None:
             "pending":    raw.get("pending", 0),
             "processing": raw.get("processing", 0),
             "completed":  raw.get("completed", 0),
-            "failed":     raw.get("failed", 0),
+            "ignored":    raw.get("ignored", 0),
             "total":      sum(raw.values()),
         }
         scope = f"owner={args.user}"
@@ -365,7 +365,7 @@ def main() -> None:
     print(f"  pending    : {counts['pending']}")
     print(f"  processing : {counts['processing']}")
     print(f"  completed  : {counts['completed']}")
-    print(f"  failed     : {counts['failed']}")
+    print(f"  ignored    : {counts['ignored']}")
     print(f"  ─────────────────")
     print(f"  total      : {counts['total']}")
 
@@ -398,17 +398,17 @@ def main() -> None:
     except Exception as exc:
         print(f"\nQdrant: unavailable ({exc})")
 
-    # --- Failed files ---
-    if args.failed:
-        failed = state_db.get_failed()
-        if failed:
-            print(f"\nPermanently failed files ({len(failed)}):")
-            for row in failed:
+    # --- Ignored files ---
+    if args.ignored:
+        ignored = state_db.get_ignored(owner=args.user or None)
+        if ignored:
+            print(f"\nIgnored files ({len(ignored)}) — permanently skipped after retry exhaustion:")
+            for row in ignored:
                 print(f"  [{row['retry_count']} retries] {row['file_path']}")
-                if row["error_msg"]:
-                    print(f"    → {row['error_msg'][:120]}")
+                if row["skip_reason"]:
+                    print(f"    → {row['skip_reason']}")
         else:
-            print("\nNo permanently failed files.")
+            print("\nNo ignored files.")
 
     state_db.close()
 
