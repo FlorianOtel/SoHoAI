@@ -70,7 +70,7 @@ def _qdrant_stats(qdrant_url: str) -> tuple[bool, int]:
 
 async def retrieval_phase(query: str, user_id: str | None, top_k: int, rag_cfg: dict) -> list[dict]:
     _section("Phase 1 — direct retrieval (search_rag)")
-    qdrant_client = get_client(rag_cfg.get("qdrant_url", "http://localhost:6333"))
+    qdrant_client = get_client(rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"))
     results = await search_rag(
         query=query,
         user_id=user_id,
@@ -90,12 +90,12 @@ async def retrieval_phase(query: str, user_id: str | None, top_k: int, rag_cfg: 
 
 
 def chat_phase(server: str, query: str, user_id: str | None, timeout: float) -> dict:
-    _section("Phase 2 — /v1/chat/completions with use_rag=true")
+    _section("Phase 2 — /v1/chat/completions with rag_mode=on")
     payload = {
         # Fresh chat_id so we don't pick up unrelated Redis history.
         "chat_id": str(uuid.uuid4()),
         "messages": [{"role": "user", "content": query}],
-        "use_rag": True,
+        "rag_mode": "on",
         "stream": False,
     }
     if user_id:
@@ -210,7 +210,7 @@ def main() -> int:
 
     # -- pre-flight --------------------------------------------------------
     _section("Pre-flight")
-    qdrant_url = rag_cfg.get("qdrant_url", "http://localhost:6333")
+    qdrant_url = rag_cfg.get("qdrant_url", "http://192.168.1.93:6333")
     ok, points = _qdrant_stats(qdrant_url)
     print(f"  qdrant {qdrant_url}: {'up' if ok else 'DOWN'}, {points} point(s) in '{DOCUMENTS_COLLECTION}'")
     if not ok or points == 0:

@@ -6,7 +6,7 @@ It wires together:
   - Smart model routing (LiteLLM → local GPU / local CPU / cloud)
   - Short-term memory (Redis conversation cache)
   - Long-term memory (SQLite chat persistence on NAS)
-  - RAG pipeline (Phase 2)
+  - RAG pipeline (Phase 2 + §8 advanced features)
   - MCP tool gateway (Phase 3)
 
 Run:
@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -33,20 +34,23 @@ from schemas import (
     ChatResponse,
     ChatSummary,
     Message,
+    RagMode,
     Role,
 )
 from chat_store import ChatStore
 from conversation import ConversationCache
 from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
 
-from rag_engine import search_rag
+from rag_engine import search_rag, multi_query_search
 from rag_engine.collection import DOCUMENTS_COLLECTION, ensure_collection, get_client
 from rag_engine.ingest import ingest_file
 from rag_engine.scanner import scan_nfs_roots
 from rag_engine.schema import FIELD_SOURCE_PATH
 from rag_engine.state import StateDB
+from rag_engine.tool_use import build_tool_spec, format_tool_result, parse_tool_call
+from prompts.rag_system_prompts import build_system_prompt
 from router import SmartRouter
-from kv_cache import KVCacheManager, apply_mistral_template
+from kv_cache import KVCacheManager, apply_gemma_template
 
 load_dotenv()
 
@@ -112,6 +116,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"Router: {app.state.router.available_models}")
 
     async def summarize_fn(text: str) -> str:
+        # Note: intermediate tool-call / tool-result messages are not persisted
+        # to Redis (only the final assistant answer), so this prompt sees only
+        # user / assistant text — no tool-handling directive needed.
         prompt = (
             "Summarize the following conversation excerpt concisely, "
             "preserving all key facts, decisions, and context needed to continue:\n\n"
@@ -127,13 +134,30 @@ async def lifespan(app: FastAPI):
 
     app.state.summarize_fn = summarize_fn
     app.state.rag_cfg = config.get("rag", {})
+
     try:
-        app.state.qdrant_client = get_client(app.state.rag_cfg.get("qdrant_url", "http://localhost:6333"))
+        qdrant_url = app.state.rag_cfg.get("qdrant_url", "http://192.168.1.93:6333")
+        app.state.qdrant_client = get_client(qdrant_url)
         ensure_collection(app.state.qdrant_client)
         logger.info("Qdrant connected and collection ready ✓")
     except Exception as exc:
         logger.warning("Qdrant unavailable — RAG disabled: %s", exc)
         app.state.qdrant_client = None
+
+    # Variant LLM function for multi-query expansion (§8.3).
+    # Uses the specialist via LiteLLM's OpenAI-compat endpoint — no KV slot involved.
+    _variant_model = app.state.rag_cfg.get("multi_query", {}).get("variant_model", "specialist")
+
+    async def variant_llm_fn(prompt: str) -> str:
+        resp = await app.state.router.complete(
+            messages=[{"role": "user", "content": prompt}],
+            model=_variant_model,
+            force_cloud=(_variant_model == "external"),
+            stream=False,
+        )
+        return resp.choices[0].message.content.strip()
+
+    app.state.variant_llm_fn = variant_llm_fn
 
     rag_state_db_path = f"{_db_base}/sqlite/rag_state.db"
     app.state.state_db = StateDB(rag_state_db_path)
@@ -165,6 +189,60 @@ app.add_middleware(
 
 
 # =============================================================================
+#  RAG HELPERS
+# =============================================================================
+
+def _apply_system_prompt(messages: list[dict], system_prompt: str) -> list[dict]:
+    """Prepend a system message or replace an existing one."""
+    if messages and messages[0]["role"] == "system":
+        return [{"role": "system", "content": system_prompt}] + messages[1:]
+    return [{"role": "system", "content": system_prompt}] + messages
+
+
+def _fold_tool_messages(messages: list[dict]) -> list[dict]:
+    """Fold role=tool messages into role=user for models without native tool support.
+
+    Both the specialist (Gemma chat template) and the external path (plain text
+    conversation via LiteLLM) use this transformation so tool results are always
+    readable by the model.
+    """
+    folded = []
+    for m in messages:
+        if m["role"] == "tool":
+            folded.append({"role": "user", "content": f"Tool result:\n\n{m['content']}"})
+        else:
+            folded.append(m)
+    return folded
+
+
+async def _retrieve(query: str, user_id: str | None) -> list[dict]:
+    """Dispatch to multi-query+MMR or standard search based on config."""
+    rag_cfg = app.state.rag_cfg
+    limit = rag_cfg.get("top_k", 5)
+    mq_enabled = rag_cfg.get("multi_query", {}).get("enabled", False)
+
+    if mq_enabled:
+        logger.info("RAG retrieve: multi-query+MMR  query=%r", query[:60])
+        return await multi_query_search(
+            query=query,
+            user_id=user_id,
+            limit=limit,
+            qdrant_client=app.state.qdrant_client,
+            rag_cfg=rag_cfg,
+            llm_fn=app.state.variant_llm_fn,
+        )
+
+    logger.info("RAG retrieve: standard search  query=%r", query[:60])
+    return await search_rag(
+        query=query,
+        user_id=user_id,
+        limit=limit,
+        qdrant_client=app.state.qdrant_client,
+        rag_cfg=rag_cfg,
+    )
+
+
+# =============================================================================
 #  CHAT ENDPOINT
 # =============================================================================
 
@@ -180,22 +258,6 @@ async def chat_completions(req: ChatRequest):
 #  GPU KV cache slot (prefix acceleration).
 #  Client sends only the latest message each turn.
 # =============================================================================
-
-def _build_rag_prompt(user_query: str, chunks: list[dict]) -> str:
-    """Inject retrieved context chunks into the user query for the LLM."""
-    context_parts = []
-    for i, chunk in enumerate(chunks, 1):
-        source = chunk.get("source_path", "unknown")
-        text = chunk.get("content", "")
-        context_parts.append(f"[{i}] (Source: {source})\n{text}")
-    context_block = "\n\n".join(context_parts)
-    return (
-        "Use the following context to answer the user's question. "
-        "If the context doesn't contain relevant information, say so.\n\n"
-        f"Context:\n{context_block}\n\n"
-        f"Question: {user_query}"
-    )
-
 
 async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
     chat_id = req.chat_id
@@ -222,7 +284,6 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
     # -- 2. Rolling summarization ---------------------------------------------
     summarized = await cache.maybe_summarize(chat_id, app.state.summarize_fn)
     if summarized:
-        # maybe_summarize() erased the KV slot (prompt changed); re-assign.
         slot_id = await cache.resume(chat_id)
         logger.info(f"Context summarized for chat {chat_id[:8]}")
 
@@ -230,79 +291,132 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
     history = await cache.get_context(chat_id)
     messages = [m.to_llm_dict() for m in history]
 
-    # -- 4. RAG augmentation (Phase 2) ----------------------------------------
-    rag_sources = None
-    if req.use_rag and app.state.qdrant_client is not None:
-        try:
-            chunks = await search_rag(
-                query=user_msg.content,
-                user_id=req.user_id,
-                limit=app.state.rag_cfg.get("top_k", 5),
-                qdrant_client=app.state.qdrant_client,
-                rag_cfg=app.state.rag_cfg,
-            )
-            if chunks:
-                messages[-1]["content"] = _build_rag_prompt(user_msg.content, chunks)
-                rag_sources = [c.get("source_path", "") for c in chunks]
-        except Exception as exc:
-            logger.warning("RAG search failed, proceeding without context: %s", exc)
+    # -- 4. RAG mode + system prompt (§8.1 / §8.2) ---------------------------
+    # If the client sent rag_mode explicitly, honour it. Otherwise fall back to
+    # the server-side default from config.yaml (rag.default_mode).
+    if "rag_mode" in req.model_fields_set:
+        rag_mode: RagMode = req.rag_mode
+    else:
+        rag_mode = RagMode(app.state.rag_cfg.get("default_mode", "on"))
+    if rag_mode != RagMode.off and app.state.qdrant_client is None:
+        logger.warning("RAG mode=%s requested but Qdrant unavailable; forcing off", rag_mode)
+        rag_mode = RagMode.off
 
-    # -- 5. Route and infer ---------------------------------------------------
-    target_model = router.select_model(messages, req.model, req.force_cloud)
-    assistant_content: str
-    model_used: str
+    tool_spec = build_tool_spec() if rag_mode != RagMode.off else None
+    system_prompt = build_system_prompt(rag_mode, tool_spec)
+    messages = _apply_system_prompt(messages, system_prompt)
 
+    # -- 5. Tool-use loop (§8.2 / §8.3) -------------------------------------
+    rag_cfg = app.state.rag_cfg
+    max_iter = rag_cfg.get("tool_use", {}).get("max_iterations", 2)
+    strip_on_final = rag_cfg.get("tool_use", {}).get("strip_on_final", True)
+
+    rag_sources: list[str] | None = None
+    rag_chunks_used: list[dict] = []
+    assistant_content = ""
+    model_used = "specialist"
+    used_specialist = False
     inference_ok = False
-    used_specialist = (
-        target_model == "specialist"
-        and cache.kv_cache is not None
-        and slot_id is not None
-    )
 
     try:
-        if used_specialist:
-            prompt = apply_mistral_template(messages)
-            result = await cache.kv_cache.inference(slot_id=slot_id, prompt=prompt)
-            assistant_content = result["content"].strip()
-            model_used = "specialist"
-        else:
-            response = await router.complete(
-                messages=messages,
-                model=req.model,
-                force_cloud=req.force_cloud,
-                stream=False,
+        for iteration in range(max_iter + 1):
+            # 5a. Select model and run inference
+            target_model = router.select_model(messages, req.model, req.force_cloud)
+            used_specialist = (
+                target_model == "specialist"
+                and cache.kv_cache is not None
+                and slot_id is not None
             )
-            assistant_content = response.choices[0].message.content
-            model_used = response.get("model", req.model or "unknown")
 
-        await cache.append(chat_id, "assistant", assistant_content)
-        store.save_message(
-            chat_id, "assistant", assistant_content,
-            model_used=model_used,
-            token_count=0,
-        )
-        inference_ok = True
+            llm_messages = _fold_tool_messages(messages)
+
+            if used_specialist:
+                prompt = apply_gemma_template(llm_messages)
+                result = await cache.kv_cache.inference(slot_id=slot_id, prompt=prompt)
+                raw_text = result["content"].strip()
+                model_used = "specialist"
+            else:
+                response = await router.complete(
+                    messages=llm_messages,
+                    model=req.model,
+                    force_cloud=req.force_cloud,
+                    stream=False,
+                )
+                raw_text = response.choices[0].message.content
+                model_used = response.get("model", req.model or "unknown")
+
+            inference_ok = True
+
+            # 5b. Parse tool call (only when RAG is active)
+            tool_call = parse_tool_call(raw_text) if rag_mode != RagMode.off else None
+
+            if tool_call is None or iteration == max_iter:
+                # Final answer — optionally strip any stray tool-call tags
+                if strip_on_final and tool_call is not None:
+                    raw_text = re.sub(
+                        r"<tool_call>.*?</tool_call>", "", raw_text, flags=re.DOTALL
+                    ).strip()
+                assistant_content = raw_text
+                break
+
+            # 5c. Dispatch known tool
+            if tool_call["name"] != "search_documents":
+                logger.warning("Unknown tool call: %s", tool_call["name"])
+                messages.append({"role": "assistant", "content": raw_text})
+                messages.append({"role": "tool", "content": f"Unknown tool: {tool_call['name']}"})
+                continue
+
+            query = tool_call["arguments"].get("query", "").strip()
+            if not query:
+                messages.append({"role": "assistant", "content": raw_text})
+                messages.append({"role": "tool", "content": "Empty query — please provide a search term."})
+                continue
+
+            # 5d. Retrieve and feed result back
+            chunks = await _retrieve(query, req.user_id)
+            rag_chunks_used.extend(chunks)
+            messages.append({"role": "assistant", "content": raw_text})
+            messages.append({"role": "tool", "content": format_tool_result(chunks)})
 
     except Exception as e:
-        logger.error(f"Inference failed (server-managed, chat {chat_id[:8]}): {e}")
+        logger.error(f"Inference failed (chat {chat_id[:8]}): {e}")
         raise HTTPException(status_code=502, detail=f"LLM error: {str(e)}")
 
     finally:
         if inference_ok and used_specialist:
             await cache.park(chat_id)      # save KV slot + refresh Redis TTL
-        elif not used_specialist:
+        elif inference_ok and not used_specialist:
             await cache.touch(chat_id)     # refresh Redis TTL (no KV slot used)
-        else:
-            # Specialist inference failed — discard undefined slot state
+        elif used_specialist:
+            # Inference failed — discard undefined slot state
             if cache.kv_cache is not None:
                 await cache.kv_cache.erase(chat_id)
 
-    # -- 6. Return ------------------------------------------------------------
+    # -- 6. Build rag_sources from actual tool results (dedup, order preserved)
+    if rag_chunks_used:
+        seen: set[str] = set()
+        rag_sources = []
+        for c in rag_chunks_used:
+            path = c.get("source_path", "")
+            if path and path not in seen:
+                seen.add(path)
+                rag_sources.append(path)
+
+    # -- 7. Persist assistant message ----------------------------------------
+    await cache.append(chat_id, "assistant", assistant_content)
+    store.save_message(
+        chat_id, "assistant", assistant_content,
+        model_used=model_used,
+        token_count=0,
+    )
+
+    # -- 8. Return ------------------------------------------------------------
     return ChatResponse(
         chat_id=chat_id,
         model_used=model_used,
         message=Message(role=Role.assistant, content=assistant_content),
         rag_sources=rag_sources,
+        rag_mode_used=rag_mode,
     )
 
 
@@ -375,10 +489,7 @@ async def export_rl_data(chat_id: str):
 
 @app.post("/v1/chats/{chat_id}/feedback")
 async def submit_feedback(chat_id: str, message_index: int, signal: str, detail: str = ""):
-    """
-    Submit feedback on a specific message (for RL data collection).
-    Signals: thumbs_up, thumbs_down, edited, regenerated
-    """
+    """Submit feedback on a specific message (for RL data collection)."""
     app.state.store.save_feedback(chat_id, message_index, signal, detail)
     return {"status": "recorded"}
 
@@ -419,15 +530,7 @@ async def _ingest_worker(
 
 @app.post("/v1/rag/ingest/sync")
 async def rag_ingest_sync(user: str | None = Query(None)):
-    """
-    Scan configured NFS roots and populate the ingestion queue.
-
-    Runs the NFS scanner in a thread (blocking I/O). New and modified files
-    are queued as 'pending'; deleted files are removed.
-
-    Query params:
-        user — scan only this owner's roots (e.g. ?user=florian)
-    """
+    """Scan configured NFS roots and populate the ingestion queue."""
     result = await asyncio.to_thread(
         scan_nfs_roots,
         app.state.state_db,
@@ -459,13 +562,7 @@ async def rag_ingest_sync(user: str | None = Query(None)):
 
 @app.post("/v1/rag/ingest/start")
 async def rag_ingest_start():
-    """
-    Start the ingestion daemon as an asyncio background task.
-
-    Returns immediately; the worker processes pending files in the background.
-    Call GET /v1/rag/ingest/status to monitor progress.
-    Call POST /v1/rag/ingest/stop to halt gracefully.
-    """
+    """Start the ingestion daemon as an asyncio background task."""
     if app.state.qdrant_client is None:
         raise HTTPException(503, "Qdrant unavailable — RAG is disabled")
 
@@ -496,12 +593,7 @@ async def rag_ingest_stop():
 
 @app.get("/v1/rag/ingest/status")
 async def rag_ingest_status(user: str | None = Query(None)):
-    """
-    Return ingestion queue metrics and Qdrant point count.
-
-    Query params:
-        user — filter SQLite counts to this owner (e.g. ?user=florian)
-    """
+    """Return ingestion queue metrics and Qdrant point count."""
     state_db: StateDB = app.state.state_db
     counts = state_db.get_counts()
 

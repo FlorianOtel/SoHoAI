@@ -16,7 +16,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_OLLAMA_URL = "http://localhost:11434/api/embeddings"
+_DEFAULT_OLLAMA_URL = "http://192.168.1.93:11434/api/embeddings"
 _DEFAULT_MODEL = "bge-m3"
 _BATCH_CONCURRENCY = 5      # max parallel Ollama requests (no native batch endpoint)
 _PROGRESS_INTERVAL = 50     # call progress_cb every this many completed embeddings

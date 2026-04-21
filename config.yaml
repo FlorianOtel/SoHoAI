@@ -46,10 +46,6 @@ model_list:
       id: "external-claude"
       description: "Claude Sonnet via Anthropic API (fallback / complex tasks)"
 
-  # --- Embedding model on Server 1 (CPU) for RAG ---
-  # Note: Embeddings run via Ollama HTTP (bge-m3), not LiteLLM.
-  # See rag: section below and rag_engine/ for implementation.
-
 # -- Routing Policy ------------------------------------------------------------
 routing:
   default_model: "specialist"
@@ -60,18 +56,32 @@ routing:
   complexity_threshold_tokens: 120000
   cloud_model: "external"
 
-# -- RAG Settings (Phase 2) ---------------------------------------------------
+# -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
 rag:
   embedding_model: "bge-m3"                      # 1024-dim, 8192-tok context, served by Ollama on Server 1
-  ollama_url: "http://localhost:11434/api/embeddings"
+  ollama_url: "http://192.168.1.93:11434/api/embeddings"   # Ollama on Server 1 (explicit IP — not localhost)
   top_k: 5
   # Parent-child chunking (see RAG-strategy.md §3.4):
   #   child: 200-300 tokens (embedded), parent: 800-1200 tokens (returned to LLM)
   #   Flat 512-token for PPTX / short TXT / YAML / config files
   qdrant_collection: "documents"
-  qdrant_url: "http://192.168.1.93:6333"
+  qdrant_url: "http://192.168.1.93:6333"         # Qdrant on Server 1 (local NVMe)
   # Active Qdrant storage: /var/lib/qdrant/storage (local NVMe, Server 1)
   # Snapshots (DR):        /mnt/nfs/__Backups/HomeAI-lab--databases/qdrant-snapshots/
+  default_mode: "off"                            # off | on | only — server default for rag_mode (opt-in)
+
+  # -- Tool-use loop (§8.2) ---------------------------------------------------
+  tool_use:
+    max_iterations: 2       # hard cap on tool-call round trips per user turn
+    strip_on_final: true    # remove any stray <tool_call> tags from final answer
+
+  # -- Multi-query retrieval + MMR (§8.3) -------------------------------------
+  multi_query:
+    enabled: false          # master toggle — start disabled; flip after benchmarking
+    n_variants: 3           # LLM-generated rephrasings (plus the original = 4 queries)
+    lambda: 0.5             # MMR relevance/diversity balance [0, 1]
+    pool_multiplier: 4      # candidate pool size = pool_multiplier * top_k
+    variant_model: "specialist"  # "specialist" or "external"
 
   # -- NFS scanner filters ------------------------------------------------------
   scanner:
@@ -86,19 +96,21 @@ rag:
       - .yaml
       - .yml
       - .ipynb
-
     # Directory names that os.walk will not descend into.
     exclude_dir_names:
       - .Gin-AI-python-3.12   # Python virtualenv
       - __pycache__
       - .git
       - node_modules
-      - .claude      
-
+      - .claude
+      - .vscode
+      - .venv
+      - Library  # macOS stuff
+      - Applications # macOS stuff
+      - LLMs-cache   # HuggingFace model cache — READMEs/licenses, not RAG content
     # Directory name suffixes to skip (matched with str.endswith).
     exclude_dir_suffixes:
       - .dist-info             # pip package metadata
-
     # Substrings — any filename containing one of these is skipped.
     exclude_file_patterns:
       - "@synoeastream"        # Synology NAS streaming metadata
@@ -109,14 +121,14 @@ users:
     owner: "florian"
     nfs_roots: ["/mnt/nfs/Florian"]
   # eva.otel@gmail.com
-  #   owner: "eva"
-  #   nfs_roots: ["/mnt/nfs/Eva"]
+  # owner: "eva"
+  # nfs_roots: ["/mnt/nfs/Eva"]
   # annika@example.com:
-  #   owner: "annika"
-  #   nfs_roots: ["/mnt/nfs/Annika"]
+  # owner: "annika"
+  # nfs_roots: ["/mnt/nfs/Annika"]
   # laura@example.com:
-  #   owner: "laura"
-  #   nfs_roots: ["/mnt/nfs/Laura"]
+  # owner: "laura"
+  # nfs_roots: ["/mnt/nfs/Laura"]
 shared:
   owner: "la-familia"
   nfs_roots: ["/mnt/nfs/La-Familia"]
@@ -129,7 +141,6 @@ llama_server:
   # Number of parallel slots (must match --parallel N on llama-server).
   # Gemma 4 + f16 KV + 131072 ctx: ~2,088 MiB per slot (4 global KV layers + 20 SWA layers at 512-window).
   # New llama.cpp SWA-aware implementation: f16 uses same VRAM as old q8_0 but with better precision.
-  # 2 slots × 2,088 MiB = ~4,176 MiB KV pre-allocated in VRAM (no prompt cache). Total VRAM: ~9 GB.
   num_slots: 2
   timeout_seconds: 120
 

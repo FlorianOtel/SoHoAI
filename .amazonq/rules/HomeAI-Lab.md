@@ -4,7 +4,7 @@ Project directory: `/home/florian/Gin-AI/projects/HomeAI-Lab`
 
 Distributed two-server AI orchestrator with:
 - FastAPI gateway (Server 1: 192.168.1.93)
-- LLM inference (Server 2: 192.168.1.95, RTX 5070, Mistral Nemo 12B Q4)
+- LLM inference (Server 2: 192.168.1.95, RTX 5070, Gemma 4 E4B 7.52B Q8_0 via llama-server)
 - Redis conversation cache + SQLite persistence
 - KV cache slot management for llama-server
 - Smart routing: local GPU → cloud fallback

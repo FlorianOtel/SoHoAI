@@ -122,6 +122,8 @@ def scan_nfs_roots(
 
     scanned = 0
     existing_paths: set[str] = set()
+    visited_real_dirs: set[str] = set()   # global — prevents re-walking the same real dir via different symlinks
+    visited_real_files: set[str] = set()  # global — prevents ingesting the same real file via different symlink paths
 
     for root, owner in roots_to_scan:
         if not os.path.isdir(root):
@@ -131,7 +133,15 @@ def scan_nfs_roots(
         root_count = 0
         logger.info("Scanning %s  (owner=%s)", root, owner)
 
-        for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=True):
+            # Directory dedup — skip any real dir path already visited (handles circular symlinks
+            # and the same dir reachable via multiple symlinks across roots)
+            real_dirpath = os.path.realpath(dirpath)
+            if real_dirpath in visited_real_dirs:
+                dirnames.clear()
+                continue
+            visited_real_dirs.add(real_dirpath)
+
             # Prune excluded subtrees in-place — prevents os.walk from descending
             dirnames[:] = [
                 d for d in dirnames
@@ -141,6 +151,10 @@ def scan_nfs_roots(
             for filename in filenames:
                 filepath = os.path.join(dirpath, filename)
                 if _should_include(Path(filepath), include_exts, exclude_patterns):
+                    real_filepath = os.path.realpath(filepath)
+                    if real_filepath in visited_real_files:
+                        continue
+                    visited_real_files.add(real_filepath)
                     try:
                         mtime = os.path.getmtime(filepath)
                     except OSError:

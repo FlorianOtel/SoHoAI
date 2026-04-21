@@ -59,7 +59,7 @@ def main() -> None:
             sys.exit(0)
 
     state_db = StateDB(db_path)
-    qdrant = get_client(rag_cfg.get("qdrant_url", "http://localhost:6333"))
+    qdrant = get_client(rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"))
     existing = {c.name for c in qdrant.get_collections().collections}
 
     if args.user:

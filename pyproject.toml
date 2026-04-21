@@ -103,6 +103,7 @@ dependencies = [
     "pydantic-settings==2.13.1",
     "pygments==2.19.2",
     "pyjwt==2.11.0",
+    "prompt_toolkit==3.0.47",
     "pypdf==6.7.1",
     "python-dateutil==2.9.0.post0",
     "python-dotenv==1.2.1",

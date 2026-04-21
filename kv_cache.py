@@ -33,32 +33,49 @@ logger = logging.getLogger(__name__)
 # Chat template
 # -----------------------------------------------------------------------------
 
-def apply_mistral_template(messages: list[dict]) -> str:
-    """
-    Format a messages list using the Mistral instruction template.
+def apply_gemma_template(messages: list[dict]) -> str:
+    """Format a messages list using the Gemma 4 native chat template.
 
-    System message content is prepended to the first user turn.
-    Format: [INST] {user} [/INST] {assistant}</s>[INST] {user} [/INST]
-    """
-    prompt = ""
-    pending_system: Optional[str] = None
+    Gemma 4 E4B uses <|turn>role\\n... markers (tokens [105, role_id, 107]).
+    System, user, and model (assistant) turns are all first-class citizens.
+    The prompt is left open-ended with <|turn>model\\n to prime generation.
 
+    Stop tokens for /completion: ["<|turn>"]
+    (The model terminates its turn when it sees the next <|turn> marker.)
+
+    Verified against llama-server /props chat_template 2026-04-21.
+    """
+    prompt = "<bos>"
     for msg in messages:
         role = msg["role"]
         content = msg["content"]
+        # Map OpenAI role names to Gemma role names
+        if role == "assistant":
+            role = "model"
+        prompt += f"<|turn>{role}\n{content}"
+    prompt += "<|turn>model\n"
+    return prompt
 
+
+# Kept for reference — DO NOT USE with Gemma 4 E4B or any Gemma model.
+# This was written for Mistral Nemo 12B (retired 2026-04-20).
+# Using it with Gemma causes the model to hallucinate conversation structure
+# and free-run past </tool_call> because [INST]/[/INST] are not Gemma tokens.
+def apply_mistral_template(messages: list[dict]) -> str:
+    """DEPRECATED — Mistral Nemo format only. Do not use with Gemma."""
+    prompt = ""
+    pending_system: Optional[str] = None
+    for msg in messages:
+        role, content = msg["role"], msg["content"]
         if role == "system":
             pending_system = content
-
         elif role == "user":
             if pending_system:
                 content = f"{pending_system}\n\n{content}"
                 pending_system = None
             prompt += f"[INST] {content} [/INST]"
-
         elif role == "assistant":
             prompt += f" {content}</s>"
-
     return prompt
 
 
@@ -222,7 +239,7 @@ class KVCacheManager:
             "cache_prompt": True,
             "n_predict": max_tokens,
             "temperature": temperature,
-            "stop": stop or ["</s>", "[INST]"],
+            "stop": stop or ["<|turn>"],   # Gemma 4 turn separator
         }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(f"{self.base_url}/completion", json=payload)
@@ -241,7 +258,7 @@ class KVCacheManager:
     ) -> dict:
         """All-in-one: restore slot → inference → save."""
         slot_id = await self.restore(chat_id)
-        prompt = apply_mistral_template(messages)
+        prompt = apply_gemma_template(messages)
         result = await self.inference(slot_id, prompt, temperature=temperature,
                                       max_tokens=max_tokens, stop=stop)
         await self.save(chat_id)

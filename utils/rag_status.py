@@ -391,7 +391,7 @@ def main() -> None:
 
     # --- Qdrant stats ---
     try:
-        qdrant = get_client(rag_cfg.get("qdrant_url", "http://localhost:6333"))
+        qdrant = get_client(rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"))
         existing = {c.name for c in qdrant.get_collections().collections}
         if DOCUMENTS_COLLECTION in existing:
             total_pts = qdrant.count(DOCUMENTS_COLLECTION, exact=True).count

@@ -1,0 +1,51 @@
+# RAG benchmark queries — format:  query | expected_path_substring
+#
+# Verified 2026-04-21 against 98,737-point corpus (user=florian).
+# Expected substring matched against source_path in top-5 results.
+#
+# Mix of:
+#   high-confidence hits (score > 0.65) — should always recall
+#   medium-confidence hits (score 0.50–0.65) — where multi-query should help
+#   known-redundant queries — where MMR should visibly diversify
+
+# ── High-confidence, high-redundancy (MMR primary benefit) ──────────────────
+
+# 4/5 results currently from the same Exam Guide PDF → MMR should diversify
+AWS Machine Learning certification | AWS-Certification--ML-Engineer-Associate
+
+# All 5 results from same notebook duplicated across pytorch/mxnet/tensorflow dirs
+attention mechanism transformer query key value | queries-keys-values.ipynb
+
+# d2l textbook — all 5 from same generalization chapter (3 frameworks)
+dropout regularization deep learning | chapter_multilayer-perceptrons
+
+# ── High-confidence, good diversity (control group — MMR should not regress) ─
+
+# Known direct hit on certification doc
+cisco DCNIDS certificate networking | cisco-DCNIDS
+
+# Data Mining textbook — hits at 0.70; 3/5 from same PDF
+time series forecasting methods | Data Mining for Business Analytics
+
+# Our own project docs — should always be top result
+HomeAI-Lab Qdrant vector store | HomeAI-Lab
+
+# Azure slides — specific deck with clear path substring
+Kubernetes Azure microservices deployment | Azure Kubernetes Service
+
+# ── Medium-confidence (multi-query variants should improve recall) ────────────
+
+# AWS ML Engineer lab — confirmed hit at 0.59
+SageMaker training script PyTorch | AWS-Certification--ML-Engineer-Associate
+
+# LangGraph Ollama Udemy course notebooks
+LangGraph stateful agent workflow | LangGraph-and-Ollama
+
+# 2/5 currently from same llms-full.txt — MMR should open up other results
+OAuth2 OIDC token authentication | llms-full
+
+# Multilayer perceptron chapter — should hit d2l notebooks
+neural network multilayer perceptron backprop | multilayer-perceptrons
+
+# GitLab enablement session docs
+GitLab CI CD pipeline | GitLab--Berlin

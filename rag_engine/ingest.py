@@ -337,7 +337,7 @@ async def ingest_file(
                           Controlled by --batch in rag_ingest_daemon.py (default 5).
     """
     model      = rag_cfg.get("embedding_model", "bge-m3")
-    ollama_url = rag_cfg.get("ollama_url", "http://localhost:11434/api/embeddings")
+    ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.93:11434/api/embeddings")
 
     file_name = Path(file_path).name
     file_type = Path(file_path).suffix.lstrip(".").lower()

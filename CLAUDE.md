@@ -154,26 +154,32 @@ HomeAI-Lab/
 ├── schemas.py                  # Pydantic models (ChatRequest, ChatResponse, etc.)
 ├── router.py                   # SmartRouter — LiteLLM wrapper with routing logic
 ├── conversation.py             # ConversationCache — Redis + KV cache coordinator
-├── kv_cache.py                 # KVCacheManager — llama-server slot save/restore + inference
+├── kv_cache.py                 # KVCacheManager — llama-server slot save/restore + inference; apply_gemma_template() (Gemma 4 <|turn> format)
 ├── chat_store.py               # ChatStore — SQLite long-term persistence
 ├── mcp_gateway.py              # MCP tool gateway (Phase 3 stub, interface defined)
 ├── pyproject.toml              # Python dependencies (uv-managed)
-├── rag_engine/                 # RAG pipeline (Phase 2 ✅ complete)
-│   ├── __init__.py             # exports search_rag(query, user_id, limit)
+├── prompts/                    # System prompt builders (§8.1)
+│   └── rag_system_prompts.py   # build_system_prompt(mode, tool_spec) → off/on/only prompts
+├── rag_engine/                 # RAG pipeline (Phase 2 ✅ + §8 advanced retrieval ✅)
+│   ├── __init__.py             # re-exports search_rag, multi_query_search
 │   ├── schema.py               # Qdrant payload field constants + derive_owner()
 │   ├── collection.py           # Collection name, vector size, get_client(), ensure_collection()
-│   ├── embeddings.py           # embed_text(), embed_batch(progress_cb) via Ollama
+│   ├── embeddings.py           # embed_text(), embed_batch(progress_cb) via Ollama on Server 1
 │   ├── state.py                # StateDB — ingestion queue CRUD + crash recovery
-│   ├── scanner.py              # NFS filesystem scanner → populates StateDB; filters read from config.yaml rag.scanner
+│   ├── scanner.py              # NFS filesystem scanner → populates StateDB; filters read from config.yaml rag.scanner; followlinks=True with visited_real_dirs + visited_real_files global dedup sets to prevent re-ingesting symlink aliases
 │   ├── ingest.py               # docling parse + parent-child chunking + Qdrant upsert
-│   └── search.py               # query → embed → Qdrant query_points → parent_text + provenance
+│   ├── search.py               # query → embed → Qdrant query_points → parent_text + provenance
+│   ├── multi_query.py          # §8.3: expand_query() + parallel search + MMR reranking (enabled: false by default)
+│   └── tool_use.py             # §8.2: build_tool_spec(), parse_tool_call(), format_tool_result()
 ├── utils/
-│   ├── cli_chat.py             # Terminal chat client; RAG on by default; --user OWNER sends user_id for ownership filter; /rag search <query> inspects retrieval; /user <id> changes owner mid-session
+│   ├── cli_chat.py             # Terminal chat client; RAG off by default (opt-in); --user OWNER sends user_id; /rag on|off|only; /rag search <query> inspects retrieval; /user <id> changes owner mid-session
 │   ├── rag_sync_nfs.py         # CLI: scan NFS roots → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files
 │   ├── rag_ingest_daemon.py    # CLI: process pending files (parse → chunk → embed → upsert)
 │   ├── rag_status.py           # CLI: queue counts + Qdrant point stats; --ignored for detail; --watch LOG_FILE for live ETA monitor; --list-pending [N] to print pending paths (pipeable)
 │   ├── rag_search_cli.py       # CLI: retrieval-only — embed query + Qdrant search; prints top-k hits + parent_text preview
-│   ├── rag_smoke_test.py       # CLI: end-to-end smoke test — retrieval + /v1/chat/completions with use_rag=true; --expect SUBSTR assertion; pass/fail exit code
+│   ├── rag_smoke_test.py       # CLI: end-to-end smoke test — retrieval + /v1/chat/completions with rag_mode=on; --expect SUBSTR assertion; pass/fail exit code
+│   ├── rag_mmr_bench.py        # CLI: MMR benchmark — single vs multi-query recall@5 + latency + diversity; --compare runs specialist vs external side-by-side; go/no-go verdict
+│   ├── rag_bench_queries.txt   # 12 verified queries with expected path substrings for rag_mmr_bench.py
 │   ├── rag_reset.py            # CLI: reset Qdrant collection + ingestion queue
 │   ├── notebooklm_auth.py      # NotebookLM browser automation (Playwright + system Chrome)
 │   ├── snapshot_codebase.py    # Aggregate project files → codebase_snapshot.md
@@ -213,7 +219,7 @@ HomeAI-Lab/
 | POST | `/v1/rag/ingest/stop` | Stop ingestion worker gracefully |
 | GET | `/v1/rag/ingest/status` | Queue metrics + Qdrant point count |
 
-Responses use a custom `ChatResponse` model (`chat_id`, `model_used`, `message`, `rag_sources`).
+Responses use a custom `ChatResponse` model (`chat_id`, `model_used`, `message`, `rag_sources`, `rag_mode_used`).
 **Not** OpenAI-compatible format — the CLI reads `data["message"]["content"]`.
 OpenAI-compatible response format is a Phase 3 requirement for Open WebUI integration.
 
@@ -232,16 +238,24 @@ OpenAI-compatible response format is a Phase 3 requirement for Open WebUI integr
 - Feedback collection for RL
 - MCP server for Gin-AI filesystem (`NFS-files--MCP-server/`) ✅
 
-### Per-request flow (specialist model path)
+### Per-request flow (specialist model path, §8 tool-use loop)
 ```
-resume(chat_id)      → assign slot + restore KV from NAS (if exists)
-append(user_msg)     → Redis + SQLite
-maybe_summarize()    → if >200K chars: summarize old turns via specialist,
-                       rebuild Redis, erase stale KV, re-assign slot
-get_context()        → condensed history from Redis
-inference(slot_id)   → POST /completion to llama-server GPU slot
-append(assistant)    → Redis + SQLite
-park(chat_id)        → save KV slot to NAS + refresh Redis TTL
+resume(chat_id)           → assign slot + restore KV from NAS (if exists)
+append(user_msg)          → Redis + SQLite
+maybe_summarize()         → if >200K chars: summarize old turns via specialist,
+                            rebuild Redis, erase stale KV, re-assign slot
+get_context()             → condensed history from Redis
+build_system_prompt()     → off/on/only mode → tool spec injected into system message
+loop (max 2 iterations):
+  apply_gemma_template()  → <|turn>role\n… format; stop=["<|turn>"]
+  inference(slot_id)      → POST /completion to llama-server GPU slot
+  parse_tool_call()       → detect <tool_call>…</tool_call> in output
+  if tool_call:
+    _retrieve()           → search_rag() or multi_query_search() depending on config
+    append tool result    → re-enter loop
+  else: final answer → break
+append(assistant)         → Redis + SQLite
+park(chat_id)             → save KV slot to NAS + refresh Redis TTL
 ```
 
 ### Phase 2 — RAG ✅ (complete, ingested 2026-04-21)
@@ -249,7 +263,6 @@ park(chat_id)        → save KV slot to NAS + refresh Redis TTL
 Initial ingestion run produced **2891 files completed, 0 pending, 0 ignored**, yielding
 **98,737 Qdrant points** in the `documents` collection (avg ~34 chunks/file). End-to-end
 retrieval + chat injection verified via `utils/rag_smoke_test.py`.
-
 
 - **Multi-tenancy** — per-user document isolation via Google OAuth2 (see design decisions)
   - Each family member has a private NFS root (`/mnt/nfs/{Florian,Eva,Annika,Laura}`)
@@ -265,17 +278,36 @@ retrieval + chat injection verified via `utils/rag_smoke_test.py`.
   - Child chunks (~250 tokens, 20 overlap) → embedded, stored in Qdrant as search index
   - Parent chunks (~800–1200 tokens, 100 overlap) → raw text only, stored in Qdrant payload (`parent_text` field)
   - Flat 512-token chunks used only for PPTX slides and short TXT/YAML/config files (already compact)
-- Embeddings via **bge-m3 served by Ollama on Server 1**
+- Embeddings via **bge-m3 served by Ollama on Server 1** (`http://192.168.1.93:11434`)
   - 1024 dimensions, 570M params, ~1.2GB — top MTEB scores; 8192-token context window
-  - API: `POST http://localhost:11434/api/embeddings`; no batch endpoint — `embed_batch()` runs up to N concurrent requests via asyncio semaphore, where N is `--batch` in `rag_ingest_daemon.py` (default 5)
+  - API: `POST http://192.168.1.93:11434/api/embeddings`; no batch endpoint — `embed_batch()` runs up to N concurrent requests via asyncio semaphore, where N is `--batch` in `rag_ingest_daemon.py` (default 5)
   - `embed_batch()` accepts optional `progress_cb(done, total)` — called every 50 chunks (`_PROGRESS_INTERVAL`) + on the final chunk; used by `ingest.py` to log `"Embedding progress: N/M  filename"` lines read by `rag_status.py --watch`
-  - Config keys: `embedding_model: bge-m3`, `ollama_url: http://localhost:11434/api/embeddings`
+  - Config keys: `embedding_model: bge-m3`, `ollama_url: http://192.168.1.93:11434/api/embeddings`
   - Query latency: ~650ms/chunk unloaded; **~28–30s under full ingest load** (Ollama serializes, search query queues behind ingest batch)
   - HTTP timeout in `embed_text()`: **120s** — must be this high or search times out while ingest daemon is running
-- Qdrant vector store on Server 1, persisted to NAS — **confirmed right choice** (see design decisions)
-- RAG-augmented prompts (context injection before LLM call)
-- Package: `rag_engine/` — fully implemented (schema, collection, embeddings, state, scanner, ingest, search); `rag.py` deleted
+- Qdrant vector store on Server 1 (`http://192.168.1.93:6333`), active storage on local NVMe — **confirmed right choice** (see design decisions)
+- Package: `rag_engine/` — fully implemented (schema, collection, embeddings, state, scanner, ingest, search, multi_query, tool_use); `rag.py` deleted
 - Full design details: `RAG-strategy.md`
+
+### Advanced RAG features ✅ (§8.1–§8.3, implemented 2026-04-21)
+
+- **`rag_mode` enum** (`off` / `on` / `only`) — the legacy boolean toggle is gone.
+  `ChatRequest.rag_mode` default is `"off"` (opt-in); server falls back to
+  `rag.default_mode` from `config.yaml` when caller omits the field.
+  `ChatResponse` adds `rag_mode_used` for debuggability.
+- **Tool-use via system prompt** — LLM decides when to retrieve; no unconditional top-k injection.
+  `<tool_call>{"name":"search_documents","args":{"query":"…"}}</tool_call>` sentinel parsed
+  by `rag_engine/tool_use.py`. Tool messages folded to `role=user` for both specialist and
+  external paths. Hard cap: `rag.tool_use.max_iterations: 2`.
+- **Multi-query + MMR** — `rag_engine/multi_query.py`; disabled by default (`rag.multi_query.enabled: false`).
+  When enabled: LLM generates N query variants → parallel Qdrant search → union →
+  MMR reranking (λ=0.5) using original-query vector. Toggle in `config.yaml` after benchmarking.
+- **`prompts/rag_system_prompts.py`** — `build_system_prompt(mode, tool_spec)` is the single
+  source of all three mode prompts; called by `main.py` before each tool-use loop.
+- **Service addresses** — all explicit IPs: Ollama `192.168.1.93:11434`, Qdrant `192.168.1.93:6333`.
+  Redis remains `127.0.0.1:6379` (loopback required by Redis protected mode).
+- **`§8.4 Contextual retrieval`** — documented in `RAG-strategy.md §8.4`, NOT implemented.
+  Requires re-embedding all 98,737 points; gated on primary-model decision + benchmark harness.
 
 #### Phase 2 design decisions (confirmed 2026-03-30)
 
@@ -419,6 +451,8 @@ Other user directories (`/mnt/nfs/{Eva,Annika,Laura}`) and `/mnt/nfs/La-Familia`
 11. ~~Configure `users:` section in `config.yaml` with real Google emails~~ — ✅ done 2026-04-17 (`florian.otel@gmail.com` active; others commented out until ready)
 
 12. ~~Run initial NFS scan and ingestion~~ — ✅ done 2026-04-21 (2891 files, 98,737 Qdrant points; see `RAG-strategy.md §5` for the runbook)
+13. ~~Implement `rag_mode` (off/on/only), system-prompt tool-use loop, `prompts/` module~~ — ✅ done 2026-04-21 (§8.1–§8.2; legacy boolean toggle removed)
+14. ~~Implement multi-query + MMR reranking (`rag_engine/multi_query.py`)~~ — ✅ code done 2026-04-21 (§8.3; `rag.multi_query.enabled: false` until benchmarked)
 
 **→ NOW**: Phase 3 — Google OAuth2 middleware + OpenAI-compatible response format for Open WebUI (not blocking; RAG works end-to-end today via `--user florian`).
 
@@ -503,9 +537,9 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 # Server 1 — MCP server (HTTP mode for remote access)
 bash NFS-files--MCP-server/nfs_files_mcp_server.sh
 
-# CLI chat — RAG on by default; --user florian enables ownership filter (omit for dev mode)
+# CLI chat — RAG off by default (opt-in); --user florian enables ownership filter (omit for dev mode)
 python utils/cli_chat.py --server http://192.168.1.93:8000 --user florian
-#   in-session: /rag status | /rag search <query> | /rag off | /user <id>
+#   in-session: /rag on | /rag only | /rag status | /rag search <query> | /user <id>
 
 # RAG ingestion (see RAG-strategy.md §5 for full walkthrough)
 python utils/rag_sync_nfs.py                   # scan NFS → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files
@@ -518,6 +552,12 @@ python utils/rag_status.py --list-pending              # print every pending fil
 # RAG testing
 python utils/rag_search_cli.py --query "certifications" --user florian        # retrieval only
 python utils/rag_smoke_test.py --query "AWS certifications" --user florian --expect "AWS-Certification"  # end-to-end retrieval + chat; pass/fail exit
+
+# MMR benchmark (run before flipping rag.multi_query.enabled: true)
+python utils/rag_mmr_bench.py --user florian                                  # single vs multi-query, go/no-go verdict
+python utils/rag_mmr_bench.py --user florian --mode both --show-variants      # print generated query variants
+python utils/rag_mmr_bench.py --user florian --compare                        # specialist vs external variant LLM side-by-side
+python utils/rag_mmr_bench.py --user florian --lambda 0.3                     # tune MMR diversity/relevance balance
 
 # NotebookLM — first-time login (requires X display)
 DISPLAY=:1 python utils/notebooklm_auth.py --login
@@ -536,8 +576,8 @@ python utils/sync_to_notebook.py
 After modifying any orchestrator code:
 1. The FastAPI app reloads automatically if run with `--reload`
 2. Test via CLI: `python utils/cli_chat.py --user florian`
-3. Test via curl: `curl -X POST http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"hello"}]}'`
-4. Check health: `curl http://localhost:8000/health`
+3. Test via curl: `curl -X POST http://192.168.1.93:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"hello"}],"rag_mode":"on"}'`
+4. Check health: `curl http://192.168.1.93:8000/health`
 5. RAG regression: `python utils/rag_smoke_test.py --query "..." --user florian --expect "<known-source-substring>"` (non-zero exit on failure)
 
 ### Performance benchmarks

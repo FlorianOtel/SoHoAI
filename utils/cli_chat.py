@@ -5,13 +5,14 @@ HomeAI-Lab — Terminal Chat Client (Phase 1)
 A simple but functional CLI that talks to the orchestrator API.
 Supports:
   - Multi-turn conversation with memory
-  - Model selection (/model specialist)
-  - Chat management (/list, /load, /delete, /export)
-  - RAG toggle (/rag on)
+  - Model selection (/specialist, /model)
+  - Chat management (/list, /load, /export, /save)
+  - RAG toggle (/rag on|off|only|search)
   - Feedback (/thumbsup, /thumbsdown)
+  - Input history and editing (up/down arrows, emacs-style Ctrl+A/E/K/U/W)
 
 Usage:
-    python cli_chat.py [--server http://SERVER_IP:8000]
+    python cli_chat.py [--server http://SERVER_IP:8000] [--user florian]
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ from pathlib import Path
 
 import httpx
 import yaml
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
 
 # Allow in-process RAG retrieval for /rag search
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -54,10 +57,11 @@ HELP_TEXT = """
 Commands:
   /help                 Show this help
   /new                  Start a new chat
-  /model <name>         Switch model (specialist, external)
+  /model [name]         Show/switch external model (e.g., gpt4, claude; auto=default)
+  /specialist           Switch to specialist LLM (Gemma 4 on GPU)
   /cloud                Force next message to use cloud model
-  /rag [on|off]         Toggle RAG (default: on)
-  /rag status           Show RAG config (user, top_k, Qdrant points)
+  /rag [on|off|only]    Set RAG mode (default: off)
+  /rag status           Show RAG config (mode, user, top_k, Qdrant points)
   /rag search <query>   Inspect retrieval hits for a query (no LLM call)
   /user <id>            Set user_id for RAG ownership filter (e.g. florian)
   /list                 List saved chats
@@ -67,6 +71,12 @@ Commands:
   /feedback up|down     Rate the last assistant message
   /health               Check system health
   /quit                 Exit
+
+Line editing:
+  ↑/↓                   Previous/next input from history
+  Ctrl+A / Ctrl+E       Move to start/end of line
+  Ctrl+K / Ctrl+U       Kill from cursor/start to end
+  Ctrl+W                Delete word backward
 """
 
 
@@ -75,14 +85,21 @@ class CLIChat:
         self.server = server_url.rstrip("/")
         self.client = httpx.Client(timeout=120.0)
         self.chat_id = str(uuid.uuid4())
-        self.model: str | None = None
+        self.model: str | None = None  # External model override; None = specialist (Gemma 4 on GPU)
         self.force_cloud = False
-        self.use_rag = True  # default on — always search local RAG first
+        self.rag_mode = "off"  # opt-in — caller enables via /rag on or /rag only
         self.user_id = user_id
         self.turn_count = 0
         self.rag_cfg = RAG_CFG
-        self.qdrant_url = RAG_CFG.get("qdrant_url", "http://localhost:6333")
+        self.qdrant_url = RAG_CFG.get("qdrant_url", "http://192.168.1.93:6333")
         self.top_k = int(RAG_CFG.get("top_k", 5))
+
+        # Initialize prompt session with history and emacs-style editing
+        history_path = Path.home() / ".cli_chat_history"
+        self.prompt_session = PromptSession(
+            history=FileHistory(str(history_path)),
+            enable_history_search=True,
+        )
 
     # -- RAG helpers --------------------------------------------------------
 
@@ -97,6 +114,14 @@ class CLIChat:
         except Exception:
             return None
 
+    def _mq_suffix(self) -> str:
+        mq = self.rag_cfg.get("multi_query", {}) or {}
+        if not mq.get("enabled"):
+            return ""
+        n = mq.get("n_variants", 3)
+        lam = mq.get("lambda", 0.5)
+        return f"  multi_query=true (n={n}, λ={lam:.2f})"
+
     def preflight(self) -> None:
         """One-shot banner line describing the RAG setup."""
         pts = self._qdrant_points()
@@ -104,9 +129,9 @@ class CLIChat:
         if pts is None:
             print(f"  RAG: Qdrant unreachable at {self.qdrant_url}")
         else:
-            state = "on" if self.use_rag else "off"
             print(
-                f"  RAG: {state}  user={user}  top_k={self.top_k}  "
+                f"  RAG: {self.rag_mode}  user={user}  top_k={self.top_k}"
+                f"{self._mq_suffix()}  "
                 f"({pts} points in '{DOCUMENTS_COLLECTION}')"
             )
 
@@ -145,7 +170,7 @@ class CLIChat:
             "messages": [{"role": "user", "content": content}],
             "model": self.model,
             "force_cloud": self.force_cloud,
-            "use_rag": self.use_rag,
+            "rag_mode": self.rag_mode,
             "user_id": self.user_id,
             "stream": False,
         }
@@ -166,8 +191,8 @@ class CLIChat:
             source_block = ""
             if sources:
                 source_block = "\n  Sources:\n" + "\n".join(f"    - {s}" for s in sources)
-            elif self.use_rag:
-                source_block = "\n  (RAG on — no relevant context found)"
+            elif self.rag_mode != "off":
+                source_block = f"\n  (RAG {self.rag_mode} — no relevant context found)"
 
             return f"{header}\n{content}{source_block}"
 
@@ -192,9 +217,24 @@ class CLIChat:
 
         elif command == "/model":
             if not arg:
-                return f"  Current model: {self.model or 'auto'}"
-            self.model = arg if arg != "auto" else None
-            return f"  Model set to: {self.model or 'auto'}"
+                if self.model is None:
+                    mode_info = "SPECIALIST (Gemma 4 on GPU)"
+                else:
+                    mode_info = f"EXTERNAL ({self.model})"
+                return f"  Current LLM mode: {mode_info}"
+
+            if arg.lower() == "specialist":
+                self.model = None
+                return "  Switched to specialist LLM (Gemma 4 on GPU)."
+            else:
+                # Assume any other argument is an external model name
+                self.model = arg if arg != "auto" else None
+                return f"  External model set to: {self.model or 'auto'}."
+
+        elif command == "/specialist":
+            self.llm_mode = "specialist"
+            self.model = None
+            return "  Switched to specialist LLM (Gemma 4 on GPU)."
 
         elif command == "/cloud":
             self.force_cloud = True
@@ -205,11 +245,14 @@ class CLIChat:
             head = sub[0].lower() if sub else ""
 
             if head == "on":
-                self.use_rag = True
+                self.rag_mode = "on"
                 return "  RAG: on"
             if head == "off":
-                self.use_rag = False
+                self.rag_mode = "off"
                 return "  RAG: off"
+            if head == "only":
+                self.rag_mode = "only"
+                return "  RAG: only (grounded — no prior knowledge)"
             if head == "search":
                 if len(sub) < 2 or not sub[1].strip():
                     return "  Usage: /rag search <query>"
@@ -218,11 +261,11 @@ class CLIChat:
                 pts = self._qdrant_points()
                 pts_str = f"{pts} points" if pts is not None else "Qdrant unreachable"
                 return (
-                    f"  RAG: {'on' if self.use_rag else 'off'}  "
+                    f"  RAG: {self.rag_mode}  "
                     f"user={self.user_id or 'none'}  "
-                    f"top_k={self.top_k}  ({pts_str})"
+                    f"top_k={self.top_k}{self._mq_suffix()}  ({pts_str})"
                 )
-            return "  Usage: /rag [on|off|status|search <query>]"
+            return "  Usage: /rag [on|off|only|status|search <query>]"
 
         elif command == "/user":
             if not arg.strip():
@@ -305,18 +348,19 @@ class CLIChat:
             return f"  Unknown command: {command}. Type /help for commands."
 
     def run(self):
-        """Main REPL loop."""
+        """Main REPL loop with history and emacs-style line editing."""
         print("╔══════════════════════════════════════╗")
         print("║       HomeAI-Lab — Terminal Chat     ║")
         print("║  Type /help for commands, /quit to   ║")
         print("║  exit. Just type to chat.            ║")
+        print("║  ↑/↓ for history, Ctrl+A/E for line  ║")
         print("╚══════════════════════════════════════╝")
         self.preflight()
         print()
 
         while True:
             try:
-                user_input = input("You: ").strip()
+                user_input = self.prompt_session.prompt("You: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n  Goodbye!")
                 break

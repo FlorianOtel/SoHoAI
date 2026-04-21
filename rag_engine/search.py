@@ -25,7 +25,6 @@ from .schema import (
 
 logger = logging.getLogger(__name__)
 
-
 async def search_rag(
     query: str,
     user_id: str | None,
@@ -37,7 +36,7 @@ async def search_rag(
     Semantic search over the user's documents + shared (la-familia) content.
 
     Steps:
-      1. Embed the query via Ollama (mxbai-embed-large).
+      1. Embed the query via Ollama (bge-m3).
       2. Build a Qdrant filter scoped to user_id + "la-familia".
       3. query_points() → ranked ScoredPoint list.
       4. Return parent_text (richer context for the LLM) + provenance metadata.
@@ -62,13 +61,12 @@ async def search_rag(
           file_type    — pdf | md | ipynb | etc.
     """
     model      = rag_cfg.get("embedding_model", "bge-m3")
-    ollama_url = rag_cfg.get("ollama_url", "http://localhost:11434/api/embeddings")
+    ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.93:11434/api/embeddings")
 
     # -- 1. Embed the query ------------------------------------------------
     vector = await embed_text(query, model=model, ollama_url=ollama_url)
 
     # -- 2. Ownership filter -----------------------------------------------
-    # user_id=None → no filter (dev mode / Phase 2 before OAuth2 is wired)
     query_filter: Filter | None = None
     if user_id:
         query_filter = Filter(
@@ -81,8 +79,6 @@ async def search_rag(
         )
 
     # -- 3. Search ---------------------------------------------------------
-    # ensure_collection so an empty / not-yet-created DB returns []
-    # instead of raising. No-op when the collection already exists.
     ensure_collection(qdrant_client)
     result = qdrant_client.query_points(
         collection_name=DOCUMENTS_COLLECTION,
@@ -93,7 +89,6 @@ async def search_rag(
     )
 
     # -- 4. Unpack hits ----------------------------------------------------
-    # Return parent_text (not child text) — richer context for the LLM.
     results = [
         {
             "content":     (hit.payload or {}).get(FIELD_PARENT_TEXT, ""),

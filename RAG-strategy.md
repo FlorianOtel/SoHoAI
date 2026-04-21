@@ -1,16 +1,18 @@
 ---
 title: "HomeAI-Lab — RAG Strategy"
 date: 2026-03-30
-last_updated: 2026-04-19 (incremental sync deletes from Qdrant; exclusion filters moved to config.yaml)
+last_updated: 2026-04-21 (§8 implemented + audited: rag_mode off/on/only, tool-use, multi-query+MMR, rag_mmr_bench.py harness, apply_gemma_template fix; §8.4 contextual retrieval still frozen)
 created_by: Florian Otel
-last_updated_by: Claude Code (Claude Sonnet 4.6)
+last_updated_by: Claude Code (Claude Opus 4.7)
 context: >
   HomeAI-Lab project (https://github.com/FlorianOtel/HomeAI-Lab);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
   NFS corpus survey, Qdrant payload schema, multi-tenancy (Google OAuth2),
   rag_engine/ package layout, fail-safe ingestion (crash recovery, retry,
   delete-before-insert idempotency), incremental sync (additions + deletions),
-  Phase 2 implementation plan, ingestion runbook
+  Phase 2 implementation plan, ingestion runbook, advanced retrieval and
+  generation patterns (rag_mode, system-prompt tool-use, multi-query + MMR,
+  contextual retrieval)
 ---
 
 # RAG Strategy — HomeAI-Lab
@@ -83,6 +85,12 @@ rag:
       - __pycache__
       - .git
       - node_modules
+      - .claude
+      - .vscode
+      - .venv
+      - Library              # macOS Application Support / Preferences
+      - Applications         # macOS app bundles
+      - LLMs-cache           # HuggingFace model cache (READMEs/licenses, not RAG content)
 
     exclude_dir_suffixes:    # directory name suffixes (matched with str.endswith)
       - .dist-info           # pip package metadata
@@ -93,6 +101,34 @@ rag:
 
 To add or remove an exclusion, edit `config.yaml` and re-run `rag_sync_nfs.py`.
 No code change is required.
+
+### 1.3 Symlink handling (updated 2026-04-21)
+
+`rag_engine/scanner.py` uses `os.walk(..., followlinks=True)` so that symlinked
+directories are traversed. Two global dedup sets prevent the same content from being
+indexed twice regardless of how many symlink aliases exist:
+
+- **`visited_real_dirs`** — tracks resolved real paths of every directory entered.
+  If a directory's real path has already been visited (e.g. via another symlink or root),
+  `dirnames` is cleared and the subtree is skipped. Handles circular symlinks and the same
+  directory reachable via multiple NFS roots.
+- **`visited_real_files`** — tracks resolved real paths of every eligible file. If a
+  file's real path was already seen (e.g. a file symlink alias), it is skipped before
+  `discover_or_update()` is called. The **first** path encountered is the one stored in
+  SQLite and Qdrant; traversal order is alphabetical within each directory.
+
+**Known symlink topology of `/mnt/nfs/Florian` (surveyed 2026-04-21):**
+
+| Symlink path | Real path | Impact |
+|---|---|---|
+| `Florian/Dropbox` | `/mnt/nfs/__Backups/Dropbox` | External — no duplicate |
+| `Florian/AWS--fotel` | `/mnt/nfs/__Backups/AWS--MacBookPro/fotel` | External — macOS backup |
+| `Florian/Gitlab--fotel` | `/mnt/nfs/__Backups/GitLab--MacBookPro-M3/fotel` | External — macOS backup |
+| `Florian/Microsoft--flotel` | `/mnt/nfs/__Backups/Microsoft-flotel--20190617--last/fotel` | External — macOS backup |
+| `Florian/Gin-AI/LLMs-cache` | `/mnt/nfs/Temp/Gin-AI--cache/LLMs-cache` | External — excluded by `LLMs-cache` dir name |
+| `Florian/Gin-AI/certifications--training` | `Florian/certifications--training/__private/Gin-AI` | **Internal dir alias** — `visited_real_dirs` prevents double-walk ✅ |
+| `Florian/Gin-AI/chats/*.md` (14 files) | Various real paths under `certifications--training/` and `Gin-AI/tools/` | **Internal file aliases** — `visited_real_files` prevents double-ingest ✅ |
+| Multiple `.venv` symlinks | `Florian/Gin-AI/.Gin-AI-python-3.12` | `exclude_dir_names` blocks descent ✅ |
 
 ---
 
@@ -465,7 +501,7 @@ A separate vector DB is not needed.
 | Redis | Key-value lookup | TTL risk; Redis already used for conversation state |
 
 Storage overhead: 50K child chunks × ~2KB average parent text ≈ ~100MB extra on NAS —
-negligible at this scale. Mistral Nemo's 53,248-token context window handles 800–1200 token
+negligible at this scale. Gemma 4 E4B's 131,072-token context window handles 800–1200 token
 parents with no pressure.
 
 On retrieval, `chunk["parent_text"]` (not `chunk["text"]`) is injected into the LLM prompt.
@@ -981,14 +1017,17 @@ python utils/rag_search_cli.py --query "family trip" --no-filter
 Once satisfied with search quality, enable RAG in the CLI chat:
 
 ```bash
-python utils/cli_chat.py --server http://192.168.1.93:8000
+python utils/cli_chat.py --server http://192.168.1.93:8000 --user florian
 # In the chat session:
-/rag on
+/rag on            # advertise the search_documents tool; LLM decides when to call it
+/rag only          # force grounded mode — answers must come from retrieved chunks
 ```
 
-Or pass `"use_rag": true` in the `ChatRequest` JSON. The orchestrator will call
-`search_rag()` before every LLM call, prepend the top-5 `parent_text` chunks to the user
-message, and return `rag_sources` in the response.
+Or pass `"rag_mode": "on"` (or `"only"`) in the `ChatRequest` JSON. The orchestrator
+injects a tool spec into the system prompt; when the LLM emits a `<tool_call>` block,
+the orchestrator invokes `search_rag()` (or `multi_query_search()` if `rag.multi_query.enabled: true`),
+feeds the retrieved chunks back as a tool message, and the LLM composes the final answer.
+`rag_sources` in the response reflects chunks the LLM actually retrieved.
 
 ### 5.8 API control (via the orchestrator)
 
@@ -1171,3 +1210,973 @@ Exclusion filters (directories and file patterns) are configured in `config.yaml
 | Find video by description | 4 | CLIP or frame embeddings, Qdrant `videos`; same `owner` filter |
 | RL training from human feedback | ongoing | Thumbs-up/down per turn → JSONL export |
 | Train person recognition (images/videos) | 4 | RLHF loop |
+
+---
+
+## 8. Advanced retrieval and generation
+
+**Plan authored:** 2026-04-21  
+**§8.1–§8.3 implemented:** 2026-04-21  
+**§8.4:** design note only — NOT implemented (see decision gate in §8.4)
+
+**Motivation:** After initial corpus ingestion (2891 files / 98,737 points), user-facing
+testing surfaced two symptoms:
+
+- **Irrelevant retrieval on meta questions** — e.g. "what model are you?" returned five
+  documents from the ML textbook shelf at scores 0.497–0.508 because top-k retrieval ran
+  unconditionally for every user turn whenever RAG was active.
+- **Narrow score margins with bge-m3** — genuinely relevant hits score 0.51–0.55; noise
+  hits score 0.48–0.51. A single-query, single-score-threshold approach is fragile.
+
+The implementation replaces "always-inject top-k" with a model-agnostic, tool-driven
+pipeline in which the LLM decides whether to retrieve and the retriever returns a
+relevance-plus-diversity-optimised candidate set.
+
+**Scope (implemented):**
+- `schemas.py` — `rag_mode: RagMode` enum (legacy boolean flag removed)
+- `main.py` — tool-use loop, `_retrieve()` dispatcher, `_apply_system_prompt()`, `_fold_tool_messages()`, `variant_llm_fn` startup closure
+- `rag_engine/multi_query.py` — new (multi-query + MMR)
+- `rag_engine/tool_use.py` — new (tool-call protocol parser + formatter)
+- `prompts/rag_system_prompts.py` — new (system prompts for off/on/only modes)
+- `rag_engine/__init__.py` — simplified to clean re-export of `search_rag` + `multi_query_search`
+- `config.yaml` — single merged `rag:` block with `tool_use:` and `multi_query:` sub-sections
+- `utils/cli_chat.py` — `/rag on|off|only`, sends `rag_mode` field
+- `utils/rag_smoke_test.py` — updated to `rag_mode: "on"` payload
+
+**Not in scope:** re-ingestion (no ingestion schema changes), LangChain runtime dependency
+(ruled out), Phase 3 OAuth2/Open WebUI, §8.4 contextual retrieval.
+
+### 8.0 Implementation notes — code review (2026-04-21)
+
+The external worker implementation was reviewed and corrected before being accepted. Key
+issues found and fixed:
+
+| File | Issue | Fix |
+|---|---|---|
+| `main.py` | Entire orchestrator replaced with a mock stub returning static strings | Restored from git; §8 changes applied surgically on top |
+| `config.yaml` | Duplicate `rag:` key — second block silently shadowed the first, destroying `qdrant_url`, `ollama_url`, `top_k`, `scanner` | Merged into one `rag:` block |
+| `rag_engine/__init__.py` | `def search_rag()` shadowed its own import; `else` branch called itself → infinite recursion | Reduced to two-line re-export; dispatch lives in `main.py:_retrieve()` |
+| `rag_engine/__init__.py` | `multi_query_search(..., llm_fn=None)` — crash on first multi-query call | Removed from `__init__`; only `main.py:_retrieve()` calls it with a valid `llm_fn` |
+| `rag_engine/multi_query.py` | Missing `from typing import Any` | Added |
+| `rag_engine/tool_use.py` | Unused `PointStruct` import | Removed |
+| `schemas.py` | `SearchRequest.rag_mode` — irrelevant on retrieval-only endpoint | Removed |
+| `prompts/rag_system_prompts.py` | Imported dead `build_tool_spec`; defined its own `RagMode = Literal[...]` | Removed dead import; imports `RagMode` from `schemas` |
+| `utils/cli_chat.py` + `rag_smoke_test.py` | Still sent legacy boolean payload | Updated to `rag_mode: str` |
+| All Python files | `localhost:11434` (Ollama) and `localhost:6333` (Qdrant) hardcoded | → `192.168.1.93:11434` and `192.168.1.93:6333` throughout (see §8.0.1) |
+| `kv_cache.py` | `apply_mistral_template()` used Mistral `[INST]...[/INST]` format with Gemma 4 E4B → hallucinated content after `</tool_call>`, broken multi-turn context, empty answers in `/rag only` mode (root-caused 2026-04-21) | Replaced with `apply_gemma_template()` using Gemma 4 native `<\|turn>role\n` markers; stop tokens `["<\|turn>"]`; Mistral function kept as deprecated stub with warning |
+
+#### 8.0.1 `localhost` disambiguation
+
+All service addresses in the codebase now use explicit IPs:
+
+| Service | Address | Why |
+|---|---|---|
+| Redis | `127.0.0.1:6379` | **Loopback required** — Redis runs in protected mode on Server 1; orchestrator is co-located. Config comment explains this. Do not change. |
+| Ollama | `192.168.1.93:11434` | Ollama runs on Server 1 CPU. Explicit IP for consistency and correctness if any util is ever run from Server 2. |
+| Qdrant | `192.168.1.93:6333` | Qdrant runs on Server 1 NVMe. Explicit IP in both `config.yaml` and all Python fallbacks. |
+| llama-server | `192.168.1.95:8000` | Server 2 GPU. Always been explicit — unchanged. |
+
+`config.yaml` is the single source of truth for all non-Redis URLs. Python fallback defaults in source files match `config.yaml` exactly and are only reached if the config file fails to load.
+
+### 8.1 Three RAG modes: `off` / `on` / `only` ✅ implemented 2026-04-21
+
+#### Purpose
+
+Give the caller explicit control over how documents participate in generation.
+
+| Mode | Retrieval behaviour | LLM instruction |
+|------|--------------------|-----------------|
+| `off` | Tool is **not** advertised in the system prompt. No retrieval happens. | "You are a helpful assistant." (no mention of documents.) |
+| `on`  | Tool **is** advertised. LLM calls it when it judges the corpus likely to help. | "You may call `search_documents` when the user's personal corpus likely contains the answer. You may also answer from general knowledge." |
+| `only` | Tool **is** advertised, **and** the LLM is required to call it before answering; answers must be grounded strictly in tool results. | "Your ONLY source of knowledge is `search_documents`. Call it for every factual question. If the results do not answer the question, reply exactly: 'I don't have information about that in the provided context.' Do not use prior knowledge." |
+
+Note: §8.1 defines the *modes*; the *mechanism* by which the tool is advertised / invoked
+is §8.2. The two sections are meant to be implemented in the same change set.
+
+#### Schema changes
+
+File: `schemas.py`.
+
+The legacy boolean toggle has been **removed entirely**. All clients send `rag_mode`
+explicitly; server falls back to `rag.default_mode` from `config.yaml` when omitted.
+
+```python
+from enum import Enum
+
+class RagMode(str, Enum):
+    off  = "off"
+    on   = "on"
+    only = "only"
+
+class ChatRequest(BaseModel):
+    # ... existing fields ...
+    rag_mode: RagMode = RagMode.on   # default server-side; see default_mode below
+```
+
+`SearchRequest` is unchanged (retrieval-only endpoint has no notion of `only`).
+
+#### Config changes
+
+File: `config.yaml`, under `rag:`:
+
+```yaml
+rag:
+  default_mode: "on"        # off | on | only — server default when caller omits rag_mode
+  # ... existing keys ...
+```
+
+`main.py:_server_managed_completion` resolves the effective mode as follows:
+
+```python
+if "rag_mode" in req.model_fields_set:
+    rag_mode = req.rag_mode                               # client was explicit
+else:
+    rag_mode = RagMode(app.state.rag_cfg.get("default_mode", "on"))
+```
+
+Using `model_fields_set` (Pydantic) distinguishes "client omitted the field" from
+"client sent `rag_mode: on` explicitly", so the config `default_mode` only kicks in
+when the caller truly didn't specify. The Pydantic field default (`RagMode.on`) is a
+belt-and-braces backstop in case a code path bypasses the config read.
+
+#### Prompt module
+
+New file: `prompts/rag_system_prompts.py`. Single source of truth for all three mode
+prompts AND the tool-use scaffolding from §8.2. Centralises the strings so changes to
+one don't drift away from the others.
+
+```python
+# prompts/rag_system_prompts.py
+"""System prompts for the three RAG modes. Composed with the tool-use section (§8.2)
+at call time by build_system_prompt(mode, tool_spec)."""
+
+_BASE = "You are HomeAI-Lab's assistant. Be concise, accurate, and helpful."
+
+_MODE_OFF = f"""{_BASE}
+
+Answer from general knowledge."""
+
+_MODE_ON = f"""{_BASE}
+
+You have access to the user's personal document corpus via a search tool
+(see the TOOLS section below). Call the tool when the question is likely
+about the user's documents, projects, certifications, notes, or personal
+information. For general questions (greetings, model identity, common
+knowledge, code explanations unrelated to the user's corpus), answer
+directly without calling the tool."""
+
+_MODE_ONLY = f"""{_BASE}
+
+You have access to the user's personal document corpus via a search tool
+(see the TOOLS section below). For every factual question, you MUST call
+the tool before answering, and your answer MUST be grounded strictly in
+the tool results.
+
+If the tool returns no relevant results, or the results do not answer the
+question, you MUST reply EXACTLY with the following sentence and nothing
+else:
+
+    I don't have information about that in the provided context.
+
+Do NOT use prior knowledge. Do NOT speculate. Do NOT fill gaps with general
+information. This rule applies even if you are confident you know the answer
+from training data."""
+
+
+def build_system_prompt(mode: str, tool_spec: str | None) -> str:
+    """Compose the final system prompt.
+
+    Args:
+        mode:      "off" | "on" | "only"
+        tool_spec: the TOOLS section (output of tool_use.build_tool_spec())
+                   or None if mode == "off"
+    """
+    base = {"off": _MODE_OFF, "on": _MODE_ON, "only": _MODE_ONLY}[mode]
+    if mode == "off" or tool_spec is None:
+        return base
+    return f"{base}\n\n{tool_spec}"
+```
+
+#### Pipeline change
+
+File: `main.py`, function `_server_managed_completion`.
+
+The previous top-k auto-inject block is replaced with the tool-use loop from §8.2.
+Before entering that loop, resolve the effective mode:
+
+```python
+mode: RagMode = req.rag_mode or app.state.rag_cfg.get("default_mode", "on")
+if mode != "off" and app.state.qdrant_client is None:
+    logger.warning("RAG requested (mode=%s) but Qdrant unavailable; forcing off", mode)
+    mode = "off"
+```
+
+`rag_sources` is populated from tool results actually returned during this turn
+(see §8.2); `rag_mode_used` is added to `ChatResponse` for debuggability.
+
+#### ChatResponse addition
+
+File: `schemas.py`:
+
+```python
+class ChatResponse(BaseModel):
+    # ... existing fields ...
+    rag_mode_used: RagMode | None = None
+```
+
+#### CLI changes
+
+File: `utils/cli_chat.py`.
+
+- Default: `self.rag_mode: str = "off"` (callers opt in with `/rag on` or `/rag only`).
+- `send_message` payload sends `"rag_mode": self.rag_mode`.
+- `/rag` handler subcommands: `off`, `on`, `only`, `status`, `search <query>`
+  (pass-through for `status` and `search` is unchanged).
+- Preflight banner line includes `mode=<mode>`.
+- `rag_sources` display: prefix the block with the mode used by the server, e.g.
+  `Sources (mode=only):`.
+
+#### Verification (Acceptance tests)
+
+1. `curl … -d '{"rag_mode":"off", …}'` — no RAG tool advertised; `rag_sources == null`.
+2. `curl … -d '{"rag_mode":"on", "messages":[{"role":"user","content":"what model are you?"}]}'`
+   — assistant answers directly without calling the tool; `rag_sources == null`.
+3. `curl … -d '{"rag_mode":"on", "messages":[{"role":"user","content":"what AWS certifications do I have"}]}'`
+   — tool is called; `rag_sources` is populated with paths that include one
+   containing `AWS-Certification`.
+4. `curl … -d '{"rag_mode":"only", "messages":[{"role":"user","content":"what is the capital of France?"}]}'`
+   — tool is called (search returns low-relevance hits), assistant replies with the
+   exact decline sentence and nothing else.
+5. Config default: `curl … -d '{"messages":[…]}'` (no `rag_mode`) uses
+   `rag.default_mode` from `config.yaml`; overriding `default_mode: "only"` and omitting
+   `rag_mode` in the request gives `only`-mode behaviour.
+
+### 8.2 Tool-use via system prompt (provider-independent) ✅ implemented 2026-04-21
+
+#### Purpose
+
+Replace unconditional top-k injection with an LLM-driven decision to retrieve. Works
+identically for `specialist` (Gemma 4 E4B via llama-server `/completion`) and `external`
+(Claude Sonnet via LiteLLM/Anthropic). No dependency on native function-calling APIs.
+
+#### Protocol
+
+The assistant is instructed to emit one or zero tool calls per turn, in a fenced JSON
+block terminated by a sentinel:
+
+```
+<tool_call>
+{"name": "search_documents", "arguments": {"query": "…"}}
+</tool_call>
+```
+
+Rules encoded in the prompt:
+- If the assistant emits a tool call, it MUST emit ONLY the tool call block (no prose
+  before or after) and stop.
+- If the assistant has the information to answer, it emits prose only (no `<tool_call>`).
+- One tool call per turn max.
+
+The orchestrator enforces a hard cap of `rag.tool_use.max_iterations` (default 2,
+config key) tool-call round trips per user turn. On cap exceeded, the last tool result
+is injected as context and the assistant is prompted for a final answer with tools
+disabled.
+
+#### Tool specification block
+
+Rendered into the system prompt when `mode in {"on", "only"}`. One tool only in this
+phase (`search_documents`). Keep the block schema ready for additional tools later
+(Phase 3 MCP tools).
+
+```
+## TOOLS
+
+You have access to the following tools. Call a tool by writing a single
+<tool_call>…</tool_call> block as your entire reply — no prose before or
+after, no additional text.
+
+### search_documents(query: str) -> list[Document]
+
+Searches the user's personal corpus and returns up to N relevant chunks.
+Each result has:
+  - source_path: full NFS path (cite this in your answer)
+  - score:       relevance score (0–1, higher = more relevant)
+  - content:     chunk text (use this to answer)
+
+Call this tool when you need information from the user's documents.
+DO NOT call it for greetings, identity questions, or general knowledge.
+
+Example invocation:
+<tool_call>
+{"name": "search_documents", "arguments": {"query": "AWS certifications"}}
+</tool_call>
+```
+
+#### New module: `rag_engine/tool_use.py`
+
+```python
+"""System-prompt-driven tool-use for RAG. Provider-agnostic.
+
+Exported functions:
+  build_tool_spec()          → str   # TOOLS section for the system prompt
+  parse_tool_call(text)      → dict | None   # extract first <tool_call> block
+  format_tool_result(chunks) → str   # render chunks as a tool-role message
+"""
+import json
+import re
+from typing import Any
+
+_TOOL_CALL_RE = re.compile(
+    r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
+    re.DOTALL,
+)
+
+def build_tool_spec() -> str:
+    """Return the TOOLS section string. Static for now (one tool)."""
+    # ... literal string from the protocol section above ...
+
+def parse_tool_call(assistant_text: str) -> dict[str, Any] | None:
+    """Find first <tool_call>…</tool_call> block. Return {"name":..., "arguments":...}
+    or None if no valid block found. Malformed JSON → None + log warning."""
+    m = _TOOL_CALL_RE.search(assistant_text)
+    if not m:
+        return None
+    try:
+        call = json.loads(m.group(1))
+    except json.JSONDecodeError as e:
+        logger.warning("tool_call JSON decode failed: %s (text=%r)", e, m.group(1))
+        return None
+    if not isinstance(call, dict) or "name" not in call:
+        return None
+    call.setdefault("arguments", {})
+    return call
+
+def format_tool_result(chunks: list[dict]) -> str:
+    """Render retrieved chunks into a tool-role message body.
+
+    Compact JSON-ish format for the LLM; not the prompt the user sees.
+    """
+    if not chunks:
+        return "search_documents returned no results."
+    lines = [f"search_documents returned {len(chunks)} result(s):\n"]
+    for i, c in enumerate(chunks, 1):
+        lines.append(
+            f"[{i}] score={c['score']:.4f}  source={c['source_path']}\n"
+            f"{c['content']}\n"
+        )
+    return "\n".join(lines)
+```
+
+#### Pipeline loop in `main.py`
+
+Replaces the current RAG block in `_server_managed_completion`:
+
+```python
+from prompts.rag_system_prompts import build_system_prompt
+from rag_engine.tool_use import build_tool_spec, parse_tool_call, format_tool_result
+
+# ... after step 3 (get_context from Redis) ...
+
+# -- 4. System prompt (mode-aware) ----------------------------------------
+tool_spec = build_tool_spec() if mode != "off" else None
+system_prompt = build_system_prompt(mode, tool_spec)
+# Prepend as role=system if not already present in history; otherwise
+# replace the first system message with the computed one.
+messages = _apply_system_prompt(messages, system_prompt)
+
+# -- 5. Tool-use loop -----------------------------------------------------
+max_iter = app.state.rag_cfg.get("tool_use", {}).get("max_iterations", 2)
+rag_sources: list[str] | None = None
+rag_chunks_used: list[dict] = []
+
+for iteration in range(max_iter + 1):
+    # Step 5a: run inference (specialist via KV slot, or external via LiteLLM)
+    assistant_text, model_used = await _run_inference(
+        target_model, messages, cache, slot_id, req, router
+    )
+
+    # Step 5b: tool-call parse
+    tool_call = parse_tool_call(assistant_text) if mode != "off" else None
+
+    if tool_call is None or iteration == max_iter:
+        # No tool call, or we've hit the cap — this is the final answer.
+        assistant_content = assistant_text
+        break
+
+    # Step 5c: dispatch the tool
+    if tool_call["name"] != "search_documents":
+        logger.warning("Unknown tool call: %s", tool_call["name"])
+        # Feed back as an error tool result so the model can recover.
+        messages.append({"role": "assistant", "content": assistant_text})
+        messages.append({"role": "tool", "content": f"Unknown tool: {tool_call['name']}"})
+        continue
+
+    query = tool_call["arguments"].get("query", "").strip()
+    if not query:
+        messages.append({"role": "assistant", "content": assistant_text})
+        messages.append({"role": "tool", "content": "Empty query"})
+        continue
+
+    chunks = await _retrieve(query, req.user_id, app.state)  # §8.3 hooks in here
+    rag_chunks_used.extend(chunks)
+    messages.append({"role": "assistant", "content": assistant_text})
+    messages.append({"role": "tool", "content": format_tool_result(chunks)})
+
+# Step 6: build rag_sources from *actual* tool results, dedup preserving order.
+if rag_chunks_used:
+    seen: set[str] = set()
+    rag_sources = []
+    for c in rag_chunks_used:
+        if c["source_path"] not in seen:
+            seen.add(c["source_path"])
+            rag_sources.append(c["source_path"])
+```
+
+#### Specialist path considerations
+
+The `specialist` path today bypasses LiteLLM and calls llama-server `/completion`
+directly with `slot_id` for KV-cache reuse. The tool-use loop must preserve that:
+
+- Each iteration's inference call uses the same `slot_id`. llama-server appends the
+  new prompt (which now includes the previous assistant message and tool result) and
+  resumes from the cached prefix — no KV re-warm needed for the shared prefix.
+- The `apply_gemma_template()` function formats messages using Gemma 4's native
+  `<|turn>role\n…` markers (verified against llama-server `/props` chat_template
+  2026-04-21). Stop tokens are `["<|turn>"]`. `tool` role messages are folded to
+  `user` by `_fold_tool_messages()` before the template is applied; no template
+  changes are needed for tool turns. The old `apply_mistral_template` (`[INST]…[/INST]`)
+  is kept in `kv_cache.py` as a deprecated stub but must never be called — using
+  Mistral format with Gemma 4 causes post-tool-call hallucination and broken multi-turn
+  context (root-caused 2026-04-21).
+- On KV-slot divergence (rare — e.g. template render difference between turns):
+  `kv_cache.py` already handles cache miss by recomputing from scratch. No action needed.
+
+#### External path considerations
+
+LiteLLM passes messages through to Anthropic's Messages API. `role=tool` is mapped to
+Anthropic's native `tool_result` content block by LiteLLM when `tools=[…]` is set on
+the call — but **we are NOT using native tool-use**. Instead we keep the conversation
+as plain user/assistant/tool text messages with the tool-call block in assistant text
+and the tool result in a `role=user` message (since Anthropic only has user / assistant
+roles without tools enabled). Update `_run_inference` for the external path to fold
+`role=tool` → `role=user` with the `"Tool result:\n\n"` preamble, symmetric to the
+specialist path.
+
+#### Rolling summarization interaction
+
+`ConversationCache.maybe_summarize` triggers at ~100K tokens. The tool-use loop can
+add ~2 × top_k × parent_text_size tokens per turn (~4K tokens with defaults).
+Summarization already handles arbitrary message roles, but verify:
+- Summarizer's input: raw messages from Redis. If a turn contains a `tool_call` block
+  (assistant text) and a tool result (user text), summary should include "searched for
+  X; found Y" rather than the raw JSON. Update the summarization prompt in
+  `conversation.py` to instruct: "If a turn involved a tool call, summarize the query
+  and gist of the result — not the raw JSON or source paths."
+
+#### Config additions
+
+```yaml
+rag:
+  tool_use:
+    max_iterations: 2       # hard cap on tool-call round trips per user turn
+    strip_on_final: true    # remove any stray <tool_call> tags from final answer
+```
+
+#### Verification
+
+1. `rag_mode=off`: system prompt does not contain "TOOLS" section; no tool calls
+   parsed; `rag_sources == null`.
+2. `rag_mode=on` + meta question: no tool call emitted; `rag_sources == null`;
+   latency is a single inference call (no retrieval).
+3. `rag_mode=on` + document question: exactly one tool call emitted; retrieval runs;
+   second inference consumes tool result; `rag_sources` populated from actual
+   retrieval (not pre-fetched top-k).
+4. `rag_mode=only` + answerable question: tool call emitted every time; final answer
+   grounds in tool result.
+5. `rag_mode=only` + unanswerable question: tool called, final reply is the exact
+   decline sentence.
+6. Malformed tool call (broken JSON) does not crash the pipeline; logged warning, loop
+   continues with the assistant text as final answer.
+7. Two-iteration cap honoured: if the model emits a second tool call on iteration 2,
+   the orchestrator breaks and treats the assistant text as final (strip `<tool_call>`
+   block per `strip_on_final: true`).
+
+### 8.3 Multi-query retrieval with MMR reranking ✅ implemented 2026-04-21 (enabled: false by default)
+
+#### Purpose
+
+Replace the single-query top-k retrieval in `search_rag()` with:
+1. LLM-generated query expansion (N variants + original = N+1 queries).
+2. Parallel Qdrant search for each, union by `point_id` (keep highest score).
+3. MMR (Maximal Marginal Relevance) reranking over the union to balance relevance
+   with diversity before returning the top-k to the LLM.
+
+Directly addresses the narrow-margin bge-m3 observation (top relevant ≈ 0.54, top
+noise ≈ 0.51, relevance-to-noise gap ≈ 0.04). Diverse rephrasings recover recall; MMR
+removes the redundant near-duplicates that currently occupy 3 of 5 slots on typical
+queries (e.g. the "cisco DCNIDS" case where 3/5 slots were the same PDF at different
+chunk indices).
+
+#### Algorithm
+
+MMR definition (standard Carbonell & Goldstein 1998):
+
+```
+MMR = argmax_{d ∈ C \ S} [ λ · sim(q, d) − (1 − λ) · max_{d' ∈ S} sim(d, d') ]
+```
+
+- `q`: original user query vector (not variants — variants expand the candidate pool,
+  but relevance is judged against the user's actual question).
+- `C`: candidate pool from union of multi-query results.
+- `S`: already-selected result set (starts empty).
+- `λ ∈ [0, 1]`: relevance/diversity balance. `λ=1` → pure relevance (no MMR),
+  `λ=0` → pure diversity. Default **`λ = 0.5`** (config-tunable).
+- Similarity metric: cosine (same as Qdrant search).
+
+Iterative selection until `|S| == top_k`. Returns `S` in selection order (the first-
+picked chunk is the most relevant + novel; subsequent picks add diversity).
+
+#### New module: `rag_engine/multi_query.py`
+
+```python
+"""Multi-query retrieval with MMR reranking.
+
+Pipeline:
+    expand_query()        → [original, v1, v2, ..., vN]
+    parallel search_rag   → list[list[Candidate]]
+    union()               → dedup by point_id, keep max score
+    mmr_rerank()          → top-k reranked by λ-weighted relevance + diversity
+
+Design notes:
+  * Vectors are fetched from Qdrant (with_vectors=True) during search; no
+    extra embedding round-trip for reranking.
+  * Original query embedding is computed once and reused for both variant 0
+    (search) and MMR relevance scoring.
+  * Variant generation uses the specialist model by default (fast, free);
+    config key allows routing to external for higher quality.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import numpy as np
+from qdrant_client import QdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchAny
+
+from .collection import DOCUMENTS_COLLECTION, ensure_collection
+from .embeddings import embed_text
+from .schema import (
+    FIELD_FILE_NAME, FIELD_FILE_TYPE, FIELD_OWNER,
+    FIELD_PARENT_TEXT, FIELD_SOURCE_PATH,
+)
+
+logger = logging.getLogger(__name__)
+
+# --- variant generation ---------------------------------------------------
+
+_EXPANSION_PROMPT = """You are generating search-query variants to improve document
+retrieval. Given a user question, produce exactly {n} alternative phrasings that
+someone might use when searching for the same information. Vary the vocabulary,
+specificity, and perspective. Keep each variant short (under 15 words).
+
+Return ONLY the variants, one per line, no numbering, no commentary.
+
+User question: {query}
+"""
+
+async def expand_query(query: str, n_variants: int, llm_fn) -> list[str]:
+    """Generate n_variants alternative phrasings plus the original.
+
+    Args:
+        llm_fn: async callable(prompt: str) -> str. Supplied by caller so this
+                module stays agnostic of specialist/external routing.
+    Returns:
+        [original_query, variant_1, ..., variant_N]. If generation fails or
+        returns fewer lines than requested, falls back to what was returned
+        (never below just the original).
+    """
+    try:
+        raw = await llm_fn(_EXPANSION_PROMPT.format(query=query, n=n_variants))
+    except Exception as e:
+        logger.warning("Query expansion failed: %s — falling back to original only", e)
+        return [query]
+    variants = [line.strip() for line in raw.strip().splitlines() if line.strip()]
+    variants = [v for v in variants if v.lower() != query.lower()][:n_variants]
+    return [query] + variants
+
+# --- retrieval + union ----------------------------------------------------
+
+async def _search_one(
+    vector: list[float], user_id: str | None, limit: int,
+    qdrant_client: QdrantClient,
+) -> list[dict]:
+    """Single Qdrant query. Returns raw hits with vectors for MMR."""
+    query_filter = Filter(
+        must=[FieldCondition(
+            key=FIELD_OWNER,
+            match=MatchAny(any=[user_id, "la-familia"]),
+        )]
+    ) if user_id else None
+    result = qdrant_client.query_points(
+        collection_name=DOCUMENTS_COLLECTION,
+        query=vector,
+        query_filter=query_filter,
+        limit=limit,
+        with_payload=True,
+        with_vectors=True,   # needed for MMR
+    )
+    return [
+        {
+            "point_id":    hit.id,
+            "vector":      hit.vector,                      # list[float]
+            "score":       hit.score,
+            "content":     (hit.payload or {}).get(FIELD_PARENT_TEXT, ""),
+            "source_path": (hit.payload or {}).get(FIELD_SOURCE_PATH, ""),
+            "file_name":   (hit.payload or {}).get(FIELD_FILE_NAME, ""),
+            "file_type":   (hit.payload or {}).get(FIELD_FILE_TYPE, ""),
+        }
+        for hit in result.points
+    ]
+
+def _union_by_point_id(result_lists: list[list[dict]]) -> list[dict]:
+    """Union multiple result lists, dedup by point_id, keep max score."""
+    merged: dict[Any, dict] = {}
+    for results in result_lists:
+        for r in results:
+            pid = r["point_id"]
+            if pid not in merged or r["score"] > merged[pid]["score"]:
+                merged[pid] = r
+    return list(merged.values())
+
+# --- MMR reranking --------------------------------------------------------
+
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+    denom = (np.linalg.norm(a) * np.linalg.norm(b))
+    return 0.0 if denom == 0.0 else float(np.dot(a, b) / denom)
+
+def mmr_rerank(
+    candidates: list[dict],
+    query_vector: list[float],
+    top_k: int,
+    lambda_: float,
+) -> list[dict]:
+    """MMR: iterative selection balancing relevance with diversity.
+
+    Uses 'vector' and 'score' fields on each candidate. Returns a new list
+    of the top_k picks in selection order (most-relevant-and-diverse first).
+    """
+    if not candidates:
+        return []
+    if top_k >= len(candidates):
+        return sorted(candidates, key=lambda c: -c["score"])
+
+    q = np.array(query_vector, dtype=np.float32)
+    # Precompute query similarity (already in 'score' from Qdrant — use it)
+    # but for variants the score is against the variant, not original q. For
+    # MMR relevance we want sim(q, d), so recompute.
+    vecs = {c["point_id"]: np.array(c["vector"], dtype=np.float32) for c in candidates}
+    rel = {pid: _cosine(q, v) for pid, v in vecs.items()}
+
+    selected: list[dict] = []
+    remaining = {c["point_id"]: c for c in candidates}
+
+    # First pick: highest relevance (no diversity term to evaluate yet)
+    first_pid = max(remaining, key=lambda pid: rel[pid])
+    selected.append(remaining.pop(first_pid))
+
+    while len(selected) < top_k and remaining:
+        best_pid = None
+        best_mmr = -float("inf")
+        for pid, cand in remaining.items():
+            div = max(_cosine(vecs[pid], vecs[s["point_id"]]) for s in selected)
+            mmr = lambda_ * rel[pid] - (1.0 - lambda_) * div
+            if mmr > best_mmr:
+                best_mmr = mmr
+                best_pid = pid
+        selected.append(remaining.pop(best_pid))
+
+    # Attach the MMR-relevance score (not original Qdrant score) for visibility
+    for c in selected:
+        c["mmr_relevance"] = rel[c["point_id"]]
+    return selected
+
+# --- orchestrator ---------------------------------------------------------
+
+async def multi_query_search(
+    query: str,
+    user_id: str | None,
+    limit: int,
+    qdrant_client: QdrantClient,
+    rag_cfg: dict,
+    llm_fn,
+) -> list[dict]:
+    """Drop-in enhanced replacement for search_rag() when multi_query is enabled.
+
+    Shape of return value is identical to search_rag() except each dict also
+    has 'point_id' and optionally 'mmr_relevance'. Existing callers (tool_use,
+    _build_rag_prompt, rag_smoke_test) work unchanged — they only read
+    'content', 'source_path', 'file_name', 'file_type', 'score'.
+    """
+    mq_cfg      = rag_cfg.get("multi_query", {})
+    n_variants  = int(mq_cfg.get("n_variants", 3))
+    lambda_     = float(mq_cfg.get("lambda", 0.5))
+    pool_mult   = int(mq_cfg.get("pool_multiplier", 4))
+    per_query_k = max(limit, pool_mult * limit // (n_variants + 1))
+
+    # -- 1. Generate variants ------------------------------------------------
+    queries = await expand_query(query, n_variants=n_variants, llm_fn=llm_fn)
+    logger.info("multi_query: %d queries (1 original + %d variants)",
+                len(queries), len(queries) - 1)
+
+    # -- 2. Embed the user's ORIGINAL query once (for MMR relevance) --------
+    model      = rag_cfg.get("embedding_model", "bge-m3")
+    ollama_url = rag_cfg.get("ollama_url", "http://localhost:11434/api/embeddings")
+    original_vector = await embed_text(query, model=model, ollama_url=ollama_url)
+
+    # -- 3. Embed variants + parallel Qdrant search --------------------------
+    async def _embed_and_search(q: str) -> list[dict]:
+        vec = original_vector if q == query else await embed_text(q, model=model, ollama_url=ollama_url)
+        return await _search_one(vec, user_id, per_query_k, qdrant_client)
+
+    ensure_collection(qdrant_client)
+    result_lists = await asyncio.gather(*(_embed_and_search(q) for q in queries))
+
+    # -- 4. Union + MMR rerank -----------------------------------------------
+    pool = _union_by_point_id(result_lists)
+    logger.info("multi_query: pool size = %d (before MMR top_k=%d, λ=%.2f)",
+                len(pool), limit, lambda_)
+    return mmr_rerank(pool, original_vector, top_k=limit, lambda_=lambda_)
+```
+
+#### Integration with `main.py`
+
+The `_retrieve(query, user_id, state)` helper that the §8.2 tool-use loop calls picks
+between the two paths:
+
+```python
+async def _retrieve(query: str, user_id: str | None, state) -> list[dict]:
+    mq_enabled = state.rag_cfg.get("multi_query", {}).get("enabled", False)
+    if mq_enabled:
+        return await multi_query_search(
+            query=query, user_id=user_id, limit=state.rag_cfg.get("top_k", 5),
+            qdrant_client=state.qdrant_client, rag_cfg=state.rag_cfg,
+            llm_fn=state.variant_llm_fn,   # closure bound at app startup
+        )
+    return await search_rag(
+        query=query, user_id=user_id, limit=state.rag_cfg.get("top_k", 5),
+        qdrant_client=state.qdrant_client, rag_cfg=state.rag_cfg,
+    )
+```
+
+`state.variant_llm_fn` is set in `main.py` lifespan startup. Both the specialist and
+external variants route through `SmartRouter.complete()` — no KV-slot management needed:
+
+```python
+_variant_model = rag_cfg.get("multi_query", {}).get("variant_model", "specialist")
+
+async def variant_llm_fn(prompt: str) -> str:
+    resp = await app.state.router.complete(
+        messages=[{"role": "user", "content": prompt}],
+        model=_variant_model,
+        force_cloud=(_variant_model == "external"),
+        stream=False,
+    )
+    return resp.choices[0].message.content.strip()
+
+app.state.variant_llm_fn = variant_llm_fn
+```
+
+**Why `router.complete()` instead of `/completion` + ephemeral slot (original plan):**
+`SmartRouter.complete()` goes through LiteLLM to llama-server's `/v1/chat/completions`
+endpoint, which is stateless with respect to KV slots — no slot management needed, no
+risk of poisoning a persistent chat slot, no new `inference_ephemeral()` method to
+implement. Variant generation is ~500ms either way; the KV-cache reuse benefit that
+matters on the main chat path would be wasted here because the variant-gen prompt has
+no shared prefix with the chat history. The `external` branch is identical to the
+specialist branch — both just pass `model=_variant_model` and let `SmartRouter` dispatch.
+
+#### Config additions
+
+```yaml
+rag:
+  multi_query:
+    enabled:          false     # master toggle — start disabled; flip after bench
+    n_variants:       3         # LLM-generated rephrasings (plus the original = 4 queries)
+    lambda:           0.5       # MMR relevance/diversity balance [0, 1]
+    pool_multiplier:  4         # candidate pool size = pool_multiplier * top_k
+    variant_model:    specialist  # "specialist" or "external"
+```
+
+#### CLI changes
+
+File: `utils/cli_chat.py`, `/rag status` output — ✅ implemented:
+
+```
+RAG: off  user=florian  top_k=5  multi_query=true (n=3, λ=0.50)  (98737 points)
+```
+
+(When `multi_query.enabled: false` the suffix is absent.)
+
+File: `utils/rag_search_cli.py` — **TODO (not yet implemented)**: add `--multi-query`
+flag that runs `multi_query_search()` instead of `search_rag()`. Print variants and
+pool size in diagnostic output.
+
+File: `utils/rag_smoke_test.py` — **TODO (not yet implemented)**: add `--multi-query`
+flag symmetric to the above. Verdict section should print both pre-MMR pool size and
+post-MMR selected size.
+
+**Workaround**: use `utils/rag_mmr_bench.py` for complete multi-query evaluation (see
+below). The two missing `--multi-query` flags are cosmetic gaps that do not block
+production use; the feature gate (`rag.multi_query.enabled`) is fully functional.
+
+#### Benchmark harness — `utils/rag_mmr_bench.py` ✅ implemented 2026-04-21
+
+Go/no-go tool before enabling multi-query in production. Uses `utils/rag_bench_queries.txt`
+(12 verified queries with expected path substrings).
+
+```bash
+# Full comparison: single vs multi, verdict + diversity stats
+python utils/rag_mmr_bench.py --user florian
+
+# Show variants generated by each model per query
+python utils/rag_mmr_bench.py --user florian --show-variants
+
+# Compare specialist vs external variant LLM side-by-side
+python utils/rag_mmr_bench.py --user florian --compare
+
+# Tune λ (lower = more diversity, higher = more relevance)
+python utils/rag_mmr_bench.py --user florian --lambda 0.3
+```
+
+Go/no-go criteria (hardcoded in the script):
+- No recall regressions (multi ≥ single for every query)
+- ≥ 2 queries gain recall from multi-query
+- Max multi-query latency ≤ 2.5 s
+
+#### Verification
+
+1. `rag.multi_query.enabled: false` — existing behaviour preserved byte-identically.
+2. `rag.multi_query.enabled: true`, `rag_mmr_bench.py --mode both`: output shows 4
+   queries executed per query (original + 3 variants), pool size > limit, MMR prints
+   `mmr_relevance` scores alongside standard scores.
+3. Redundancy test (`rag_mmr_bench.py`): "dup" column shows `N/5 → M/5` where M < N
+   for queries with high redundancy in single-query mode. At `λ=0.5` the Cisco DCNIDS
+   query confirmed `3/5 → 2/5` diversity improvement (measured 2026-04-21).
+4. Recall test (`rag_mmr_bench.py`): 12-query labelled set in `rag_bench_queries.txt`.
+   Go = no regressions + ≥ 2 gains + max latency ≤ 2.5 s.
+5. Latency: specialist variant generation measured ~0.9 s per query; external ~2.6 s.
+   Specialist stays well within 2.5 s threshold.
+6. Failure mode: if `expand_query` fails (LLM timeout), `multi_query_search` falls
+   back to a single original-query search — no user-facing error.
+7. Provider comparison (`--compare`): showed Sonnet generates more domain-specific
+   variants (e.g. "AWS MLA-C01 certified machine learning engineer" vs Gemma's
+   "AWS ML certification exam"). Recall outcome identical at current corpus size;
+   difference expected to surface on harder queries or larger corpora.
+
+### 8.4 Contextual retrieval — design note, NOT to implement yet
+
+**Origin:** Anthropic, "Contextual Retrieval" (2024-09,
+<https://www.anthropic.com/news/contextual-retrieval>).
+
+#### Concept
+
+Ingestion-time technique. Before embedding each chunk, prepend a short LLM-generated
+context string that explains where the chunk sits in its source document:
+
+```
+Original chunk:
+    "Revenue grew 3% quarter-over-quarter."
+
+Contextualised chunk (what gets embedded and stored):
+    "This excerpt is from ACME Corp's Q2 2023 10-Q filing (SEC EDGAR);
+    the prior quarter's revenue was $314M. Revenue grew 3% quarter-over-quarter."
+```
+
+Anthropic's published benchmarks show 35% reduction in retrieval failures when
+combined with embedding search alone; 49% when combined with hybrid (embedding + BM25);
+67% with reranking on top.
+
+#### Why it is a strong fit for HomeAI-Lab
+
+The corpus is dominated by dense technical content (certifications, notebooks, work
+docs) where individual chunks are meaningless without the surrounding document: a
+code cell without its explanatory markdown, a "Chapter 4" table without the chapter
+title, an exam answer without the question. The current narrow score margins
+(0.51–0.55 range for relevant; 0.48–0.51 for noise; observed 2026-04-21) are a direct
+consequence of embedding short decontextualised chunks. Prepending explicit context
+before embedding should widen the relevant/irrelevant gap substantially.
+
+#### Why NOT to implement now
+
+Implementing contextual retrieval requires re-embedding all 98,737 points:
+
+- One LLM call per child chunk (minimum). At 2891 files × ~34 chunks = 98,737 calls.
+- On specialist (~2s per ~200-token output × 2 slots parallel): ~27 hours.
+- On Sonnet 4.6 with prompt caching of the full parent document per chunk cluster:
+  ~3–5 hours, estimated cost $20–60 depending on parent size distribution.
+- Full re-embed pass against bge-m3: ~9 hours at current ingest speed (already
+  measured 2026-04-21).
+
+Total serial wall time: 30–40 hours on specialist, or ~10–15 hours on Sonnet (which
+also spends money). Not appropriate until:
+
+1. The primary-model question (specialist vs. external vs. hybrid) is settled — see
+   last exploration in session notes. If Sonnet becomes primary, contextual retrieval
+   is almost free per-chunk via prompt caching. If specialist stays primary,
+   contextualisation runs slow but free.
+2. §8.1–§8.3 are implemented and the new baseline (mode=on + tool-use + multi-query +
+   MMR) has been measured. Contextual retrieval's 35% retrieval-failure improvement
+   is relative to a baseline without these improvements; the marginal gain on top of
+   §8.1–§8.3 must be measured against the new baseline, not the 2026-04-21 numbers.
+3. A benchmark harness exists (a fixed set of ≥ 30 known-answer queries with labelled
+   expected sources) so the before/after delta can be measured, not guessed at.
+
+#### What the implementation will look like (when approved)
+
+- **Where**: `rag_engine/ingest.py`, between the chunking step (step 3) and the
+  embedding step (step 4). New helper `_contextualise_chunks(parent_text, child_chunks,
+  llm_fn) -> list[str]`.
+- **Prompt** (per Anthropic, adapted):
+  ```
+  <document>
+  {full parent chunk text}
+  </document>
+  Here is one sub-chunk of the document:
+  <chunk>
+  {child chunk text}
+  </chunk>
+  Give a short (1–2 sentence) context situating this chunk within the document,
+  for the purpose of improving search retrieval. Answer ONLY with the context;
+  do not repeat the chunk content.
+  ```
+- **Storage**: prepend context to the *text that is embedded*. Both text and
+  `parent_text` in the Qdrant payload should remain the **original** (un-contextualised)
+  chunk content — what gets returned to the LLM as RAG context is the original prose,
+  not the contextualised version. This is Anthropic's published approach. Consequence:
+  re-embedding is required; payload-only fields (parent_text, source_path, etc.) can
+  stay as-is.
+- **Prompt caching**: the parent chunk is identical across all its child chunks. When
+  contextualising N children of the same parent, cache the parent block once and vary
+  only the child. On Anthropic: use `cache_control: ephemeral` on the parent block.
+  On specialist: KV-cache prefix reuse via a pinned slot with `cache_prompt: true`
+  (llama-server native).
+- **Crash safety**: reuse the existing `ingestion_queue` with `rag_state.db`. Add a
+  new column `contextualised: bool` so we can distinguish fully-processed rows from
+  pre-contextual-retrieval completions; run the contextualisation pass as an
+  incremental backfill rather than a flag-day re-ingest.
+- **Hybrid search (BM25 + dense)**: Anthropic's published benchmark uses both. The
+  Qdrant 1.10+ sparse-vector feature handles BM25 natively alongside dense vectors in
+  the same collection. This is a natural add-on to contextual retrieval and should be
+  designed as part of the same work package, not bolted on afterwards.
+
+#### Decision gate
+
+Before any implementation work begins on §8.4, require:
+- Written outcome of the primary-model decision.
+- §8.1–§8.3 shipped and measured.
+- A benchmark harness with ≥ 30 labelled queries.
+- Approval that a 10–40 hour ingest window is acceptable for the corpus (re-running
+  against any new user's corpus once OAuth2 is live will take proportional time).
+
+Nothing in this subsection should be implemented ahead of that gate.
+
+---

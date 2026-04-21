@@ -59,7 +59,7 @@ def main() -> None:
 
     deleted_paths = result.get("deleted_paths", [])
     if deleted_paths:
-        qdrant_url = config.get("rag", {}).get("qdrant_url", "http://localhost:6333")
+        qdrant_url = config.get("rag", {}).get("qdrant_url", "http://192.168.1.93:6333")
         qdrant_client = get_client(qdrant_url)
         for path in deleted_paths:
             qdrant_client.delete(

@@ -79,7 +79,7 @@ def main() -> None:
 
     rag_cfg = config.get("rag", {})
 
-    asyncio.run(run(args.query, user_id, args.top_k, rag_cfg.get("qdrant_url", "http://localhost:6333"), rag_cfg))
+    asyncio.run(run(args.query, user_id, args.top_k, rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"), rag_cfg))
 
 
 if __name__ == "__main__":
