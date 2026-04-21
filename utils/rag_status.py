@@ -5,8 +5,11 @@ Show RAG ingestion queue status and Qdrant collection stats.
 Usage (run from project root):
     python utils/rag_status.py
     python utils/rag_status.py --user florian
-    python utils/rag_status.py --ignored        # detailed listing: ignored files + rationale
+    python utils/rag_status.py --ignored                 # detailed listing: ignored files + rationale
     python utils/rag_status.py --watch /tmp/ingest.log   # live monitor
+    python utils/rag_status.py --list-pending            # print every pending file path (pipeable)
+    python utils/rag_status.py --list-pending 50         # limit to first 50
+    python utils/rag_status.py --list-pending --user florian
 """
 
 from __future__ import annotations
@@ -324,6 +327,11 @@ def main() -> None:
         "--watch", metavar="LOG_FILE",
         help="Continuously monitor a rag_ingest_daemon log file (error if not given)",
     )
+    parser.add_argument(
+        "--list-pending", dest="list_pending",
+        nargs="?", type=int, const=-1, default=None, metavar="LIMIT",
+        help="Print pending file paths (one per line). Optional LIMIT caps output. Honors --user.",
+    )
     args = parser.parse_args()
 
     with open(Path(__file__).resolve().parent.parent / "config.yaml") as f:
@@ -337,6 +345,14 @@ def main() -> None:
     # --watch mode: live monitor from a log file
     if args.watch is not None:
         watch_mode(args.watch, state_db, interval=2)
+        state_db.close()
+        return
+
+    # --list-pending mode: print pending file paths, one per line (pipeable)
+    if args.list_pending is not None:
+        limit = args.list_pending if args.list_pending > 0 else 10**9
+        for path in state_db.fetch_pending(limit=limit, owner=args.user):
+            print(path)
         state_db.close()
         return
 

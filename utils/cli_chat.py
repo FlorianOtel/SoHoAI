@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 import uuid
@@ -24,6 +25,11 @@ from pathlib import Path
 
 import httpx
 import yaml
+
+# Allow in-process RAG retrieval for /rag search
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from rag_engine.collection import DOCUMENTS_COLLECTION, get_client  # noqa: E402
+from rag_engine.search import search_rag  # noqa: E402
 
 
 # -- Config --------------------------------------------------------------------
@@ -36,37 +42,101 @@ _CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
 
 try:
     with open(_CONFIG_PATH) as f:
-        config = yaml.safe_load(f)
-        DEFAULT_SERVER = f"http://{config.get('server1_ip', '192.168.1.93')}:8000"
+        _CONFIG = yaml.safe_load(f)
+        DEFAULT_SERVER = f"http://{_CONFIG.get('server1_ip', '192.168.1.93')}:8000"
+        RAG_CFG = _CONFIG.get("rag", {}) or {}
 except Exception:
+    _CONFIG = {}
     DEFAULT_SERVER = "http://192.168.1.93:8000"
+    RAG_CFG = {}
 
 HELP_TEXT = """
 Commands:
-  /help              Show this help
-  /new               Start a new chat
-  /model <name>      Switch model (specialist, external)
-  /cloud             Force next message to use cloud model
-  /rag on|off        Toggle RAG augmentation
-  /list              List saved chats
-  /load <chat_id>    Load a previous chat
-  /export            Export current chat as Markdown
-  /save              Save current chat as Markdown to NAS
-  /feedback up|down  Rate the last assistant message
-  /health            Check system health
-  /quit              Exit
+  /help                 Show this help
+  /new                  Start a new chat
+  /model <name>         Switch model (specialist, external)
+  /cloud                Force next message to use cloud model
+  /rag [on|off]         Toggle RAG (default: on)
+  /rag status           Show RAG config (user, top_k, Qdrant points)
+  /rag search <query>   Inspect retrieval hits for a query (no LLM call)
+  /user <id>            Set user_id for RAG ownership filter (e.g. florian)
+  /list                 List saved chats
+  /load <chat_id>       Load a previous chat
+  /export               Export current chat as Markdown
+  /save                 Save current chat as Markdown to NAS
+  /feedback up|down     Rate the last assistant message
+  /health               Check system health
+  /quit                 Exit
 """
 
 
 class CLIChat:
-    def __init__(self, server_url: str):
+    def __init__(self, server_url: str, user_id: str | None):
         self.server = server_url.rstrip("/")
         self.client = httpx.Client(timeout=120.0)
         self.chat_id = str(uuid.uuid4())
         self.model: str | None = None
         self.force_cloud = False
-        self.use_rag = False
+        self.use_rag = True  # default on — always search local RAG first
+        self.user_id = user_id
         self.turn_count = 0
+        self.rag_cfg = RAG_CFG
+        self.qdrant_url = RAG_CFG.get("qdrant_url", "http://localhost:6333")
+        self.top_k = int(RAG_CFG.get("top_k", 5))
+
+    # -- RAG helpers --------------------------------------------------------
+
+    def _qdrant_points(self) -> int | None:
+        try:
+            r = httpx.get(
+                f"{self.qdrant_url}/collections/{DOCUMENTS_COLLECTION}",
+                timeout=3,
+            )
+            r.raise_for_status()
+            return r.json()["result"]["points_count"]
+        except Exception:
+            return None
+
+    def preflight(self) -> None:
+        """One-shot banner line describing the RAG setup."""
+        pts = self._qdrant_points()
+        user = self.user_id or "none (no ownership filter)"
+        if pts is None:
+            print(f"  RAG: Qdrant unreachable at {self.qdrant_url}")
+        else:
+            state = "on" if self.use_rag else "off"
+            print(
+                f"  RAG: {state}  user={user}  top_k={self.top_k}  "
+                f"({pts} points in '{DOCUMENTS_COLLECTION}')"
+            )
+
+    def _rag_search_inline(self, query: str) -> str:
+        """Run search_rag() in-process and format hits for display."""
+        async def _search():
+            client = get_client(self.qdrant_url)
+            return await search_rag(
+                query=query,
+                user_id=self.user_id,
+                limit=self.top_k,
+                qdrant_client=client,
+                rag_cfg=self.rag_cfg,
+            )
+
+        try:
+            results = asyncio.run(_search())
+        except Exception as e:
+            return f"  [ERROR] RAG search failed: {e}"
+
+        if not results:
+            return "  (no results)"
+        lines = [f"  {len(results)} hit(s) for {query!r}  user={self.user_id!r}:"]
+        for i, r in enumerate(results, 1):
+            lines.append(
+                f"    {i} {r['score']:.4f}  {r['file_name'][:40]:<40}  {r['source_path']}"
+            )
+        return "\n".join(lines)
+
+    # -- chat ---------------------------------------------------------------
 
     def send_message(self, content: str) -> str:
         """Send a message and return the assistant's reply."""
@@ -76,6 +146,7 @@ class CLIChat:
             "model": self.model,
             "force_cloud": self.force_cloud,
             "use_rag": self.use_rag,
+            "user_id": self.user_id,
             "stream": False,
         }
         # Reset one-shot flags
@@ -89,14 +160,16 @@ class CLIChat:
 
             model_used = data.get("model_used", "?")
             content = data["message"]["content"]
-            sources = data.get("rag_sources")
+            sources = data.get("rag_sources") or []
 
             header = f"  [{model_used}]"
-            source_line = ""
+            source_block = ""
             if sources:
-                source_line = f"\n  Sources: {', '.join(sources)}"
+                source_block = "\n  Sources:\n" + "\n".join(f"    - {s}" for s in sources)
+            elif self.use_rag:
+                source_block = "\n  (RAG on — no relevant context found)"
 
-            return f"{header}\n{content}{source_line}"
+            return f"{header}\n{content}{source_block}"
 
         except httpx.HTTPStatusError as e:
             return f"  [ERROR] Server returned {e.response.status_code}: {e.response.text}"
@@ -128,8 +201,34 @@ class CLIChat:
             return "  Next message will use cloud model."
 
         elif command == "/rag":
-            self.use_rag = arg.lower() == "on"
-            return f"  RAG: {'on' if self.use_rag else 'off'}"
+            sub = arg.strip().split(maxsplit=1)
+            head = sub[0].lower() if sub else ""
+
+            if head == "on":
+                self.use_rag = True
+                return "  RAG: on"
+            if head == "off":
+                self.use_rag = False
+                return "  RAG: off"
+            if head == "search":
+                if len(sub) < 2 or not sub[1].strip():
+                    return "  Usage: /rag search <query>"
+                return self._rag_search_inline(sub[1].strip())
+            if head in ("", "status"):
+                pts = self._qdrant_points()
+                pts_str = f"{pts} points" if pts is not None else "Qdrant unreachable"
+                return (
+                    f"  RAG: {'on' if self.use_rag else 'off'}  "
+                    f"user={self.user_id or 'none'}  "
+                    f"top_k={self.top_k}  ({pts_str})"
+                )
+            return "  Usage: /rag [on|off|status|search <query>]"
+
+        elif command == "/user":
+            if not arg.strip():
+                return f"  user_id: {self.user_id or 'none'}"
+            self.user_id = arg.strip()
+            return f"  user_id set to: {self.user_id}"
 
         elif command == "/list":
             try:
@@ -212,6 +311,7 @@ class CLIChat:
         print("║  Type /help for commands, /quit to   ║")
         print("║  exit. Just type to chat.            ║")
         print("╚══════════════════════════════════════╝")
+        self.preflight()
         print()
 
         while True:
@@ -238,9 +338,15 @@ class CLIChat:
 def main():
     parser = argparse.ArgumentParser(description="HomeAI-Lab CLI Chat")
     parser.add_argument("--server", default=DEFAULT_SERVER, help="Orchestrator URL")
+    parser.add_argument(
+        "--user",
+        default=None,
+        help="user_id for RAG ownership filter (e.g. florian). "
+             "Omit to search all documents (dev mode — pre-OAuth).",
+    )
     args = parser.parse_args()
 
-    chat = CLIChat(args.server)
+    chat = CLIChat(args.server, user_id=args.user)
     chat.run()
 
 

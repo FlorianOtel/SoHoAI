@@ -30,12 +30,12 @@ model_list:
   # --- Primary: GPU inference on Server 2 ---
   - model_name: specialist
     litellm_params:
-      model: openai/mistral-nemo
+      model: openai/gemma4
       api_base: "http://${server2_ip}:8000/v1"
       api_key: "dummy-key"
     model_info:
       id: "specialist-llama-server"
-      description: "Mistral Nemo 12B Q4 on RTX 5070 via llama-server"
+      description: "Gemma 4 E4B 7.52B Q8_0 on RTX 5070 via llama-server"
 
   # --- Fallback: Cloud API ---
   - model_name: external
@@ -55,9 +55,9 @@ routing:
   default_model: "specialist"
   fallback_chain: ["specialist", "external"]
   # Route to cloud when context exceeds threshold.
-  # Hard limit: --ctx-size 53248 (~52K tokens). At 50K we route to cloud,
-  # leaving ~2K headroom for the output (default max_tokens=1024 + safety margin).
-  complexity_threshold_tokens: 50000
+  # Hard limit: -c 131072 (~128K tokens). At 120K we route to cloud,
+  # leaving ~11K headroom for output (default max_tokens=1024 + safety margin).
+  complexity_threshold_tokens: 120000
   cloud_model: "external"
 
 # -- RAG Settings (Phase 2) ---------------------------------------------------
@@ -125,10 +125,12 @@ shared:
 llama_server:
   base_url: "http://${server2_ip}:8000"
   # Must match --slot-save-path passed to llama-server on Server 2
-  slot_save_path: "/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v--caches/"
+  slot_save_path: "/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v-caches/"
   # Number of parallel slots (must match --parallel N on llama-server).
-  # VRAM cost: ~400 MB per additional slot at q8_0 / 53248 ctx.
-  num_slots: 1
+  # Gemma 4 + f16 KV + 131072 ctx: ~2,088 MiB per slot (4 global KV layers + 20 SWA layers at 512-window).
+  # New llama.cpp SWA-aware implementation: f16 uses same VRAM as old q8_0 but with better precision.
+  # 2 slots × 2,088 MiB = ~4,176 MiB KV pre-allocated in VRAM (no prompt cache). Total VRAM: ~9 GB.
+  num_slots: 2
   timeout_seconds: 120
 
 # -- Chat Persistence ----------------------------------------------------------
@@ -137,7 +139,7 @@ chat:
   export_format: "markdown"  # markdown | jsonl
   # Rolling summarization: when total Redis context size exceeds threshold,
   # summarize older turns and keep only the most recent N turns verbatim.
-  # ~200K chars ≈ 50K tokens (4 chars/token). Hard limit is 53248 tokens;
-  # 50K input + 1024 output = ~51K, leaving ~2K safety margin.
-  summarize_threshold_chars: 200000
+  # ~400K chars ≈ 100K tokens (4 chars/token). Hard limit is 131072 tokens;
+  # 100K input + 1024 output = ~101K, leaving ~30K safety margin.
+  summarize_threshold_chars: 400000
   summarize_keep_turns: 20

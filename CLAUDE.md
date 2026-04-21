@@ -44,7 +44,7 @@ for family photos and RL training data collection from chat interactions.
     Qdrant server uses RocksDB which is incompatible with NFS file locking. Active data must stay local.
     Snapshots (passive files) are safe on NFS and taken daily at 03:00 via cron.
 - Redis persistence: `/mnt/nfs/__Backups/HomeAI-lab--databases/redis/`
-- KV cache slots: `/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v--caches/` (one `.bin` per chat_id)
+- KV cache slots: `/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v-caches/` (one `.bin` per chat_id)
 - LLM model cache: `/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/`
 - Documents for RAG: `/mnt/nfs/Florian/Gin-AI/projects/HomeAI-Lab/documents/`
 - RL training exports: `/mnt/nfs/Florian/Gin-AI/projects/HomeAI-Lab/rl-data/`
@@ -56,8 +56,8 @@ for family photos and RL training data collection from chat interactions.
 Server 1 (192.168.1.93)                    Server 2 (192.168.1.95)
 ┌──────────────────────────┐               ┌──────────────────────────┐
 │ FastAPI orchestrator:8000│─── /completion→ │ llama-server :8000       │
-│  ConversationCache       │─── /slots ────→ │  Mistral Nemo 12B Q4    │
-│    Redis (short-term)    │               │  53248 tok context window │
+│  ConversationCache       │─── /slots ────→ │  Gemma 4 E4B 7.52B Q8_0│
+│    Redis (short-term)    │               │  2×131072 ctx (2 slots)  │
 │    KV cache mgr          │               │  KV slot save/restore    │
 │    rolling summarization │               │  CLIP (Phase 4)          │
 │ SQLite (long-term)       │               └──────────────────────────┘
@@ -76,11 +76,11 @@ Server 1 (192.168.1.93)                    Server 2 (192.168.1.95)
 
 Two model tiers with automatic fallback:
 
-1. **specialist** — Mistral Nemo 12B Q4 on RTX 5070 via llama-server (primary, GPU, Server 2)
-2. **external** — Claude Sonnet via Anthropic API (fallback if Server 2 unreachable, or >50K token context)
+1. **specialist** — Gemma 4 E4B 7.52B Q8_0 on RTX 5070 via llama-server (primary, GPU, Server 2)
+2. **external** — Claude Sonnet via Anthropic API (fallback if Server 2 unreachable, or >120K token context)
 
 Routing logic is in `router.py`. Default is specialist; falls back to cloud if
-unreachable. Rolling summarization keeps conversations well below the 50K threshold
+unreachable. Rolling summarization keeps conversations well below the 100K threshold
 in practice.
 
 **Specialist model path** bypasses LiteLLM and calls llama-server's native
@@ -105,7 +105,7 @@ All three tiers are coordinated by `ConversationCache` in `conversation.py`:
 - `resume(chat_id)` — restore KV slot from NFS before inference
 - `park(chat_id)` — save KV slot to NFS + refresh Redis TTL after inference
 - `clear(chat_id)` — wipe Redis + erase KV slot + delete NFS file
-- `maybe_summarize(chat_id, fn)` — if Redis context exceeds ~50K tokens,
+- `maybe_summarize(chat_id, fn)` — if Redis context exceeds ~100K tokens,
   summarize old turns via specialist (llama-server), rebuild Redis, erase stale KV cache
 - `is_cold(chat_id)` — True if Redis has no messages for this chat
 - `warm_from_store(chat_id, messages)` — reload last N turns from SQLite into Redis
@@ -168,11 +168,12 @@ HomeAI-Lab/
 │   ├── ingest.py               # docling parse + parent-child chunking + Qdrant upsert
 │   └── search.py               # query → embed → Qdrant query_points → parent_text + provenance
 ├── utils/
-│   ├── cli_chat.py             # Terminal chat client
+│   ├── cli_chat.py             # Terminal chat client; RAG on by default; --user OWNER sends user_id for ownership filter; /rag search <query> inspects retrieval; /user <id> changes owner mid-session
 │   ├── rag_sync_nfs.py         # CLI: scan NFS roots → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files
 │   ├── rag_ingest_daemon.py    # CLI: process pending files (parse → chunk → embed → upsert)
-│   ├── rag_status.py           # CLI: queue counts + Qdrant point stats; --ignored for detail; --watch LOG_FILE for live ETA monitor
-│   ├── rag_search_cli.py       # CLI: test search pipeline from command line
+│   ├── rag_status.py           # CLI: queue counts + Qdrant point stats; --ignored for detail; --watch LOG_FILE for live ETA monitor; --list-pending [N] to print pending paths (pipeable)
+│   ├── rag_search_cli.py       # CLI: retrieval-only — embed query + Qdrant search; prints top-k hits + parent_text preview
+│   ├── rag_smoke_test.py       # CLI: end-to-end smoke test — retrieval + /v1/chat/completions with use_rag=true; --expect SUBSTR assertion; pass/fail exit code
 │   ├── rag_reset.py            # CLI: reset Qdrant collection + ingestion queue
 │   ├── notebooklm_auth.py      # NotebookLM browser automation (Playwright + system Chrome)
 │   ├── snapshot_codebase.py    # Aggregate project files → codebase_snapshot.md
@@ -221,9 +222,9 @@ OpenAI-compatible response format is a Phase 3 requirement for Open WebUI integr
 ### Phase 1 — Core loop ✅ (complete)
 - FastAPI orchestrator on Server 1
 - LiteLLM routing with fallback chain (specialist → orchestrator → external)
-- llama-server on Server 2 GPU: Mistral Nemo 12B Q4, 53248 token context (`--ctx-size 53248`) ✅
+- llama-server on Server 2 GPU: Gemma 4 E4B 7.52B Q8_0, 2 slots × 131072 ctx (`-c 262144 --parallel 2`) ✅
 - Per-conversation KV cache persisted to NAS via llama-server slot API ✅
-- Rolling summarization at ~50K token threshold (via specialist/llama-server) ✅
+- Rolling summarization at ~100K token threshold (via specialist/llama-server) ✅
 - Redis conversation cache with NAS AOF persistence
 - SQLite chat store with full CRUD
 - Markdown and JSONL export
@@ -243,7 +244,12 @@ append(assistant)    → Redis + SQLite
 park(chat_id)        → save KV slot to NAS + refresh Redis TTL
 ```
 
-### Phase 2 — RAG ✅ (code complete, data ingestion pending)
+### Phase 2 — RAG ✅ (complete, ingested 2026-04-21)
+
+Initial ingestion run produced **2891 files completed, 0 pending, 0 ignored**, yielding
+**98,737 Qdrant points** in the `documents` collection (avg ~34 chunks/file). End-to-end
+retrieval + chat injection verified via `utils/rag_smoke_test.py`.
+
 
 - **Multi-tenancy** — per-user document isolation via Google OAuth2 (see design decisions)
   - Each family member has a private NFS root (`/mnt/nfs/{Florian,Eva,Annika,Laura}`)
@@ -282,9 +288,11 @@ llama-server uses 11.6/12GB, leaving no room; Server 1 CPU inference at 8B param
 would add 6–10s to every RAG chat query. bge-m3 is the practical optimum:
 top MTEB quality, 8192-token context, 650ms/chunk on CPU, fits alongside all workloads.
 
-Server 2 RTX 5070 has only ~576 MiB free VRAM at idle (llama-server uses 11642/12227 MiB).
-KV cache grows dynamically during active turns (up to ~4.1 GB for a full 53248-token slot),
-so free headroom effectively drops to zero under load. No embedding model fits safely on Server 2.
+Server 2 RTX 5070: model is Gemma 4 E4B Q8_0 (7.52B params, 7.5 GB file → ~4,788 MiB VRAM).
+KV cache: new llama.cpp SWA-aware implementation uses 4 global KV layers (131072-ctx, f16: 2,048 MiB) +
+20 SWA layers (512-window, f16: 40 MiB) = 2,088 MiB per slot. 2 slots × 2,088 = 4,176 MiB KV.
+Total VRAM: 9,977 MiB used / 12,227 MiB (1,799 MiB headroom) — measured 2026-04-20.
+No reliable embedding model fits alongside llama-server without VRAM risk under load.
 
 **Vector DB — Qdrant confirmed**
 Qdrant's payload system stores arbitrary JSON per vector point and returns it with every
@@ -336,7 +344,7 @@ Qdrant payload of each child point (Option A below was selected over SQLite to a
 | Redis | Key-value lookup | TTL risk; Redis already used for conversation state |
 
 Storage overhead of Option A: 50K child chunks × ~2KB average parent text ≈ ~100MB extra on NAS —
-negligible at this scale. Mistral Nemo's 53,248-token context window handles 800–1200 token parents
+negligible at this scale. Gemma 4's 131,072-token context window handles 800–1200 token parents
 with no pressure.
 
 Chunk sizes do not apply uniformly across file types — `ingest_file()` should select strategy by type.
@@ -410,9 +418,9 @@ Other user directories (`/mnt/nfs/{Eva,Annika,Laura}`) and `/mnt/nfs/La-Familia`
 10. ~~Add `db_base_path` global config variable (single place to relocate all databases)~~ — ✅ done 2026-04-16
 11. ~~Configure `users:` section in `config.yaml` with real Google emails~~ — ✅ done 2026-04-17 (`florian.otel@gmail.com` active; others commented out until ready)
 
-**→ NOW**: Run initial NFS scan and ingestion — see `RAG-strategy.md §5`.
+12. ~~Run initial NFS scan and ingestion~~ — ✅ done 2026-04-21 (2891 files, 98,737 Qdrant points; see `RAG-strategy.md §5` for the runbook)
 
-12. Implement Google OAuth2 middleware (Phase 3, not blocking for RAG)
+**→ NOW**: Phase 3 — Google OAuth2 middleware + OpenAI-compatible response format for Open WebUI (not blocking; RAG works end-to-end today via `--user florian`).
 
 Full design details and worker loop spec: `RAG-strategy.md`.
 
@@ -463,13 +471,20 @@ Managed via `pyproject.toml` (uv). Key packages:
 source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
 
 # Server 2 — llama-server (GPU inference + KV cache)
+# Gemma 4 E4B 7.52B Q8_0 — hybrid SWA+global attention (42 layers, 2 KV heads)
+# New llama.cpp SWA-aware KV: 4 global KV layers (131072-ctx) + 20 SWA layers (512-window)
+# VRAM: ~4.8 GB model weights + 2×2,088 MiB KV (f16, 2 slots × 131072 ctx) + ~1 GB overhead = ~9.97 GB / 12 GB (measured)
+# --cache-ram 0: KV pre-allocated in VRAM (no RAM offload); --parallel 2 matches config.yaml num_slots: 2
+# NOTE: existing .bin KV slot files are incompatible when switching quantizations — erase k-v-caches/*.bin first
 llama-server \
-  -m /home/florian/Gin-AI/LLMs-cache/llama-server/Mistral-Nemo-Instruct-2407.Q4_K_M.gguf \
-  --ctx-size 53248 -ngl 99 \
+  -m ~/Gin-AI/LLMs-cache/llama-server/google_gemma-4-E4B-it-Q8_0.gguf \
+  -c 262144 -ngl 99 \
   --flash-attn on \
-  --cache-type-k q8_0 --cache-type-v q8_0 \
-  --slot-save-path /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v--caches/ \
-  --port 8000
+  --cache-type-k f16 --cache-type-v f16 \
+  --cache-ram 0 \
+  --parallel 2 \
+  --slot-save-path ~/Gin-AI/LLMs-cache/llama-server/k-v-caches/ \
+  --host 0.0.0.0 --port 8000
 
 # Server 1 — Qdrant vector store (enabled at boot; restart after reboot)
 sudo systemctl start qdrant          # starts /usr/local/bin/qdrant on port 6333
@@ -488,8 +503,9 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 # Server 1 — MCP server (HTTP mode for remote access)
 bash NFS-files--MCP-server/nfs_files_mcp_server.sh
 
-# CLI chat
-python utils/cli_chat.py --server http://192.168.1.93:8000
+# CLI chat — RAG on by default; --user florian enables ownership filter (omit for dev mode)
+python utils/cli_chat.py --server http://192.168.1.93:8000 --user florian
+#   in-session: /rag status | /rag search <query> | /rag off | /user <id>
 
 # RAG ingestion (see RAG-strategy.md §5 for full walkthrough)
 python utils/rag_sync_nfs.py                   # scan NFS → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files
@@ -497,7 +513,11 @@ python utils/rag_ingest_daemon.py              # process queue (runs for hours);
 python utils/rag_status.py                     # one-shot queue counts + Qdrant stats (ignored count always shown)
 python utils/rag_status.py --ignored           # detail listing of ignored files + rationale
 python utils/rag_status.py --watch /tmp/rag-ingestion.log   # live monitor: chunk progress bar + ETA
-python utils/rag_search_cli.py --query "certifications" --user florian
+python utils/rag_status.py --list-pending              # print every pending file path (pipeable; combine with --user)
+
+# RAG testing
+python utils/rag_search_cli.py --query "certifications" --user florian        # retrieval only
+python utils/rag_smoke_test.py --query "AWS certifications" --user florian --expect "AWS-Certification"  # end-to-end retrieval + chat; pass/fail exit
 
 # NotebookLM — first-time login (requires X display)
 DISPLAY=:1 python utils/notebooklm_auth.py --login
@@ -515,19 +535,50 @@ python utils/sync_to_notebook.py
 
 After modifying any orchestrator code:
 1. The FastAPI app reloads automatically if run with `--reload`
-2. Test via CLI: `python utils/cli_chat.py`
+2. Test via CLI: `python utils/cli_chat.py --user florian`
 3. Test via curl: `curl -X POST http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"hello"}]}'`
 4. Check health: `curl http://localhost:8000/health`
+5. RAG regression: `python utils/rag_smoke_test.py --query "..." --user florian --expect "<known-source-substring>"` (non-zero exit on failure)
+
+### Performance benchmarks
+
+Tool: `~/Gin-AI/tools/llama-performance-test/llama_perf_test.py`
+Results: `~/Gin-AI/tools/llama-performance-test/results_q6k.json` (Q6_K baseline), `results_q8_0.json` (Q8_0 current)
+
+Benchmark methodology: 3 runs averaged per scenario, `/completion` native endpoint, `cache_prompt: false`
+(cold prefill every run), `ignore_eos: true`, `n_predict: 200`, `temperature: 0` (greedy).
+
+#### Q6_K → Q8_0 comparison (measured 2026-04-20, RTX 5070 12 GB, 2 slots × 131072 ctx)
+
+| Scenario | Q6_K tok/s | Q8_0 tok/s | Δ |
+|---|---|---|---|
+| **Decode serial** | 109.4 | 96.2 | **−12%** |
+| Decode parallel/slot0 | 101.1 | 89.4 | −12% |
+| Decode parallel/slot1 | 101.5 | 89.8 | −12% |
+| Decode parallel combined | 202.6 | 179.2 | −12% |
+| Prefill short (13 tok) | 440 | 399 | −9% (noisy) |
+| **Prefill long (4126 tok)** | 5420 | 6270 | **+16%** |
+| Wall clock short serial | 1.86s | 2.12s | +14% |
+| Wall clock long serial | 2.68s | 2.82s | +5% |
+| Parallel wall clock | 2.03s | 2.29s | +13% |
+| Parallel speedup ratio | 0.92× | 0.92× | identical |
+
+**Key findings:**
+- Decode is ~12% slower — Q8_0 weights are 27% larger (5.9 → 7.5 GB); decode is memory-bandwidth-bound so larger weights cost proportionally more per step.
+- Long-context prefill is +16% faster — Q8_0's uniform INT8 maps cleanly to tensor core INT8 ops; Q6_K's mixed-precision K-quant requires a dequantize step that costs more at high token counts.
+- Real-world impact at 200 output tokens: ~260ms extra latency per turn. At 100 tokens: ~130ms. Imperceptible in streaming mode.
+- Continuous batching unchanged: 0.92× parallel speedup ratio is identical across both quantizations.
+- **Conclusion:** ~12% decode regression is the cost of near-f16 weight quality. Acceptable for interactive use at 96 tok/s serial decode.
 
 ### Important design decisions
-- **llama-server over vLLM** — native KV slot save/restore API (`/slots/{id}?action=save|restore`); 53248 token context (`--ctx-size 53248`) at ~11GB VRAM with q8_0 KV quantization and flash-attn
+- **llama-server over vLLM** — native KV slot save/restore API (`/slots/{id}?action=save|restore`); 2 slots × 131072 ctx at 9,977 MiB VRAM with f16 KV, flash-attn, SWA-aware KV allocation (Gemma 4 E4B 7.52B Q8_0)
 - **KV cache in `ConversationCache`** — `conversation.py` is the single owner of all conversation state (Redis + KV). `resume()`/`park()` keep save/restore co-located with Redis ops
 - **Specialist bypasses LiteLLM** — native `/completion` required to pass `slot_id`. LiteLLM handles external fallback unchanged
-- **Rolling summarization uses specialist (llama-server)** — `maybe_summarize()` erases the KV slot before calling; both summarization and subsequent inference start cold sequentially on the same slot; triggered at ~50K tokens, keeps last 20 turns verbatim
+- **Rolling summarization uses specialist (llama-server)** — `maybe_summarize()` erases the KV slot before calling; both summarization and subsequent inference start cold sequentially on the same slot; triggered at ~100K tokens, keeps last 20 turns verbatim
 - **LiteLLM stays as the routing layer** — handles OpenAI/Anthropic API differences and fallback/retry for the external (cloud) model
 - **Redis for short-term memory** — fast, TTL-based, LLM context builder reads it every request (server-managed only)
 - **SQLite for long-term** — single file on NAS, zero ops overhead, plenty fast for ~10K chats (server-managed only)
 - **Qdrant for vectors** — persistent local mode (on NAS), gRPC + REST API; `qdrant-client` Python dep
-- **Embeddings via Ollama on Server 1** — `bge-m3` (1024-dim, 8192-tok context) served by Ollama; Server 2 GPU saturated with Mistral Nemo (11.6/12GB VRAM — no room for any embedding model); `sentence-transformers` removed. `embed_batch()` concurrency controlled by `--batch` in `rag_ingest_daemon.py` (default 5, `_BATCH_CONCURRENCY`); lower `--batch` to reduce `httpx.ReadTimeout` errors, raise it for more throughput. Ollama serializes model computation — when ingest daemon runs, search queries queue behind it and can wait 28–30s; `embed_text()` timeout is 120s to survive this. `embed_batch()` fires a `progress_cb(done, total)` every 50 chunks (`_PROGRESS_INTERVAL`); `ingest.py` wires this to a logger call; `rag_status.py --watch` parses those log lines to compute real-time chunk rate + ETA. SQLite fetch batch size is hardcoded to 10 files per iteration (`_FETCH_BATCH_SIZE` in `rag_ingest_daemon.py`). Qdrant upsert is batched in groups of `_UPSERT_BATCH_SIZE=256` points (`ingest.py`) to avoid HTTP 400 on large files.
+- **Embeddings via Ollama on Server 1** — `bge-m3` (1024-dim, 8192-tok context) served by Ollama; Server 2 GPU uses ~9 GB with 2 parallel slots at full context with Gemma 4 (leaving ~3.2 GB headroom, not enough for a reliable embedding model under load); `sentence-transformers` removed. `embed_batch()` concurrency controlled by `--batch` in `rag_ingest_daemon.py` (default 5, `_BATCH_CONCURRENCY`); lower `--batch` to reduce `httpx.ReadTimeout` errors, raise it for more throughput. Ollama serializes model computation — when ingest daemon runs, search queries queue behind it and can wait 28–30s; `embed_text()` timeout is 120s to survive this. `embed_batch()` fires a `progress_cb(done, total)` every 50 chunks (`_PROGRESS_INTERVAL`); `ingest.py` wires this to a logger call; `rag_status.py --watch` parses those log lines to compute real-time chunk rate + ETA. SQLite fetch batch size is hardcoded to 10 files per iteration (`_FETCH_BATCH_SIZE` in `rag_ingest_daemon.py`). Qdrant upsert is batched in groups of `_UPSERT_BATCH_SIZE=256` points (`ingest.py`) to avoid HTTP 400 on large files.
 - **Multi-tenancy via `owner` field + Google OAuth2** — every Qdrant point carries an `owner` derived from NFS path root at ingestion; search applies `MatchAny(any=[user_owner, "la-familia"])` filter; user identity from Google OIDC JWT mapped to `owner` via `config.yaml` `users:` section; data model designed before first ingestion to avoid re-ingesting
 - **MCP server uses path sandboxing** — all operations validated against ALLOWED_ROOTS, no escape possible

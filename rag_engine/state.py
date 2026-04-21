@@ -184,13 +184,20 @@ class StateDB:
     # ------------------------------------------------------------------
     # Worker state transitions
 
-    def fetch_pending(self, limit: int = 10) -> list[str]:
-        """Return up to `limit` pending file paths, oldest first."""
-        cur = self._conn.execute(
-            "SELECT file_path FROM ingestion_queue "
-            "WHERE status = 'pending' ORDER BY rowid LIMIT ?",
-            (limit,),
-        )
+    def fetch_pending(self, limit: int = 10, owner: str | None = None) -> list[str]:
+        """Return up to `limit` pending file paths, oldest first. Optionally filter by owner."""
+        if owner:
+            cur = self._conn.execute(
+                "SELECT file_path FROM ingestion_queue "
+                "WHERE status = 'pending' AND owner = ? ORDER BY rowid LIMIT ?",
+                (owner, limit),
+            )
+        else:
+            cur = self._conn.execute(
+                "SELECT file_path FROM ingestion_queue "
+                "WHERE status = 'pending' ORDER BY rowid LIMIT ?",
+                (limit,),
+            )
         return [row["file_path"] for row in cur.fetchall()]
 
     def fetch_pending_full(self, limit: int = 10) -> list[dict]:
