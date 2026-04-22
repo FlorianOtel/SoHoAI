@@ -1,14 +1,19 @@
 """
 Smart model routing — decides which LLM handles each request.
 
-Routing strategy:
+Routing strategy (post 2026-04-22 flip):
   1. If user explicitly requests a model → use it
-  2. If force_cloud flag → use cloud (for complex/critical tasks)
+  2. If force_cloud flag → use cloud (kept for API compat; cloud is now default anyway)
   3. If message context is very long → use cloud (better context handling)
-  4. Default → try specialist (GPU), fall back through chain
+  4. Default → external (Sonnet 4.6, cloud); LiteLLM falls back to specialist
+     (local Gemma via llama-server) if the external call fails.
 
 LiteLLM handles the actual fallback retries; this module decides
 the *starting point* and any pre-routing logic.
+
+Anthropic prompt caching is applied on the external path via
+`_apply_cache_control()` — ephemeral cache_control markers on the system
+message and a rolling prefix anchor at messages[-2].
 """
 
 from __future__ import annotations
@@ -108,12 +113,19 @@ class SmartRouter:
         target = self.select_model(messages, model, force_cloud)
         logger.info(f"Routing to model: {target}")
 
+        # Anthropic prompt caching: inject ephemeral cache_control breakpoints
+        # on the external path. Skipped for specialist since llama-server's
+        # OpenAI-compat endpoint does not support prompt caching.
+        messages_to_send = (
+            self._apply_cache_control(messages) if target == "external" else messages
+        )
+
         try:
             if stream:
                 # Return async generator for SSE streaming
                 response = await self.litellm_router.acompletion(
                     model=target,
-                    messages=messages,
+                    messages=messages_to_send,
                     stream=True,
                     **kwargs,
                 )
@@ -121,7 +133,7 @@ class SmartRouter:
             else:
                 response = await self.litellm_router.acompletion(
                     model=target,
-                    messages=messages,
+                    messages=messages_to_send,
                     stream=False,
                     **kwargs,
                 )
@@ -129,6 +141,58 @@ class SmartRouter:
         except Exception as e:
             logger.error(f"All models failed: {e}")
             raise
+
+    @staticmethod
+    def _apply_cache_control(messages: list[dict]) -> list[dict]:
+        """
+        Inject Anthropic ephemeral cache_control markers for multi-turn prefix reuse.
+
+        Breakpoints placed:
+          1. System message (index 0 if role=='system') — longest-lived anchor.
+          2. Rolling prefix anchor at the previous assistant turn (messages[-2]) —
+             extends forward each turn; Anthropic matches the longest cached prefix.
+
+        Returns a new list; original messages are not mutated. Only applied when
+        content is a plain string — already-block content is left alone.
+
+        Requires a minimum cacheable prefix of ~1024 tokens server-side; short
+        conversations pay normal input cost until that threshold is reached.
+        """
+        if not messages:
+            return messages
+
+        new_messages = list(messages)
+
+        # Breakpoint 1: system message
+        first = new_messages[0]
+        if first.get("role") == "system" and isinstance(first.get("content"), str):
+            new_messages[0] = {
+                **first,
+                "content": [{
+                    "type": "text",
+                    "text": first["content"],
+                    "cache_control": {"type": "ephemeral"},
+                }],
+            }
+
+        # Breakpoint 2: rolling prefix at the previous complete turn (messages[-2]).
+        # messages[-1] is the incoming user turn; messages[-2] is the last stable
+        # message (typically the prior assistant response). Needs >=3 items so we
+        # have at least [system?, prev_turn, current_user].
+        if len(new_messages) >= 3:
+            idx = len(new_messages) - 2
+            anchor = new_messages[idx]
+            if isinstance(anchor.get("content"), str):
+                new_messages[idx] = {
+                    **anchor,
+                    "content": [{
+                        "type": "text",
+                        "text": anchor["content"],
+                        "cache_control": {"type": "ephemeral"},
+                    }],
+                }
+
+        return new_messages
 
     @property
     def available_models(self) -> list[str]:

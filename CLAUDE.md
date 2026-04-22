@@ -53,21 +53,31 @@ for family photos and RL training data collection from chat interactions.
 ## Architecture
 
 ```
-Server 1 (192.168.1.93)                    Server 2 (192.168.1.95)
-┌──────────────────────────┐               ┌──────────────────────────┐
-│ FastAPI orchestrator:8000│─── /completion→ │ llama-server :8000       │
-│  ConversationCache       │─── /slots ────→ │  Gemma 4 E4B 7.52B Q8_0│
-│    Redis (short-term)    │               │  2×131072 ctx (2 slots)  │
-│    KV cache mgr          │               │  KV slot save/restore    │
-│    rolling summarization │               │  CLIP (Phase 4)          │
-│ SQLite (long-term)       │               └──────────────────────────┘
-│ MCP server :3001 (HTTP)  │                          │
-│ Qdrant server :6333      │                          │
-│  active storage: NVMe    │                          │
-│  snapshots → NAS daily   │                          │
-└──────────────────────────┘                          │
-           │                                          │
-           └──── both mount ──→ NAS (27TB NFS) ───────┘
+                         Anthropic API (cloud)
+                         ┌───────────────────────────────┐
+                ─primary─→│ Claude Sonnet 4.6            │
+                         │ (prompt caching: system +     │
+                         │  rolling prefix breakpoints)  │
+                         └───────────────────────────────┘
+                                    │
+Server 1 (192.168.1.93)             │          Server 2 (192.168.1.95)
+┌──────────────────────────┐  fallback/       ┌──────────────────────────┐
+│ FastAPI orchestrator:8000│──summarize/────→ │ llama-server :8000       │
+│  SmartRouter (LiteLLM)   │  variants →      │  Gemma 4 E4B 7.52B Q8_0  │
+│  ConversationCache       │─── /slots ─────→ │  2×131072 ctx (2 slots)  │
+│    Redis (short-term)    │                  │  KV slot save/restore    │
+│    KV cache mgr          │                  │  CLIP (Phase 4)          │
+│    rolling summarization │                  └──────────────────────────┘
+│ SQLite (long-term)       │                             │
+│  + summary_text +        │                             │
+│    covers_through_msg_id │                             │
+│ MCP server :3001 (HTTP)  │                             │
+│ Qdrant server :6333      │                             │
+│  active storage: NVMe    │                             │
+│  snapshots → NAS daily   │                             │
+└──────────────────────────┘                             │
+           │                                             │
+           └──── both mount ──→ NAS (27TB NFS) ──────────┘
                                (Redis AOF, SQLite, KV .bin files,
                                 model cache, Qdrant snapshots, exports)
 ```
@@ -106,11 +116,18 @@ All three tiers are coordinated by `ConversationCache` in `conversation.py`:
 - `resume(chat_id)` — restore KV slot from NFS before inference
 - `park(chat_id)` — save KV slot to NFS + refresh Redis TTL after inference
 - `clear(chat_id)` — wipe Redis + erase KV slot + delete NFS file
-- `maybe_summarize(chat_id, fn)` — if Redis context exceeds ~100K tokens,
-  summarize old turns via specialist (llama-server), rebuild Redis, erase stale KV cache
+- `maybe_summarize(chat_id, fn, store=None)` — if Redis context exceeds ~100K tokens,
+  summarize old turns via specialist (llama-server), rebuild Redis as
+  `[system?, summary_msg, recent_turns]`, erase stale KV cache, and (if `store` is
+  passed) persist the summary + boundary `message_id` to SQLite `chats` columns.
+  Summarization failure is tolerated: the turn proceeds with oversized context.
 - `is_cold(chat_id)` — True if Redis has no messages for this chat
-- `warm_from_store(chat_id, messages)` — reload last N turns from SQLite into Redis
-  on cold-start resume; also erases stale KV cache
+- `warm_from_store(chat_id, store=None, messages=None)` — cold-start Redis reload.
+  If `store` is provided and a persisted summary exists, reconstructs Redis as
+  `[system?, summary_msg, messages_with_id_greater_than_covers_through]` — no data
+  duplication since raw messages below the boundary are represented only by the
+  summary. Falls back to last-N raw messages if no summary is stored. Also erases
+  stale KV cache.
 
 Code: `conversation.py`, `kv_cache.py`, `chat_store.py`
 
@@ -215,6 +232,9 @@ HomeAI-Lab/
 | GET | `/health` | Health check (Redis, models) |
 | GET | `/v1/models` | List models — OpenAI-compatible format |
 | GET | `/v1/models/health` | Check each model endpoint |
+| GET | `/proxy/v1/model/info` | LiteLLM-compatible model info for Cline (max_input_tokens, context_window) |
+| GET | `/proxy/v1/models` | OpenAI model list for Cline |
+| POST | `/proxy/v1/chat/completions` | Stateless OpenAI-compatible pass-through for Cline — no Redis/RAG/summarization |
 | POST | `/v1/rag/ingest/sync` | Scan NFS roots → populate ingestion queue |
 | POST | `/v1/rag/ingest/start` | Start background ingestion worker |
 | POST | `/v1/rag/ingest/stop` | Stop ingestion worker gracefully |
@@ -228,28 +248,38 @@ OpenAI-compatible response format is a Phase 3 requirement for Open WebUI integr
 
 ### Phase 1 — Core loop ✅ (complete)
 - FastAPI orchestrator on Server 1
-- LiteLLM routing with fallback chain (specialist → orchestrator → external)
-- llama-server on Server 2 GPU: Gemma 4 E4B 7.52B Q8_0, 2 slots × 131072 ctx (`-c 262144 --parallel 2`) ✅
-- Per-conversation KV cache persisted to NAS via llama-server slot API ✅
-- Rolling summarization at ~100K token threshold (via specialist/llama-server) ✅
+- LiteLLM routing with fallback chain: external (Sonnet 4.6, cloud) → specialist (Gemma 4, local) on external failure (reversed 2026-04-22)
+- Anthropic prompt caching on the external path (`SmartRouter._apply_cache_control()`) ✅ — ephemeral breakpoints on system + `messages[-2]` rolling prefix
+- llama-server on Server 2 GPU: Gemma 4 E4B 7.52B Q8_0, 2 slots × 131072 ctx (`-c 262144 --parallel 2`) — fallback + summarization role ✅
+- Per-conversation KV cache persisted to NAS via llama-server slot API ✅ (used on specialist path only)
+- Rolling summarization at ~100K token threshold (via specialist/llama-server) ✅ — summary + boundary `message_id` persisted to SQLite `chats` row
 - Redis conversation cache with NAS AOF persistence
-- SQLite chat store with full CRUD
+- SQLite chat store with full CRUD + `summary_text`/`summary_covers_through_message_id` columns
 - Markdown and JSONL export
 - CLI chat client (`utils/cli_chat.py`)
 - Feedback collection for RL
 - MCP server for Gin-AI filesystem (`NFS-files--MCP-server/`) ✅
 
-### Per-request flow (specialist model path, §8 tool-use loop)
+### Per-request flow (§8 tool-use loop)
+
+Both external (primary, Sonnet 4.6) and specialist (fallback, Gemma 4) share the same loop structure in `_server_managed_completion()`. The only branch is the inference step at [main.py:333-347](main.py#L333-L347).
+
 ```
-resume(chat_id)           → assign slot + restore KV from NAS (if exists)
+resume(chat_id)           → assign slot + restore KV from NAS (no-op on external path)
 append(user_msg)          → Redis + SQLite
-maybe_summarize()         → if >200K chars: summarize old turns via specialist,
-                            rebuild Redis, erase stale KV, re-assign slot
+maybe_summarize(store=…)  → if >400K chars (~100K tokens): summarize old turns via
+                            specialist (Gemma), rebuild Redis, erase stale KV,
+                            persist summary + boundary id to SQLite
 get_context()             → condensed history from Redis
 build_system_prompt()     → off/on/only mode → tool spec injected into system message
 loop (max 2 iterations):
-  apply_gemma_template()  → <|turn>role\n… format; stop=["<|turn>"]
-  inference(slot_id)      → POST /completion to llama-server GPU slot
+  # Branch on selected model:
+  if target == specialist (fallback):
+    apply_gemma_template()   → <|turn>role\n… format; stop=["<|turn>"]
+    inference(slot_id)       → POST /completion to llama-server GPU slot
+  else (primary = external):
+    router.complete()        → LiteLLM → Anthropic with cache_control markers
+                               (cache_read grows each turn as prefix rolls forward)
   parse_tool_call()       → detect <tool_call>…</tool_call> in output
   if tool_call:
     _retrieve()           → search_rag() or multi_query_search() depending on config
@@ -538,6 +568,13 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 # Server 1 — MCP server (HTTP mode for remote access)
 bash NFS-files--MCP-server/nfs_files_mcp_server.sh
 
+# Cline VSCode plugin — use the LiteLLM provider, not "OpenAI Compatible":
+#   Base URL : http://192.168.1.93:8000/proxy
+#   API Key  : any non-empty string (e.g. "homeai-local")
+#   Model    : gemma-4-e4b  (local, 131K ctx)  OR  claude-sonnet-4-6  (cloud, 200K ctx)
+# Verify the proxy is serving correct model info:
+curl http://192.168.1.93:8000/proxy/v1/model/info | python3 -m json.tool | grep -E "model_name|max_input_tokens"
+
 # CLI chat — RAG off by default (opt-in); --user florian enables ownership filter (omit for dev mode)
 python utils/cli_chat.py --server http://192.168.1.93:8000 --user florian
 #   in-session: /rag on | /rag only | /rag status | /rag search <query> | /user <id>
@@ -613,11 +650,18 @@ Benchmark methodology: 3 runs averaged per scenario, `/completion` native endpoi
 - **Conclusion:** ~12% decode regression is the cost of near-f16 weight quality. Acceptable for interactive use at 96 tok/s serial decode.
 
 ### Important design decisions
+- **Sonnet 4.6 as interactive primary (flipped 2026-04-22)** — Claude Sonnet 4.6 (`anthropic/claude-sonnet-4-5`) is the default for interactive chat; Gemma 4 is reserved for fallback + summarization + multi-query variants + offline use. Driver: at ~50–100 turns/day for a 4-user family, Sonnet with prompt caching costs ~$30–60/mo — tolerable — while delivering substantially better reasoning and tool-use fidelity than a 4B local model. Gemma's role shifted from "default inferencer" to "specialized worker" without removing the infrastructure.
+- **Anthropic prompt caching on the external path** — `SmartRouter._apply_cache_control()` injects ephemeral `cache_control` on the system message (long-lived anchor) and on `messages[-2]` (rolling prefix anchor). Verified end-to-end: turn-2 onwards hits with `cache_read_input_tokens ≈ 98% of prompt_tokens` on multi-turn chats. ~10× input-cost reduction on steady-state turns. Specialist path is skipped — llama-server's OpenAI-compat endpoint does not cache.
+- **Prompt caching vs. summarization trade-off (documented)** — each `maybe_summarize()` event rewrites Redis (summary replaces old turns), which invalidates Anthropic's rolling prefix cache on the next turn. At 100K-token threshold this fires roughly once per ~50-turn chat; the one-time cost spike (~$0.05 on the summary turn) is dominated by the ongoing savings from a smaller cached prefix on all subsequent turns. The threshold is deliberately NOT raised to preserve Gemma fallback's context-fit headroom (Gemma per-slot is ~110K tokens).
+- **Summary persistence to SQLite** — summaries are persisted to `chats.summary_text` + `chats.summary_covers_through_message_id`. On cold resume (Redis TTL expiry), `warm_from_store` reconstructs Redis as `[system?, summary_msg, messages WHERE id > boundary]` — no data duplication, full conversation raw log always retained in `messages` table. Closes a pre-existing gap where summaries were lost across 24h TTL.
 - **llama-server over vLLM** — native KV slot save/restore API (`/slots/{id}?action=save|restore`); 2 slots × 131072 ctx at 9,977 MiB VRAM with f16 KV, flash-attn, SWA-aware KV allocation (Gemma 4 E4B 7.52B Q8_0)
 - **KV cache in `ConversationCache`** — `conversation.py` is the single owner of all conversation state (Redis + KV). `resume()`/`park()` keep save/restore co-located with Redis ops
-- **Specialist bypasses LiteLLM** — native `/completion` required to pass `slot_id`. LiteLLM handles external fallback unchanged
-- **Rolling summarization uses specialist (llama-server)** — `maybe_summarize()` erases the KV slot before calling; both summarization and subsequent inference start cold sequentially on the same slot; triggered at ~100K tokens, keeps last 20 turns verbatim
-- **LiteLLM stays as the routing layer** — handles OpenAI/Anthropic API differences and fallback/retry for the external (cloud) model
+- **Specialist bypasses LiteLLM** — native `/completion` required to pass `slot_id`. External path goes through LiteLLM; specialist path calls llama-server directly. Branch at [main.py:333-347](main.py#L333-L347).
+- **Cline-facing proxy endpoints (2026-04-22, Option 2)** — external clients (Cline VSCode plugin, any OpenAI-compatible tool) hit HomeAI-Lab directly at `http://192.168.1.93:8000/proxy/v1/{model/info,models,chat/completions}`. Stateless OpenAI-compatible pass-through to `SmartRouter.complete()` — bypasses Redis, SQLite, KV cache, RAG, summarization; Cline manages its own history. Model-name mapping in `_CLINE_EXPOSED_MODELS` in [main.py](main.py): `gemma-4-e4b` → `specialist`, `claude-sonnet-4-6` → `external`. `model_info.max_input_tokens` is populated from `config.yaml` (131072 for Gemma per-slot, 200000 for Sonnet) so Cline's LiteLLM provider reads the correct context window. Prompt caching still applies to the external path (same `SmartRouter` instance). Supersedes the old Server-2 LiteLLM wrapper at `:8001`. Trade-off: Cline now coupled to orchestrator uptime — accepted.
+- **Shared llama-server (2026-04-22)** — the same Server 2 llama-server still backs both HomeAI-Lab's internal `specialist` path and Cline's `gemma-4-e4b` proxy path. Per-slot context 131,072. Known race: a Cline request landing on a slot between HomeAI-Lab's restore→inference→save sequence corrupts that chat's KV state. Post-flip, HomeAI-Lab's Gemma hits are rare (summarization + fallback only), so collision probability is low and the corruption self-heals on the next turn. No coordination code — accepted risk.
+- **Rolling summarization uses specialist (llama-server)** — `maybe_summarize()` erases the KV slot before calling; both summarization and subsequent inference start cold sequentially on the same slot; triggered at ~100K tokens, keeps last 20 turns verbatim. Model pinned via `routing.summarization_model` in `config.yaml` (default `specialist`).
+- **LiteLLM stays as the routing + fallback layer** — handles OpenAI/Anthropic API differences and executes the fallback chain `external → specialist` (reversed direction of pre-flip implementation)
+- **Tool-use — XML sentinel path only (native Anthropic tool-use deferred)** — both external and specialist paths emit and parse the custom `<tool_call>...</tool_call>` sentinel. Sonnet handles it reliably in practice. Native Anthropic `tools=[...]` + `tool_use` content blocks remains a deferred follow-up; unifying the two paths isn't blocking current quality.
 - **Redis for short-term memory** — fast, TTL-based, LLM context builder reads it every request (server-managed only)
 - **SQLite for long-term** — single file on NAS, zero ops overhead, plenty fast for ~10K chats (server-managed only)
 - **Qdrant for vectors** — persistent local mode (on NAS), gRPC + REST API; `qdrant-client` Python dep

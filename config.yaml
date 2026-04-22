@@ -35,6 +35,10 @@ model_list:
     model_info:
       id: "external-claude"
       description: "Claude Sonnet 4.6 (primary) — interactive chat default"
+      # Advertised context window for any LiteLLM-style proxy consumer.
+      max_tokens: 200000
+      max_input_tokens: 200000
+      context_window: 200000
 
   # --- Fallback: GPU inference on Server 2 ---
   - model_name: specialist
@@ -45,6 +49,12 @@ model_list:
     model_info:
       id: "specialist-llama-server"
       description: "Gemma 4 E4B Q8_0 — summarization, offline fallback, background"
+      # Advertised context window: per-slot capacity with `-c 262144 --parallel 2`.
+      # 262144 / 2 = 131072. This is what external clients (Cline) read via
+      # /proxy/v1/model/info for their contextWindow setting.
+      max_tokens: 131072
+      max_input_tokens: 131072
+      context_window: 131072
 
 # -- Routing Policy ------------------------------------------------------------
 routing:

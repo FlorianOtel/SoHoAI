@@ -2183,10 +2183,7 @@ Implementing contextual retrieval requires re-embedding all 98,737 points:
 Total serial wall time: 30–40 hours on specialist, or ~10–15 hours on Sonnet (which
 also spends money). Not appropriate until:
 
-1. The primary-model question (specialist vs. external vs. hybrid) is settled — see
-   last exploration in session notes. If Sonnet becomes primary, contextual retrieval
-   is almost free per-chunk via prompt caching. If specialist stays primary,
-   contextualisation runs slow but free.
+1. ✅ **Resolved 2026-04-22** — primary is now **external (Sonnet 4.6)** with prompt caching enabled. Contextualisation via Sonnet is cache-amortised across chunks of the same document, making it relatively cheap per-chunk. If contextual retrieval is revisited, use Sonnet and exploit prompt caching on the shared document prefix.
 2. §8.1–§8.3 are implemented and the new baseline (mode=on + tool-use + multi-query +
    MMR) has been measured. Contextual retrieval's 35% retrieval-failure improvement
    is relative to a baseline without these improvements; the marginal gain on top of

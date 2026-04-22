@@ -16,17 +16,19 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from schemas import (
     ChatExport,
@@ -664,6 +666,193 @@ async def list_models():
 async def model_health():
     """Check which model endpoints are reachable."""
     return await app.state.router.health_check()
+
+
+# =============================================================================
+#  Cline-facing LiteLLM-compatible pass-through (Option 2, 2026-04-22)
+#
+#  These endpoints let external clients (Cline VSCode plugin, and any other
+#  OpenAI-compatible client) hit HomeAI-Lab's LiteLLM Router directly,
+#  bypassing the orchestrator's stateful machinery (Redis, SQLite, KV cache,
+#  RAG tool-use loop, rolling summarization). Cline manages its own history.
+#
+#  Mimics the LiteLLM proxy response shapes so Cline's LiteLLM provider reads
+#  `model_info.max_input_tokens` correctly (v3.79.0 bug: defaults to 8K/128K
+#  if the endpoint returns nothing or an empty API-key is set in Cline).
+#
+#  Cline base URL: http://192.168.1.93:8000/proxy
+#  See CLAUDE.md §Design decisions and memory/project_shared_llama_server.md.
+# =============================================================================
+
+# Public Cline-facing model name → internal router alias.
+# Both paths reach the same LiteLLM Router, so prompt caching on external
+# applies here too; Gemma routing still lands on the shared llama-server.
+_CLINE_EXPOSED_MODELS: dict[str, str] = {
+    "gemma-4-e4b": "specialist",
+    "claude-sonnet-4-6": "external",
+}
+
+
+def _build_proxy_model_entry(config: dict, public_name: str, internal_name: str) -> dict | None:
+    """Build one entry for /proxy/v1/model/info from the config.yaml model_list."""
+    internal = next(
+        (m for m in config.get("model_list", []) if m.get("model_name") == internal_name),
+        None,
+    )
+    if internal is None:
+        return None
+    # From the client's perspective, BOTH models are reached via the same
+    # OpenAI-compatible /proxy/v1/chat/completions endpoint. Cline's LiteLLM
+    # provider filters the model dropdown to entries with an `openai/` prefix,
+    # so advertise both models that way — the proxy itself handles the internal
+    # routing (Gemma → llama-server, Sonnet → Anthropic).
+    litellm_params = {
+        "model": f"openai/{public_name}",
+        # api_base points at this proxy; any tool that uses it will loop back
+        # here, which is what we want (single entry point for external clients).
+        "api_base": f"http://192.168.1.93:8000/proxy/v1",
+    }
+    return {
+        "model_name": public_name,
+        "litellm_params": litellm_params,
+        "model_info": internal.get("model_info", {}),
+    }
+
+
+def _resolve_cline_model(name: str | None) -> str | None:
+    """Resolve a Cline-submitted model name to the internal router alias.
+
+    Accepts any of:
+      - bare public name:   "gemma-4-e4b", "claude-sonnet-4-6"
+      - provider-prefixed:  "openai/gemma-4-e4b", "anthropic/claude-sonnet-4-6"
+      - internal aliases:   "specialist", "external"  (for direct testing)
+    Returns the internal router alias or None if unknown.
+    """
+    if not name:
+        return None
+    # Direct match on public name
+    if name in _CLINE_EXPOSED_MODELS:
+        return _CLINE_EXPOSED_MODELS[name]
+    # Strip a provider prefix like "openai/..." or "anthropic/..."
+    bare = name.split("/", 1)[-1] if "/" in name else name
+    if bare in _CLINE_EXPOSED_MODELS:
+        return _CLINE_EXPOSED_MODELS[bare]
+    # Allow the raw internal alias to pass through
+    if name in set(_CLINE_EXPOSED_MODELS.values()):
+        return name
+    return None
+
+
+@app.get("/proxy/v1/model/info")
+async def proxy_model_info():
+    """LiteLLM-compatible model info for Cline."""
+    config = app.state.router.config
+    data = []
+    for public_name, internal_name in _CLINE_EXPOSED_MODELS.items():
+        entry = _build_proxy_model_entry(config, public_name, internal_name)
+        if entry is not None:
+            data.append(entry)
+    return {"data": data}
+
+
+@app.get("/proxy/v1/models")
+async def proxy_models():
+    """OpenAI-compatible /v1/models list for Cline."""
+    created = int(time.time())
+    return {
+        "object": "list",
+        "data": [
+            {"id": name, "object": "model", "created": created, "owned_by": "homeai-lab"}
+            for name in _CLINE_EXPOSED_MODELS
+        ],
+    }
+
+
+@app.post("/proxy/v1/chat/completions")
+async def proxy_chat_completions(req: Request):
+    """Stateless OpenAI-compatible chat completions.
+
+    Maps the public model name to the internal router alias, then passes
+    straight to `SmartRouter.complete()`. No chat_id, no Redis, no RAG loop.
+    Supports streaming (SSE) when `stream: true` is set.
+    """
+    body = await req.json()
+    messages = body.pop("messages", [])
+    public_model = body.pop("model", None)
+    stream = bool(body.pop("stream", False))
+
+    internal_model = _resolve_cline_model(public_model)
+    if internal_model is None:
+        logger.warning(
+            "Proxy rejected unknown model %r (accepted: %s or prefixed forms)",
+            public_model, sorted(_CLINE_EXPOSED_MODELS),
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{public_model}' not exposed by this proxy. "
+                f"Accepted: {sorted(_CLINE_EXPOSED_MODELS)} (with or without provider prefix)."
+            ),
+        )
+    # Public name to report back to client (preserves whatever form Cline sent).
+    reported_model = public_model
+
+    # force_cloud/max_tokens and any other OpenAI-standard params flow through
+    # via **body into router.complete → LiteLLM. Drop anything HomeAI-Lab-internal.
+    body.pop("force_cloud", None)
+    body.pop("chat_id", None)
+    body.pop("user_id", None)
+    body.pop("rag_mode", None)
+
+    router: SmartRouter = app.state.router
+
+    if stream:
+        async def event_stream():
+            try:
+                response_gen = await router.complete(
+                    messages=messages,
+                    model=internal_model,
+                    stream=True,
+                    **body,
+                )
+                async for chunk in response_gen:
+                    if hasattr(chunk, "model_dump"):
+                        chunk_dict = chunk.model_dump()
+                    elif hasattr(chunk, "dict"):
+                        chunk_dict = chunk.dict()
+                    else:
+                        chunk_dict = dict(chunk)
+                    # Overwrite model so Cline sees the public name it requested
+                    chunk_dict["model"] = reported_model
+                    yield f"data: {json.dumps(chunk_dict)}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                logger.error(f"Proxy stream failed: {e}")
+                err = {"error": {"message": str(e), "type": type(e).__name__}}
+                yield f"data: {json.dumps(err)}\n\n"
+                yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
+    # Non-streaming
+    response = await router.complete(
+        messages=messages,
+        model=internal_model,
+        stream=False,
+        **body,
+    )
+    if hasattr(response, "model_dump"):
+        resp_dict = response.model_dump()
+    elif hasattr(response, "dict"):
+        resp_dict = response.dict()
+    else:
+        resp_dict = dict(response)
+    resp_dict["model"] = reported_model
+    return JSONResponse(resp_dict)
 
 
 # =============================================================================
