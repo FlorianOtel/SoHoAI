@@ -41,10 +41,10 @@ class SmartRouter:
         self.litellm_router = Router(
             model_list=self.config["model_list"],
             routing_strategy="simple-shuffle",
-            # Fallback: if specialist fails, go straight to cloud
+            # Fallback: if external (cloud) fails, go to specialist (local)
             fallbacks=[
                 {
-                    "specialist": ["external"],
+                    "external": ["specialist"],
                 }
             ],
             # Retry config

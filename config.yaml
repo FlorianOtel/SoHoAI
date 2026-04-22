@@ -25,9 +25,18 @@ redis:
   default_ttl_seconds: 86400  # 24 hours
 
 # -- LiteLLM Model Routing ----------------------------------------------------
-# Fallback order: specialist (GPU Server 2) → external (cloud)
+# Default: external (Sonnet 4.6). Fallback: specialist (local Gemma) if cloud unreachable.
 model_list:
-  # --- Primary: GPU inference on Server 2 ---
+  # --- Primary (interactive chat): Cloud inference ---
+  - model_name: external
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      id: "external-claude"
+      description: "Claude Sonnet 4.6 (primary) — interactive chat default"
+
+  # --- Fallback: GPU inference on Server 2 ---
   - model_name: specialist
     litellm_params:
       model: openai/gemma4
@@ -35,26 +44,18 @@ model_list:
       api_key: "dummy-key"
     model_info:
       id: "specialist-llama-server"
-      description: "Gemma 4 E4B 7.52B Q8_0 on RTX 5070 via llama-server"
-
-  # --- Fallback: Cloud API ---
-  - model_name: external
-    litellm_params:
-      model: anthropic/claude-sonnet-4-20250514
-      api_key: os.environ/ANTHROPIC_API_KEY
-    model_info:
-      id: "external-claude"
-      description: "Claude Sonnet via Anthropic API (fallback / complex tasks)"
+      description: "Gemma 4 E4B Q8_0 — summarization, offline fallback, background"
 
 # -- Routing Policy ------------------------------------------------------------
 routing:
-  default_model: "specialist"
-  fallback_chain: ["specialist", "external"]
+  default_model: "external"
+  fallback_chain: ["external", "specialist"]
   # Route to cloud when context exceeds threshold.
   # Hard limit: -c 131072 (~128K tokens). At 120K we route to cloud,
   # leaving ~11K headroom for output (default max_tokens=1024 + safety margin).
   complexity_threshold_tokens: 120000
   cloud_model: "external"
+  summarization_model: "specialist"
 
 # -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
 rag:
