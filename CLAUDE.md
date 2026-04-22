@@ -74,22 +74,23 @@ Server 1 (192.168.1.93)                    Server 2 (192.168.1.95)
 
 ### LLM routing (via LiteLLM)
 
-Two model tiers with automatic fallback:
+Two model tiers with automatic fallback (2026-04-22 flip: primary is now external):
 
-1. **specialist** — Gemma 4 E4B 7.52B Q8_0 on RTX 5070 via llama-server (primary, GPU, Server 2)
-2. **external** — Claude Sonnet via Anthropic API (fallback if Server 2 unreachable, or >120K token context)
+1. **external** — Claude Sonnet 4.6 via Anthropic API (primary, cloud, interactive chat default)
+2. **specialist** — Gemma 4 E4B 7.52B Q8_0 on RTX 5070 via llama-server (fallback if Anthropic unreachable, summarization, offline tasks)
 
-Routing logic is in `router.py`. Default is specialist; falls back to cloud if
-unreachable. Rolling summarization keeps conversations well below the 100K threshold
-in practice.
+Routing logic is in `router.py`. Default is external (Sonnet 4.6); falls back to local Gemma if cloud unreachable.
+Rolling summarization uses specialist (Gemma 4) and persists summaries to SQLite for cold-resume recovery.
+Prompt caching on Sonnet 4.6 reduces cost by ~90% on cache hits.
 
-**Specialist model path** bypasses LiteLLM and calls llama-server's native
+**External (Sonnet 4.6) path** goes through LiteLLM with optional prompt caching enabled 
+(cache_control markers on system message and rolling prefix breakpoints).
+
+**Specialist (Gemma 4) path** bypasses LiteLLM and calls llama-server's native
 `/completion` endpoint directly, enabling KV cache slot targeting (`slot_id`).
-This includes rolling summarization — no slot contention since `maybe_summarize()`
-erases the KV slot before calling, and both summarization and the subsequent
-main inference start cold on the same slot sequentially.
-
-The external model path goes through LiteLLM as usual.
+This is used only on fallback (Anthropic down), summarization operations, multi-query variants,
+and background/offline tasks. Rolling summarization erases the KV slot before calling, and both
+summarization and the subsequent main inference start cold on the same slot sequentially.
 
 ### Memory — three tiers
 
@@ -278,13 +279,13 @@ retrieval + chat injection verified via `utils/rag_smoke_test.py`.
   - Child chunks (~250 tokens, 20 overlap) → embedded, stored in Qdrant as search index
   - Parent chunks (~800–1200 tokens, 100 overlap) → raw text only, stored in Qdrant payload (`parent_text` field)
   - Flat 512-token chunks used only for PPTX slides and short TXT/YAML/config files (already compact)
-- Embeddings via **bge-m3 served by Ollama on Server 1** (`http://192.168.1.93:11434`)
+- Embeddings via **bge-m3 served by Ollama** — server is configurable (`ollama_url` in `config.yaml`)
   - 1024 dimensions, 570M params, ~1.2GB — top MTEB scores; 8192-token context window
-  - API: `POST http://192.168.1.93:11434/api/embeddings`; no batch endpoint — `embed_batch()` runs up to N concurrent requests via asyncio semaphore, where N is `--batch` in `rag_ingest_daemon.py` (default 5)
+  - Two modes: CPU (Server 1, 193) ~650ms/chunk; GPU (Server 2, 195, RTX 5070) ~10–20ms/chunk
+  - `embed_batch()` runs up to N concurrent requests via asyncio semaphore; N = `--batch` in daemon
   - `embed_batch()` accepts optional `progress_cb(done, total)` — called every 50 chunks (`_PROGRESS_INTERVAL`) + on the final chunk; used by `ingest.py` to log `"Embedding progress: N/M  filename"` lines read by `rag_status.py --watch`
-  - Config keys: `embedding_model: bge-m3`, `ollama_url: http://192.168.1.93:11434/api/embeddings`
-  - Query latency: ~650ms/chunk unloaded; **~28–30s under full ingest load** (Ollama serializes, search query queues behind ingest batch)
-  - HTTP timeout in `embed_text()`: **120s** — must be this high or search times out while ingest daemon is running
+  - HTTP timeout in `embed_text()`: **120s** — must be this high or search times out while ingest daemon is running (CPU mode)
+  - Daemon flags: `--workers` (file-level concurrency) and `--batch` (chunk-level Ollama concurrency) are both **required**; see RAG-strategy.md §5.4 for operating points per mode
 - Qdrant vector store on Server 1 (`http://192.168.1.93:6333`), active storage on local NVMe — **confirmed right choice** (see design decisions)
 - Package: `rag_engine/` — fully implemented (schema, collection, embeddings, state, scanner, ingest, search, multi_query, tool_use); `rag.py` deleted
 - Full design details: `RAG-strategy.md`
@@ -543,7 +544,8 @@ python utils/cli_chat.py --server http://192.168.1.93:8000 --user florian
 
 # RAG ingestion (see RAG-strategy.md §5 for full walkthrough)
 python utils/rag_sync_nfs.py                   # scan NFS → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files
-python utils/rag_ingest_daemon.py              # process queue (runs for hours); --batch controls Ollama concurrency (default 5)
+python utils/rag_ingest_daemon.py --workers 1 --batch 5    # CPU embed (Server 1); both flags required
+python utils/rag_ingest_daemon.py --workers 3 --batch 20   # GPU embed (Server 2, RTX 5070); see RAG-strategy.md §5.4
 python utils/rag_status.py                     # one-shot queue counts + Qdrant stats (ignored count always shown)
 python utils/rag_status.py --ignored           # detail listing of ignored files + rationale
 python utils/rag_status.py --watch /tmp/rag-ingestion.log   # live monitor: chunk progress bar + ETA
@@ -620,5 +622,6 @@ Benchmark methodology: 3 runs averaged per scenario, `/completion` native endpoi
 - **SQLite for long-term** — single file on NAS, zero ops overhead, plenty fast for ~10K chats (server-managed only)
 - **Qdrant for vectors** — persistent local mode (on NAS), gRPC + REST API; `qdrant-client` Python dep
 - **Embeddings via Ollama on Server 1** — `bge-m3` (1024-dim, 8192-tok context) served by Ollama; Server 2 GPU uses ~9 GB with 2 parallel slots at full context with Gemma 4 (leaving ~3.2 GB headroom, not enough for a reliable embedding model under load); `sentence-transformers` removed. `embed_batch()` concurrency controlled by `--batch` in `rag_ingest_daemon.py` (default 5, `_BATCH_CONCURRENCY`); lower `--batch` to reduce `httpx.ReadTimeout` errors, raise it for more throughput. Ollama serializes model computation — when ingest daemon runs, search queries queue behind it and can wait 28–30s; `embed_text()` timeout is 120s to survive this. `embed_batch()` fires a `progress_cb(done, total)` every 50 chunks (`_PROGRESS_INTERVAL`); `ingest.py` wires this to a logger call; `rag_status.py --watch` parses those log lines to compute real-time chunk rate + ETA. SQLite fetch batch size is hardcoded to 10 files per iteration (`_FETCH_BATCH_SIZE` in `rag_ingest_daemon.py`). Qdrant upsert is batched in groups of `_UPSERT_BATCH_SIZE=256` points (`ingest.py`) to avoid HTTP 400 on large files.
+- **Qdrant client HTTP timeout** — `rag_engine/collection.py::get_client()` initializes the `QdrantClient` with `timeout=60` (increased from httpx default ~5s in 2026-04-22). During heavy bulk ingestion (e.g., 70K+ points from a single file), Qdrant performs extended index optimization that can block response handling for 10–30s. The 5s timeout was too short, causing regular `httpcore.ReadTimeout` cascades during large ingestion runs. 60s allows Qdrant time to complete index restructuring. See `TROUBLESHOOTING.md` for full analysis.
 - **Multi-tenancy via `owner` field + Google OAuth2** — every Qdrant point carries an `owner` derived from NFS path root at ingestion; search applies `MatchAny(any=[user_owner, "la-familia"])` filter; user identity from Google OIDC JWT mapped to `owner` via `config.yaml` `users:` section; data model designed before first ingestion to avoid re-ingesting
 - **MCP server uses path sandboxing** — all operations validated against ALLOWED_ROOTS, no escape possible

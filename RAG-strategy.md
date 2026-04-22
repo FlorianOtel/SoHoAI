@@ -156,41 +156,54 @@ indexed twice regardless of how many symlink aliases exist:
 
 ## 3. Architecture decisions
 
-### 3.1 Embedding model — bge-m3 via Ollama (updated 2026-04-17)
+### 3.1 Embedding model — bge-m3 via Ollama (updated 2026-04-22)
 
 **Model**: `bge-m3` — 1024 dimensions, 570M params, ~1.2GB on disk.
 Top MTEB retrieval scores; 8192-token context window.
 
-**Server**: Ollama on **Server 1** (192.168.1.93) CPU.
-
-**API**: `POST http://localhost:11434/api/embeddings`
-No batch endpoint — `embed_batch()` runs up to N concurrent requests via asyncio semaphore,
-where N is controlled by the `--batch` argument of `rag_ingest_daemon.py` (default 5).
-Lower values reduce Ollama queue depth and prevent `httpx.ReadTimeout` under heavy load;
-higher values improve throughput when Ollama has headroom.
+**API**: `POST {ollama_url}/api/embeddings` — no native batch endpoint.
+`embed_batch()` runs up to N concurrent requests via asyncio semaphore, where N is the
+`--batch` argument of `rag_ingest_daemon.py`. Lower values reduce Ollama queue depth and
+prevent `httpx.ReadTimeout` under heavy load; higher values improve throughput when Ollama
+has headroom (especially GPU).
 `embed_batch()` accepts an optional `progress_cb(done, total)` callback fired every
 `_PROGRESS_INTERVAL` (50) completions and on the final chunk. `ingest.py` wires this
 to `logger.info("Embedding progress: %d/%d  %s", done, total, file_name)` so that
 `rag_status.py --watch` can parse the timestamps and compute a real-time chunk rate
 and ETA for the current file.
 
-**Config keys**:
+**Config key** — determines which server Ollama runs on:
 ```yaml
-embedding_model: bge-m3
-ollama_url: http://localhost:11434/api/embeddings
+# CPU embed — Server 1 local (all-local mode)
+ollama_url: http://192.168.1.93:11434/api/embeddings
+
+# GPU embed — Server 2 RTX 5070 (split mode; llama-server must not be running or have headroom)
+ollama_url: http://192.168.1.95:11434/api/embeddings
 ```
 
-**Query latency**: ~650ms/chunk unloaded; up to ~28–30s under full ingestion load.
+**Two operating modes** — see §5.4 for daemon parameters:
+
+| Mode | Ollama server | Embed latency | Bottleneck | Daemon flags |
+|------|--------------|---------------|------------|--------------|
+| All-local (CPU) | Server 1 (193) | ~650ms/chunk | Embedding | `--workers 1 --batch 5` |
+| Split (GPU) | Server 2 (195) | ~10ms/chunk | docling parse | `--workers 3 --batch 20` |
+
+**Query latency (CPU mode)**: ~650ms/chunk unloaded; up to ~28–30s under full ingestion load.
 Ollama serializes model computation — when the ingest daemon is running, search queries
 queue behind the embedding batch. The `embed_text()` HTTP timeout is **120s** to survive
 this wait. Do not reduce below 60s while the ingest daemon may be running.
-To reduce search latency during ingestion, lower `--batch` (e.g. `--batch 2`) to shrink
-the Ollama queue depth.
+To reduce search latency during ingestion in CPU mode, lower `--batch` (e.g. `--batch 2`).
 
-**Batch ingestion**: async background job (~9 hours estimated for full NFS corpus).
+**Query latency (GPU mode)**: ~10–20ms/chunk. Search queries are not meaningfully blocked
+by ingestion since Ollama on Server 2 is not used for search (Server 1 search path uses
+Server 1's Ollama). Ensure `ollama_url` in `config.yaml` is set consistently for both
+the daemon and the search path — mixing servers will produce wrong cosine distances.
 
-**Why not Server 2?**
-Server 2's RTX 5070 has only ~576 MiB free VRAM at idle (llama-server uses 11,642/12,227 MiB).
+**Why Server 2 VRAM permits bge-m3 when llama-server is idle:**
+When llama-server is stopped on Server 2, bge-m3 (~1.2GB) fits easily in the RTX 5070's
+12GB. If llama-server is running, it occupies ~9.97GB leaving only ~2.2GB — bge-m3 fits
+but inference latency becomes unpredictable under VRAM pressure. Do not run bulk ingestion
+with `--workers 3` on GPU while llama-server handles active conversations.
 KV cache grows dynamically during active turns (up to ~4.1 GB for a full 53,248-token slot),
 so free headroom effectively drops to zero under load. No embedding model fits alongside
 llama-server on Server 2. A two-phase approach (bulk ingest on Server 2, incremental on Server 1)
@@ -765,7 +778,7 @@ To prevent the Qdrant database from serving partial context during active buildi
 3. **Generate Chunks:** Execute parent-child split logic (or flat 512-token chunks) entirely
    in memory. Update `progress_detail = "chunking ({n} chunks)"`.
 4. **Vectorize:** Send child chunks to `bge-m3` via Ollama using `--batch`-concurrent
-   `asyncio` requests (default 5). Update `progress_detail = "embedding {i}/{n}"` periodically.
+   `asyncio` requests. Update `progress_detail = "embedding {i}/{n}"` periodically.
    `embed_batch()` fires `progress_cb` every 50 chunks, which logs
    `"Embedding progress: N/M  filename"` — consumed by `rag_status.py --watch`.
 5. **Build Payloads:** Construct Qdrant point objects, binding the vector, UUID, and payload
@@ -795,8 +808,9 @@ chunking changes produce a different number of chunks.
 
 Standalone CLI scripts enable independent progress monitoring and RAG pipeline management without launching the FastAPI server:
 * `utils/rag_sync_nfs.py`: Scans all configured NFS roots (per-user + shared), derives `owner` per file, applies filters from `config.yaml`, and populates SQLite with `pending` files. New files → `pending`; modified files (mtime changed) → `pending`; `ignored` files (mtime unchanged) → no-op (permanent skip); `ignored` files (mtime changed, i.e. file replaced) → reset to `pending`. For files removed from NFS or newly excluded by config, removes the SQLite row and deletes the corresponding Qdrant points. Accepts `--user florian` to scan a single user's root only. Always run this before restarting the daemon after failures.
-* `utils/rag_ingest_daemon.py`: The worker loop executing the 7-step atomic embedding process (includes `owner` in every Qdrant payload).
+* `utils/rag_ingest_daemon.py`: The worker loop executing the 7-step atomic embedding process (includes `owner` in every Qdrant payload). Both `--workers` and `--batch` are **required** flags — see §5.4 for operating points. `--workers` controls file-level concurrency (how many files parse+embed simultaneously, each in its own OS thread with a thread-local `DocumentConverter`); `--batch` controls chunk-level Ollama concurrency within each file.
 * `utils/rag_status.py`: Dashboard querying SQLite/Qdrant to output ingestion metrics (`pending`, `processing`, `completed`, `ignored`). `ignored` count always shown; `--ignored` for full detail listing with retry count and last error. Accepts `--user` to filter by owner. `--watch LOG_FILE` mode: refreshes every 2s, shows per-file chunk progress bar, elapsed time, chunk rate, and ETA (absolute clock + remaining duration) derived from log timestamps. `--list-pending [N]` prints pending file paths one per line (pipeable into `wc -l`, `head`, etc.); combinable with `--user`.
+  `--watch` log parser (`parse_log`) tracks all in-flight files simultaneously (updated 2026-04-22). The original single-state machine reset on every `Processing` line and would lose any file whose `Chunked` line had already appeared before a later `Processing` line — i.e. it broke silently with `--workers > 1`. Fix: per-file state dict keyed by full NFS path; `name_to_path` lookup associates `Chunked`/`Embedding progress`/`Ingested` lines (filename only) back to their full-path entry. Display picks the file currently in `embedding` phase with the most recent progress timestamp.
 * `utils/rag_search_cli.py`: Query tester returning `parent_text` and cosine similarity scores. Requires `--user` flag to apply the ownership filter (simulates authenticated search).
 * `utils/rag_reset.py`: Drops the Qdrant collection and resets SQLite to `pending` for clean re-ingestion. Accepts `--user` to reset a single user's documents only.
 
@@ -908,43 +922,93 @@ python utils/rag_status.py
 
 ### 5.4 Run the ingestion daemon
 
+Both `--workers` and `--batch` are **required** — the daemon errors immediately if either
+is omitted. They are independent knobs for different bottlenecks:
+
+| Flag | Controls | Bottleneck it addresses |
+|------|----------|------------------------|
+| `--workers N` | Files processed concurrently (file-level) | docling CPU parse time |
+| `--batch M` | Ollama embedding requests in-flight per file (chunk-level) | Embedding throughput |
+
+#### Operating mode A — All-local / CPU-bound (Ollama on Server 1)
+
+Use when bge-m3 is served by Ollama on Server 1 (192.168.1.93). Parse and embed share
+the same CPU (Ryzen 9 6900HX, 8 physical cores / 16 threads). Within one file, parse and
+embed are strictly sequential so they do not compete. `--workers 1` keeps docling's
+4 internal threads from crowding out Ollama.
+
 ```bash
-python utils/rag_ingest_daemon.py           # default: --batch 5
-python utils/rag_ingest_daemon.py --batch 2 # conservative: fewer timeouts, lower throughput
-python utils/rag_ingest_daemon.py --batch 8 # aggressive: more throughput, higher timeout risk
+# config.yaml: ollama_url: http://192.168.1.93:11434/api/embeddings
+screen -S rag-ingest
+python utils/rag_ingest_daemon.py --workers 1 --batch 5
+# Ctrl-A D to detach; screen -r rag-ingest to reattach
 ```
 
-`--batch` controls the **Ollama embedding concurrency** (max parallel requests per file),
-not the number of files fetched. Files are always fetched from SQLite in groups of 10.
-Lower `--batch` if you see `httpx.ReadTimeout` errors in the log; raise it if Ollama has
-headroom and you want faster ingestion.
-
-For each file the daemon:
-1. Deletes any stale Qdrant points for that file (idempotency)
-2. Marks the file as `processing` in SQLite
-3. Parses with `docling` → full text (or `_parse_pptx()` python-pptx fallback for PPTX format detection failures; or `_parse_ipynb()` for notebooks)
-4. Chunks text (parent-child for PDF/IPYNB/MD; flat 512-tok for PPTX/YAML/CSV)
-5. Embeds child chunks via Ollama (`bge-m3`, `--batch` concurrent requests)
-6. Upserts all points atomically to Qdrant
-7. Marks the file as `completed`
-
-#### Timing estimates
+Timing (CPU embed, ~650ms/chunk):
 
 | File type | Time per file |
 |-----------|--------------|
 | Short MD / YAML / TXT | ~1–3 s |
 | Long Markdown (>50 sections) | ~5–15 s |
 | Jupyter notebook | ~5–20 s |
-| PDF (10–50 pages) | ~15–60 s |
-| PDF (100+ pages) | ~60–180 s |
+| PDF (10–50 pages) | ~20–90 s |
+| PDF (100+ pages) | ~90–300 s |
 
-For ~2,800 files the full run takes **several hours**. Run it in a persistent session:
+For ~2,800 files: estimate **6–10 hours**. Ollama serializes inference — when the daemon
+runs, live search queries queue behind the embedding batch (up to 28–30s wait). The
+`embed_text()` timeout is 120s; do not reduce it while the daemon is running.
+To reduce search latency during ingestion, lower `--batch 2`.
+
+#### Operating mode B — Split / GPU-accelerated (Ollama on Server 2)
+
+Use when bge-m3 is served by Ollama on Server 2 (192.168.1.95, RTX 5070). Embedding is
+remote GPU (~10–20ms/chunk); docling CPU parse on Server 1 becomes the bottleneck.
+`--workers 3` runs 3 files concurrently — while one file's chunks embed on the GPU,
+the other two are being parsed by docling on Server 1's CPU threads.
+
+Server 1 hardware: Ryzen 9 6900HX, 8 physical cores / 16 logical threads.
+Docling uses 4 CPU threads internally per converter instance (thread-local, one per worker).
+3 workers × 4 threads = 12 threads — fits cleanly within the 16 logical threads while
+leaving 4 threads for the OS and other light workloads (IDE, Claude Code).
+Do not use `--workers 4` — 16 docling threads at the SMT limit gives diminishing returns
+for CPU-bound matrix ops and makes the machine noticeably sluggish.
+
+**Prerequisite**: ensure llama-server on Server 2 is idle or stopped before running bulk
+ingestion with `--workers 3`. bge-m3 (~1.2GB) plus llama-server (~9.97GB) = ~11.2GB,
+leaving only ~1GB headroom in the RTX 5070's 12GB — fine at low concurrency but risky
+under a heavy `--batch 20` load.
 
 ```bash
+# config.yaml: ollama_url: http://192.168.1.95:11434/api/embeddings
 screen -S rag-ingest
-python utils/rag_ingest_daemon.py --batch 20
+python utils/rag_ingest_daemon.py --workers 3 --batch 20
 # Ctrl-A D to detach; screen -r rag-ingest to reattach
 ```
+
+Timing (GPU embed, ~10–20ms/chunk):
+
+| File type | Bottleneck | Time per file (effective) |
+|-----------|------------|--------------------------|
+| Short MD / YAML / TXT | embed | ~0.5–2 s |
+| Long Markdown | embed | ~2–8 s |
+| Jupyter notebook | parse | ~3–10 s |
+| PDF (10–50 pages) | parse (docling) | ~4–40 s |
+| PDF (100+ pages) | parse (docling) | ~30–120 s |
+
+For ~2,800 files: estimate **2–4 hours** (3× pipeline overlap hides most of the parse time).
+Large plain-text files (tens of thousands of chunks) remain embedding-bound regardless of
+GPU speed — this is expected and does not indicate a problem.
+
+#### Per-file steps (both modes)
+
+For each file the daemon:
+1. Deletes any stale Qdrant points for that file (idempotency — step 0)
+2. Marks the file as `processing` in SQLite
+3. Parses with `docling` → full text (or `_parse_pptx()` python-pptx fallback for PPTX; or `_parse_ipynb()` for notebooks)
+4. Chunks text (parent-child for PDF/IPYNB/MD; flat 512-tok for PPTX/YAML/CSV)
+5. Embeds child chunks via Ollama (`bge-m3`, `--batch` concurrent requests)
+6. Upserts all points to Qdrant in batches of 256
+7. Marks the file as `completed`
 
 The daemon is **crash-safe**: if killed, restart it and it resumes from where it left off.
 Rows stuck in `processing` are automatically reset to `pending` on startup (crash recovery).
@@ -2180,3 +2244,78 @@ Before any implementation work begins on §8.4, require:
 Nothing in this subsection should be implemented ahead of that gate.
 
 ---
+
+## 9. Model tier policy (2026-04-22)
+
+### Context
+
+HomeAI-Lab originally architected with Gemma 4 E4B on local RTX 5070 as primary interactive inference, with Claude Sonnet as fallback-only. This reflected two assumptions circa 2024:
+
+1. Cloud API cost would be prohibitive for family-scale daily use (~50–100 interactive turns/day).
+2. Quality gap between 4B local model and frontier cloud was narrow enough that local-first was defensible.
+
+Both assumptions have since shifted:
+
+- **Cost**: Sonnet 4.6 with prompt caching is ~$30–60/month at 50–100 turns/day — tolerable for a home lab. The "prohibitive cost" premise no longer holds.
+- **Quality**: Gemma 4 E4B substantially lags Sonnet 4.6 on reasoning, code generation, and especially tool-use fidelity. Tool-use (RAG retrieval loop, §8.2) is core to this project, and a model that reliably emits well-formed tool calls is worth more than a fast-but-shaky local one.
+
+### Decision: Flip primary to Sonnet 4.6, demote Gemma to specialist roles
+
+**Primary interactive chat default**: Sonnet 4.6 (external, cloud) — higher quality, prompt caching cost-efficient.
+
+**Specialist (Gemma 4) roles**:
+- **Fallback** — local inference when Anthropic API is unreachable; house still works offline
+- **Summarization** — rolling summarization at ~100K token threshold; Gemma sufficient quality, cheaper than cloud
+- **Multi-query variant expansion** — generate alternative query phrasings for RAG (§8.3); local, fast, low cost
+- **Background/offline tasks** — RAG ingestion, RL data collection, maintenance jobs
+- **Privacy-tagged content** (future) — conversations tagged to never leave local storage
+
+### Mechanism
+
+- **Config**: `routing.default_model: "external"` (was `"specialist"`), `fallback_chain: ["external", "specialist"]` (was reversed)
+- **Router**: LiteLLM fallbacks dict: `{"external": ["specialist"]}` (if Anthropic fails, try Gemma)
+- **Summarization**: Explicitly config-driven at `routing.summarization_model: "specialist"`; wired in `main.py:128`
+- **Cold-resume**: Summary persistence to SQLite (new columns `summary_text`, `summary_covers_through_message_id`) allows reconstruction of summarized conversations on cold start from Redis expiry
+
+### Cost impact
+
+| Scenario | Cost/turn (Sonnet only) | Cost/turn (w/ caching) | Breaks even vs local infrastructure |
+|---|---|---|---|
+| 200 chars input + 200 output, cache miss | ~$0.004 | ~$0.002 | ~5000 turns = 50 days |
+| 5K chars input + 200 output, cache hit | ~$0.024 | ~$0.003 | ~2000 turns = 20 days |
+| 100+ turn chat session (prefix cache accrues) | accumulated $0.08/session | accumulated $0.01/session | n/a — cloud wins every time after turn 5 |
+
+**Conclusion**: Prompt caching makes Sonnet 4.6 cost-competitive with Gemma 4 within 20–50 days of normal use. At 50–100 turns/day for a 4-user family, the payoff is achieved in 1–2 weeks. After that, cloud cost is **lower** than the sunk cost of the RTX 5070 and electricity to run it 24/7 for the fallback path.
+
+### Fallback resilience
+
+**Fallback chain is now reversed**: Anthropic outage → fall back to local Gemma, not the other way around.
+
+If Anthropic API is down (502, timeout, rate-limited):
+1. LiteLLM retries with exponential backoff (2 attempts)
+2. Falls back to specialist (Gemma 4 on Server 2)
+3. User gets a response from local inference (may be lower quality, but functional)
+4. No user-visible degradation once Anthropic recovers (next turn routes to Sonnet again)
+
+If both fail (Anthropic + Server 2 down), orchestrator returns HTTP 502 — acceptable,  as this is the house is in severe infrastructure failure anyway (no local inference, no cloud access, no fallback).
+
+### Design tension: Prompt caching vs summarization
+
+Prompt caching and rolling summarization are mildly antagonistic:
+- **Prompt caching** — LiteLLM maintains a rolling prefix cache of the system message + conversation context on Anthropic's servers. On each new turn, only the latest user message and assistant response are uncached input; everything before is read from cache.
+- **Summarization** — when conversation exceeds ~100K tokens, `maybe_summarize()` re-builds Redis with `[system_msg, summary_msg, recent_turns]`, invalidating the entire prefix cache (summary is new, summary boundary is new).
+
+**Impact**: Once per ~50-turn chat, a summarization event fires. That one turn has ~$0.05 extra cost (full non-cached input read). All subsequent turns on that same chat see a smaller cached prefix (from the summary point onward), saving on average ~$0.002 per turn. Payoff is achieved within 25 more turns. This is **not a performance problem** — it's a documented, accepted trade-off. The summarization threshold (400,000 chars ≈ 100K tokens) is deliberately chosen to stay well inside Gemma 4's 110K context window, so if Anthropic is down and we fall back to specialist mid-chat, the conversation still fits.
+
+### Tool-use on Sonnet vs Gemma fallback
+
+**Sonnet 4.6 path**: Will eventually support native Anthropic tool-use (tool-use blocks in request → tool-use blocks in response). For now, tool-use still uses the `<tool_call>` XML sentinel (legacy, inherited from Gemma).
+
+**Gemma 4 fallback path**: Stays on XML sentinel (`<tool_call>…</tool_call>` in both system prompt and response parsing). When fallback occurs mid-RAG-loop, the XML sentinel still works — `parse_tool_call()` in `rag_engine/tool_use.py` handles both paths.
+
+### Future: premium/high-stakes mode
+
+A future enhancement (not implemented): optional per-request flag `"model": "opus-4.7"` to route critical or review-heavy tasks to Opus 4.7 (most expensive). This would be explicitly opt-in by the user, logged, and clearly documented as a cost-incurring choice. Useful for Phase 4 RL review, sensitive document synthesis, or user-triggered "generate my best answer" mode.
+
+---
+
