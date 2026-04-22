@@ -120,16 +120,58 @@ class ConversationCache:
         """Return True if Redis has no messages for this chat (expired or new)."""
         return await self.redis.llen(f"conv:{chat_id}") == 0
 
-    async def warm_from_store(self, chat_id: str, messages: list[Message]) -> None:
+    async def warm_from_store(self, chat_id: str, store: Optional["ChatStore"] = None, messages: Optional[list[Message]] = None) -> None:
         """
         Populate Redis from SQLite message history on cold-start resume.
 
         Called when Redis TTL has expired but the chat still exists in SQLite.
-        Loads the last max_turns messages so the LLM sees the recent history.
+        
+        If store is provided, consults the summary columns. If a summary exists,
+        reconstructs Redis as: [system_msg?, summary_msg, messages_after_boundary].
+        Otherwise, falls back to loading last max_turns messages.
+        
+        If store is not provided, uses the messages list directly (backward compat).
+        
         Also erases the KV cache — the saved slot was built on the full old
         prompt which no longer matches the reloaded (possibly truncated) history.
         """
-        to_load = messages[-self.max_turns:] if len(messages) > self.max_turns else messages
+        if store is None:
+            # Backward compat: messages passed directly
+            if messages is None:
+                logger.warning(f"warm_from_store called with neither store nor messages")
+                return
+            to_load = messages[-self.max_turns:] if len(messages) > self.max_turns else messages
+        else:
+            # Load from store, preferring summary if available
+            summary_text, covers_through_id = store.get_summary(chat_id)
+            
+            if summary_text and covers_through_id is not None:
+                # Reconstruction: [system?, summary_msg, raw_tail]
+                all_raw = store.get_messages_after(chat_id, None)
+                
+                # Defensively: if boundary id doesn't exist, fall back to last-N
+                tail = store.get_messages_after(chat_id, covers_through_id) if covers_through_id else all_raw
+                
+                # Build the reconstructed list
+                to_load: list[Message] = []
+                
+                # Include system message if present
+                if all_raw and all_raw[0].role == Role.system:
+                    to_load.append(all_raw[0])
+                
+                # Add the summary as a synthetic assistant message
+                summary_msg = Message(
+                    role=Role.assistant,
+                    content=f"[Earlier conversation summary]\n{summary_text}"
+                )
+                to_load.append(summary_msg)
+                
+                # Add the raw tail
+                to_load.extend(tail)
+            else:
+                # No summary: just load last max_turns messages
+                all_raw = store.get_messages_after(chat_id, None)
+                to_load = all_raw[-self.max_turns:] if len(all_raw) > self.max_turns else all_raw
 
         key = f"conv:{chat_id}"
         pipe = self.redis.pipeline()

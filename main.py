@@ -271,7 +271,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
     if await cache.is_cold(chat_id):
         existing = store.get_chat(chat_id)
         if existing and existing.messages:
-            await cache.warm_from_store(chat_id, existing.messages)
+            await cache.warm_from_store(chat_id, store=store)
             slot_id = await cache.resume(chat_id)
             logger.info(f"Cold resume: chat {chat_id[:8]} reloaded from SQLite")
 
@@ -282,7 +282,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
     store.auto_title(chat_id)
 
     # -- 2. Rolling summarization ---------------------------------------------
-    summarized = await cache.maybe_summarize(chat_id, app.state.summarize_fn)
+    summarized = await cache.maybe_summarize(chat_id, app.state.summarize_fn, store=store)
     if summarized:
         slot_id = await cache.resume(chat_id)
         logger.info(f"Context summarized for chat {chat_id[:8]}")
