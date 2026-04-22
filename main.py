@@ -124,9 +124,10 @@ async def lifespan(app: FastAPI):
             "preserving all key facts, decisions, and context needed to continue:\n\n"
             + text
         )
+        summarization_model = config.get("routing", {}).get("summarization_model", "specialist")
         resp = await app.state.router.complete(
             messages=[{"role": "user", "content": prompt}],
-            model="specialist",
+            model=summarization_model,
             force_cloud=False,
             stream=False,
         )
