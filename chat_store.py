@@ -64,6 +64,19 @@ class ChatStore:
                     created_at  TEXT NOT NULL
                 );
             """)
+            
+            # Idempotent migration: add summary columns if they don't exist.
+            # SQLite has no ADD COLUMN IF NOT EXISTS, so we tolerate the duplicate column error.
+            for ddl in [
+                "ALTER TABLE chats ADD COLUMN summary_text TEXT",
+                "ALTER TABLE chats ADD COLUMN summary_covers_through_message_id INTEGER",
+            ]:
+                try:
+                    conn.execute(ddl)
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" not in str(e).lower():
+                        raise
+            conn.commit()
 
     @contextmanager
     def _conn(self):
@@ -191,6 +204,51 @@ class ChatStore:
         with self._conn() as conn:
             conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
             conn.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
+
+    def update_summary(self, chat_id: str, summary_text: str, covers_through_message_id: int) -> None:
+        """Persist a summary and the message id boundary it covers."""
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE chats SET summary_text = ?, summary_covers_through_message_id = ?
+                   WHERE chat_id = ?""",
+                (summary_text, covers_through_message_id, chat_id),
+            )
+
+    def get_summary(self, chat_id: str) -> tuple[Optional[str], Optional[int]]:
+        """Return (summary_text, covers_through_message_id) or (None, None) if no summary."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT summary_text, summary_covers_through_message_id FROM chats WHERE chat_id = ?""",
+                (chat_id,),
+            ).fetchone()
+            if row and row["summary_text"]:
+                return row["summary_text"], row["summary_covers_through_message_id"]
+            return None, None
+
+    def get_messages_after(self, chat_id: str, message_id: Optional[int] = None) -> list[Message]:
+        """Return all messages after message_id, or all if message_id is None."""
+        with self._conn() as conn:
+            if message_id is None:
+                # Return all messages (existing get_chat behavior)
+                msgs = conn.execute(
+                    "SELECT * FROM messages WHERE chat_id = ? ORDER BY id",
+                    (chat_id,),
+                ).fetchall()
+            else:
+                # Return only messages with id > message_id
+                msgs = conn.execute(
+                    "SELECT * FROM messages WHERE chat_id = ? AND id > ? ORDER BY id",
+                    (chat_id, message_id),
+                ).fetchall()
+            
+            return [
+                Message(
+                    role=Role(m["role"]),
+                    content=m["content"],
+                    timestamp=m["timestamp"],
+                )
+                for m in msgs
+            ]
 
     # -- Export ----------------------------------------------------------------
 
