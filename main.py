@@ -300,7 +300,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
     if "rag_mode" in req.model_fields_set:
         rag_mode: RagMode = req.rag_mode
     else:
-        rag_mode = RagMode(app.state.rag_cfg.get("default_mode", "on"))
+        rag_mode = RagMode(app.state.rag_cfg.get("default_mode", "off"))
     if rag_mode != RagMode.off and app.state.qdrant_client is None:
         logger.warning("RAG mode=%s requested but Qdrant unavailable; forcing off", rag_mode)
         rag_mode = RagMode.off
