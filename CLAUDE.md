@@ -98,7 +98,7 @@ Prompt caching on Sonnet 4.6 reduces cost by ~90% on cache hits.
 
 **Specialist (Gemma 4) path** bypasses LiteLLM and calls llama-server's native
 `/completion` endpoint directly, enabling KV cache slot targeting (`slot_id`).
-This is used only on fallback (Anthropic down), summarization operations, multi-query variants,
+This is used only on fallback (Anthropic down), summarization operations,
 and background/offline tasks. Rolling summarization erases the KV slot before calling, and both
 summarization and the subsequent main inference start cold on the same slot sequentially.
 
@@ -187,7 +187,7 @@ HomeAI-Lab/
 │   ├── scanner.py              # NFS filesystem scanner → populates StateDB; filters read from config.yaml rag.scanner; followlinks=True with visited_real_dirs + visited_real_files global dedup sets to prevent re-ingesting symlink aliases
 │   ├── ingest.py               # docling parse + parent-child chunking + Qdrant upsert
 │   ├── search.py               # query → embed → Qdrant query_points → parent_text + provenance
-│   ├── multi_query.py          # §8.3: expand_query() + parallel search + MMR reranking (enabled: false by default)
+│   ├── multi_query.py          # §8.3: expand_query() + parallel search + MMR reranking (permanently disabled — no-go 2026-04-22)
 │   └── tool_use.py             # §8.2: build_tool_spec(), parse_tool_call(), format_tool_result()
 ├── utils/
 │   ├── cli_chat.py             # Terminal chat client; RAG off by default (opt-in); --user OWNER sends user_id; /rag on|off|only; /rag search <query> inspects retrieval; /user <id> changes owner mid-session
@@ -196,8 +196,8 @@ HomeAI-Lab/
 │   ├── rag_status.py           # CLI: queue counts + Qdrant point stats; --ignored for detail; --watch LOG_FILE for live ETA monitor; --list-pending [N] to print pending paths (pipeable)
 │   ├── rag_search_cli.py       # CLI: retrieval-only — embed query + Qdrant search; prints top-k hits + parent_text preview
 │   ├── rag_smoke_test.py       # CLI: end-to-end smoke test — retrieval + /v1/chat/completions with rag_mode=on; --expect SUBSTR assertion; pass/fail exit code
-│   ├── rag_mmr_bench.py        # CLI: MMR benchmark — single vs multi-query recall@5 + latency + diversity; --compare runs specialist vs external side-by-side; go/no-go verdict
-│   ├── rag_bench_queries.txt   # 12 verified queries with expected path substrings for rag_mmr_bench.py
+│   ├── rag_mmr_bench.py        # CLI: MMR benchmark harness (evaluated 2026-04-22; no-go verdict — kept for reference)
+│   ├── rag_bench_queries.txt   # 12 verified queries used by rag_mmr_bench.py
 │   ├── rag_reset.py            # CLI: reset Qdrant collection + ingestion queue
 │   ├── notebooklm_auth.py      # NotebookLM browser automation (Playwright + system Chrome)
 │   ├── snapshot_codebase.py    # Aggregate project files → codebase_snapshot.md
@@ -282,7 +282,7 @@ loop (max 2 iterations):
                                (cache_read grows each turn as prefix rolls forward)
   parse_tool_call()       → detect <tool_call>…</tool_call> in output
   if tool_call:
-    _retrieve()           → search_rag() or multi_query_search() depending on config
+    _retrieve()           → search_rag() (multi-query permanently disabled)
     append tool result    → re-enter loop
   else: final answer → break
 append(assistant)         → Redis + SQLite
@@ -330,9 +330,9 @@ retrieval + chat injection verified via `utils/rag_smoke_test.py`.
   `<tool_call>{"name":"search_documents","args":{"query":"…"}}</tool_call>` sentinel parsed
   by `rag_engine/tool_use.py`. Tool messages folded to `role=user` for both specialist and
   external paths. Hard cap: `rag.tool_use.max_iterations: 2`.
-- **Multi-query + MMR** — `rag_engine/multi_query.py`; disabled by default (`rag.multi_query.enabled: false`).
-  When enabled: LLM generates N query variants → parallel Qdrant search → union →
-  MMR reranking (λ=0.5) using original-query vector. Toggle in `config.yaml` after benchmarking.
+- **Multi-query + MMR** — `rag_engine/multi_query.py`; **permanently disabled** (`rag.multi_query.enabled: false`).
+  Evaluated 2026-04-22: no-go verdict. Standard single-query retrieval is sufficient
+  for this corpus. Code retained for reference but will not be enabled.
 - **`prompts/rag_system_prompts.py`** — `build_system_prompt(mode, tool_spec)` is the single
   source of all three mode prompts; called by `main.py` before each tool-use loop.
 - **Service addresses** — all explicit IPs: Ollama `192.168.1.93:11434`, Qdrant `192.168.1.93:6333`.
@@ -483,7 +483,7 @@ Other user directories (`/mnt/nfs/{Eva,Annika,Laura}`) and `/mnt/nfs/La-Familia`
 
 12. ~~Run initial NFS scan and ingestion~~ — ✅ done 2026-04-21 (2891 files, 98,737 Qdrant points; see `RAG-strategy.md §5` for the runbook)
 13. ~~Implement `rag_mode` (off/on/only), system-prompt tool-use loop, `prompts/` module~~ — ✅ done 2026-04-21 (§8.1–§8.2; legacy boolean toggle removed)
-14. ~~Implement multi-query + MMR reranking (`rag_engine/multi_query.py`)~~ — ✅ code done 2026-04-21 (§8.3; `rag.multi_query.enabled: false` until benchmarked)
+14. ~~Implement multi-query + MMR reranking (`rag_engine/multi_query.py`)~~ — ✅ code done 2026-04-21; 🚫 evaluated 2026-04-22, no-go verdict — permanently disabled
 
 **→ NOW**: Phase 3 — Google OAuth2 middleware + OpenAI-compatible response format for Open WebUI (not blocking; RAG works end-to-end today via `--user florian`).
 
@@ -592,12 +592,6 @@ python utils/rag_status.py --list-pending              # print every pending fil
 python utils/rag_search_cli.py --query "certifications" --user florian        # retrieval only
 python utils/rag_smoke_test.py --query "AWS certifications" --user florian --expect "AWS-Certification"  # end-to-end retrieval + chat; pass/fail exit
 
-# MMR benchmark (run before flipping rag.multi_query.enabled: true)
-python utils/rag_mmr_bench.py --user florian                                  # single vs multi-query, go/no-go verdict
-python utils/rag_mmr_bench.py --user florian --mode both --show-variants      # print generated query variants
-python utils/rag_mmr_bench.py --user florian --compare                        # specialist vs external variant LLM side-by-side
-python utils/rag_mmr_bench.py --user florian --lambda 0.3                     # tune MMR diversity/relevance balance
-
 # NotebookLM — first-time login (requires X display)
 DISPLAY=:1 python utils/notebooklm_auth.py --login
 # NotebookLM — verify saved session
@@ -650,7 +644,7 @@ Benchmark methodology: 3 runs averaged per scenario, `/completion` native endpoi
 - **Conclusion:** ~12% decode regression is the cost of near-f16 weight quality. Acceptable for interactive use at 96 tok/s serial decode.
 
 ### Important design decisions
-- **Sonnet 4.6 as interactive primary (flipped 2026-04-22)** — Claude Sonnet 4.6 (`anthropic/claude-sonnet-4-5`) is the default for interactive chat; Gemma 4 is reserved for fallback + summarization + multi-query variants + offline use. Driver: at ~50–100 turns/day for a 4-user family, Sonnet with prompt caching costs ~$30–60/mo — tolerable — while delivering substantially better reasoning and tool-use fidelity than a 4B local model. Gemma's role shifted from "default inferencer" to "specialized worker" without removing the infrastructure.
+- **Sonnet 4.6 as interactive primary (flipped 2026-04-22)** — Claude Sonnet 4.6 (`anthropic/claude-sonnet-4-5`) is the default for interactive chat; Gemma 4 is reserved for fallback + summarization + offline use. Driver: at ~50–100 turns/day for a 4-user family, Sonnet with prompt caching costs ~$30–60/mo — tolerable — while delivering substantially better reasoning and tool-use fidelity than a 4B local model. Gemma's role shifted from "default inferencer" to "specialized worker" without removing the infrastructure.
 - **Anthropic prompt caching on the external path** — `SmartRouter._apply_cache_control()` injects ephemeral `cache_control` on the system message (long-lived anchor) and on `messages[-2]` (rolling prefix anchor). Verified end-to-end: turn-2 onwards hits with `cache_read_input_tokens ≈ 98% of prompt_tokens` on multi-turn chats. ~10× input-cost reduction on steady-state turns. Specialist path is skipped — llama-server's OpenAI-compat endpoint does not cache.
 - **Prompt caching vs. summarization trade-off (documented)** — each `maybe_summarize()` event rewrites Redis (summary replaces old turns), which invalidates Anthropic's rolling prefix cache on the next turn. At 100K-token threshold this fires roughly once per ~50-turn chat; the one-time cost spike (~$0.05 on the summary turn) is dominated by the ongoing savings from a smaller cached prefix on all subsequent turns. The threshold is deliberately NOT raised to preserve Gemma fallback's context-fit headroom (Gemma per-slot is ~110K tokens).
 - **Summary persistence to SQLite** — summaries are persisted to `chats.summary_text` + `chats.summary_covers_through_message_id`. On cold resume (Redis TTL expiry), `warm_from_store` reconstructs Redis as `[system?, summary_msg, messages WHERE id > boundary]` — no data duplication, full conversation raw log always retained in `messages` table. Closes a pre-existing gap where summaries were lost across 24h TTL.

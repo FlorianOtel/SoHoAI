@@ -88,12 +88,14 @@ rag:
     strip_on_final: true    # remove any stray <tool_call> tags from final answer
 
   # -- Multi-query retrieval + MMR (§8.3) -------------------------------------
+  # Evaluated 2026-04-22: no-go verdict. Standard single-query retrieval is
+  # sufficient for this corpus. Do not enable.
   multi_query:
-    enabled: false          # master toggle — start disabled; flip after benchmarking
-    n_variants: 3           # LLM-generated rephrasings (plus the original = 4 queries)
-    lambda: 0.5             # MMR relevance/diversity balance [0, 1]
-    pool_multiplier: 4      # candidate pool size = pool_multiplier * top_k
-    variant_model: "specialist"  # "specialist" or "external"
+    enabled: false          # permanently disabled — no-go verdict 2026-04-22
+    n_variants: 3
+    lambda: 0.5
+    pool_multiplier: 4
+    variant_model: "specialist"
 
   # -- NFS scanner filters ------------------------------------------------------
   scanner:

@@ -1,7 +1,7 @@
 ---
 title: "HomeAI-Lab — RAG Strategy"
 date: 2026-03-30
-last_updated: 2026-04-21 (§8 implemented + audited: rag_mode off/on/only, tool-use, multi-query+MMR, rag_mmr_bench.py harness, apply_gemma_template fix; §8.4 contextual retrieval still frozen)
+last_updated: 2026-04-22 (§8.3 multi-query+MMR evaluated — no-go verdict, permanently disabled; §8.4 contextual retrieval still frozen)
 created_by: Florian Otel
 last_updated_by: Claude Code (Claude Opus 4.7)
 context: >
@@ -1764,7 +1764,9 @@ rag:
    the orchestrator breaks and treats the assistant text as final (strip `<tool_call>`
    block per `strip_on_final: true`).
 
-### 8.3 Multi-query retrieval with MMR reranking ✅ implemented 2026-04-21 (enabled: false by default)
+### 8.3 Multi-query retrieval with MMR reranking 🚫 evaluated 2026-04-22 — no-go, permanently disabled
+
+> **Decision (2026-04-22):** Benchmarked against this corpus. Standard single-query retrieval is sufficient. `rag.multi_query.enabled` is permanently `false`. Code retained for reference only.
 
 #### Purpose
 
