@@ -250,6 +250,36 @@ class ChatStore:
                 for m in msgs
             ]
 
+    def get_summary_boundary_id(self, chat_id: str, summarize_keep_turns: int) -> Optional[int]:
+        """
+        Find the message id that marks the boundary for summarization.
+        
+        Returns the id of the message at position (total - keep_turns - 1),
+        i.e., the last message that will be included in the summary.
+        
+        Returns None if there aren't enough messages to summarize.
+        """
+        with self._conn() as conn:
+            # Get the total count of messages for this chat
+            count_row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+            total = count_row["cnt"] if count_row else 0
+            
+            if total <= summarize_keep_turns:
+                return None  # Not enough old messages to summarize
+            
+            # Get the id at offset (total - keep_turns - 1) when ordered by id
+            # This means: skip (total - keep_turns - 1) rows and get the next one
+            row = conn.execute(
+                """SELECT id FROM messages WHERE chat_id = ?
+                   ORDER BY id ASC LIMIT 1 OFFSET ?""",
+                (chat_id, total - summarize_keep_turns - 1),
+            ).fetchone()
+            
+            return row["id"] if row else None
+
     # -- Export ----------------------------------------------------------------
 
     def export_markdown(self, chat_id: str) -> Optional[str]:

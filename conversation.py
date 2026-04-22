@@ -29,6 +29,7 @@ import redis.asyncio as redis
 from schemas import Message, Role
 
 if TYPE_CHECKING:
+    from chat_store import ChatStore
     from kv_cache import KVCacheManager
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,7 @@ class ConversationCache:
         self,
         chat_id: str,
         summarize_fn: Callable[[str], Awaitable[str]],
+        store: Optional["ChatStore"] = None,
     ) -> bool:
         """
         If total raw size of the Redis conversation exceeds summarize_threshold_chars,
@@ -206,6 +208,9 @@ class ConversationCache:
 
         Also erases the KV cache — the prompt has changed so cached tokens
         are stale. The next inference rebuilds the KV from scratch.
+
+        If store is provided, persists the summary to SQLite with the boundary id
+        of the last message included in the summary.
 
         Returns True if summarization ran, False if threshold not reached.
         """
@@ -240,7 +245,15 @@ class ConversationCache:
         old_text = "\n".join(
             f"{m['role'].upper()}: {m['content']}" for m in old_turns
         )
-        summary_text = await summarize_fn(old_text)
+        try:
+            summary_text = await summarize_fn(old_text)
+        except Exception as e:
+            # If summarization fails (e.g., Gemma down), log but don't fail the turn.
+            # The context will remain oversized but the conversation continues.
+            logger.warning(
+                f"Summarization failed for chat {chat_id[:8]}: {e}. Skipping, turn proceeds."
+            )
+            return False
 
         summary_msg = {
             "role": "assistant",
@@ -265,6 +278,22 @@ class ConversationCache:
         # KV cache is now stale — erase it so the next request rebuilds fresh
         if self.kv_cache is not None:
             await self.kv_cache.erase(chat_id)
+
+        # Persist summary to SQLite if store is available.
+        # Compute the boundary id: the id of the last message included in old_turns.
+        if store:
+            try:
+                boundary_id = store.get_summary_boundary_id(chat_id, keep)
+                if boundary_id is not None:
+                    store.update_summary(chat_id, summary_text, boundary_id)
+                else:
+                    logger.warning(
+                        f"Could not compute summary boundary for chat {chat_id[:8]}, skipping SQLite write"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to persist summary to SQLite for chat {chat_id[:8]}: {e}"
+                )
 
         logger.info(
             f"Summarized chat {chat_id[:8]}: {len(old_turns)} old turns condensed, "
