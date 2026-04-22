@@ -60,7 +60,8 @@ routing:
 # -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
 rag:
   embedding_model: "bge-m3"                      # 1024-dim, 8192-tok context, served by Ollama on Server 1
-  ollama_url: "http://192.168.1.93:11434/api/embeddings"   # Ollama on Server 1 (explicit IP — not localhost)
+  # ollama_url: "http://192.168.1.93:11434/api/embeddings"   # Ollama on Server 1 (explicit IP — not localhost)
+  ollama_url: "http://192.168.1.95:11434/api/embeddings"   # Ollama on Server 2 (explicit IP — not localhost)
   top_k: 5
   # Parent-child chunking (see RAG-strategy.md §3.4):
   #   child: 200-300 tokens (embedded), parent: 800-1200 tokens (returned to LLM)
@@ -109,6 +110,7 @@ rag:
       - Library  # macOS stuff
       - Applications # macOS stuff
       - LLMs-cache   # HuggingFace model cache — READMEs/licenses, not RAG content
+      - Downloads # garbage
     # Directory name suffixes to skip (matched with str.endswith).
     exclude_dir_suffixes:
       - .dist-info             # pip package metadata

@@ -51,127 +51,146 @@ def _parse_ts(line: str) -> float | None:
         return None
 
 
-# "Starting ingest: 507 files pending"  (stdout, may appear after logger lines)
+# "Starting ingest: 507 files pending"
 _RE_START = re.compile(r'Starting ingest: (\d+) files pending')
 
 # "Processing [270 done / 10 failed]: /mnt/nfs/Florian/.../stockdata2.csv"
 _RE_PROCESSING = re.compile(r'Processing \[(\d+) done / (\d+) failed\]: (.+)')
 
-# "Chunked stockdata2.csv → 6806 chunks  strategy=flat  file_type=csv"
-_RE_CHUNKED = re.compile(r'Chunked .+? → (\d+) chunks\s+strategy=(\S+)\s+file_type=(\S+)')
+# "Chunked CFM Radar - 2022 Annual Report.pdf → 33 chunks  strategy=flat  file_type=pdf"
+# Group 1: filename, 2: chunk count, 3: strategy, 4: file_type
+_RE_CHUNKED = re.compile(r'Chunked (.+?) → (\d+) chunks\s+strategy=(\S+)\s+file_type=(\S+)')
 
-# "Ingested stockdata2.csv: 6806 points  owner=florian  tag=—"
-_RE_INGESTED = re.compile(r'Ingested .+?: (\d+) points')
+# "Ingested CFM Radar - 2022 Annual Report.pdf: 33 points  owner=florian  tag=—"
+# Group 1: filename, 2: point count
+_RE_INGESTED = re.compile(r'Ingested (.+?): (\d+) points')
 
-# "Embedding progress: 50/6806  stockdata2.csv"  (emitted by ingest.py every 50 chunks)
-_RE_EMBED_PROG = re.compile(r'Embedding progress: (\d+)/(\d+)')
-
-# Fallback for older logs: count httpx HTTP response lines for Ollama embedding calls
-_RE_EMBED_HTTP = re.compile(r'HTTP Request: POST .+/embeddings "HTTP/1.1 200 OK"')
+# "Embedding progress: 50/6806  stockdata2.csv"
+# Group 1: done, 2: total, 3: filename (trailing whitespace stripped by caller)
+_RE_EMBED_PROG = re.compile(r'Embedding progress: (\d+)/(\d+)\s+(.+)')
 
 
 def parse_log(log_path: str) -> dict:
     """
     Single-pass scan of a rag_ingest_daemon log file.
 
-    Returns current file-level ingestion state derived from log events.
-    Prefers explicit 'Embedding progress' lines (new format from ingest.py);
-    falls back to counting HTTP embedding responses for older logs.
+    Tracks all in-flight files simultaneously (required for --workers > 1).
+    With multiple workers, Processing/Chunked/Embedding lines from different
+    files interleave in the log. The old single-state machine would reset on
+    each new Processing line, losing progress for any file whose Chunked line
+    appeared before a later Processing line.
 
-    Keys in the returned dict:
-      files_done        int|None   -- files completed at start of current file
-      files_failed      int|None   -- files failed at start of current file
-      current_file_path str|None   -- full NFS path currently being processed
-      total_chunks      int|None   -- total chunks (None if still parsing)
-      chunks_embedded   int        -- chunks embedded so far for this file
-      initial_pending   int|None   -- from "Starting ingest: N files pending"
+    Returns state for the most interesting in-flight file:
+      - prefers the file currently in 'embedding' phase with the most recent
+        progress timestamp (i.e. the file the GPU is actively working on)
+      - falls back to the last 'parsing' file, then the last 'done' file
+
+    Keys in the returned dict (same interface as before):
+      files_done        int|None
+      files_failed      int|None
+      current_file_path str|None
+      total_chunks      int|None
+      chunks_embedded   int
+      initial_pending   int|None
       phase             str        -- idle | parsing | embedding | done
       file_type         str|None
       strategy          str|None
+      embed_start_ts    float|None
+      last_progress_ts  float|None
     """
-    state: dict = {
-        'files_done': None,
-        'files_failed': None,
-        'current_file_path': None,
-        'total_chunks': None,
-        'chunks_embedded': 0,
-        '_last_embed_prog': None,  # (done, total) from most-recent explicit progress line
-        'initial_pending': None,
-        'phase': 'idle',
-        'file_type': None,
-        'strategy': None,
-        'embed_start_ts': None,    # Unix ts from the Chunked line (embedding begins)
-        'last_progress_ts': None,  # Unix ts from the most-recent Embedding progress line
-    }
-
-    in_file = False   # seen at least one Processing line
-    chunked = False   # seen Chunked line for current file
-    ingested = False  # seen Ingested line for current file
+    # Per-file state keyed by full NFS path
+    files: dict[str, dict] = {}
+    # basename → full path (for associating Chunked/Embedded/Ingested with Processing)
+    name_to_path: dict[str, str] = {}
+    initial_pending: int | None = None
 
     with open(log_path, 'r', errors='replace') as fh:
         for line in fh:
+
             m = _RE_START.search(line)
             if m:
-                state['initial_pending'] = int(m.group(1))
+                initial_pending = int(m.group(1))
                 continue
 
             m = _RE_PROCESSING.search(line)
             if m:
-                state['files_done']        = int(m.group(1))
-                state['files_failed']      = int(m.group(2))
-                state['current_file_path'] = m.group(3).strip()
-                state['total_chunks']      = None
-                state['chunks_embedded']   = 0
-                state['_last_embed_prog']  = None
-                state['phase']             = 'parsing'
-                state['file_type']         = None
-                state['strategy']          = None
-                state['embed_start_ts']    = None
-                state['last_progress_ts']  = None
-                in_file  = True
-                chunked  = False
-                ingested = False
+                full_path = m.group(3).strip()
+                fname = Path(full_path).name
+                name_to_path[fname] = full_path
+                files[full_path] = {
+                    'files_done':        int(m.group(1)),
+                    'files_failed':      int(m.group(2)),
+                    'current_file_path': full_path,
+                    'total_chunks':      None,
+                    'chunks_embedded':   0,
+                    '_last_embed_prog':  None,
+                    'phase':             'parsing',
+                    'file_type':         None,
+                    'strategy':          None,
+                    'embed_start_ts':    None,
+                    'last_progress_ts':  None,
+                }
                 continue
 
-            if not in_file:
+            m = _RE_CHUNKED.search(line)
+            if m:
+                full_path = name_to_path.get(m.group(1))
+                if full_path and full_path in files:
+                    files[full_path].update({
+                        'total_chunks':   int(m.group(2)),
+                        'strategy':       m.group(3),
+                        'file_type':      m.group(4),
+                        'phase':          'embedding',
+                        'embed_start_ts': _parse_ts(line),
+                    })
                 continue
 
-            if not chunked:
-                m = _RE_CHUNKED.search(line)
-                if m:
-                    state['total_chunks']   = int(m.group(1))
-                    state['strategy']       = m.group(2)
-                    state['file_type']      = m.group(3)
-                    state['phase']          = 'embedding'
-                    state['embed_start_ts'] = _parse_ts(line)
-                    chunked = True
+            m = _RE_INGESTED.search(line)
+            if m:
+                full_path = name_to_path.get(m.group(1))
+                if full_path and full_path in files:
+                    fs = files[full_path]
+                    fs['chunks_embedded'] = fs['total_chunks'] or int(m.group(2))
+                    fs['phase'] = 'done'
                 continue
 
-            if not ingested:
-                m = _RE_INGESTED.search(line)
-                if m:
-                    state['chunks_embedded'] = state['total_chunks'] or int(m.group(1))
-                    state['phase']           = 'done'
-                    ingested = True
-                    continue
+            m = _RE_EMBED_PROG.search(line)
+            if m:
+                full_path = name_to_path.get(m.group(3).strip())
+                if full_path and full_path in files:
+                    files[full_path]['_last_embed_prog'] = (int(m.group(1)), int(m.group(2)))
+                    files[full_path]['last_progress_ts'] = _parse_ts(line)
+                continue
 
-                # Explicit progress line from ingest.py (new format)
-                m = _RE_EMBED_PROG.search(line)
-                if m:
-                    state['_last_embed_prog']  = (int(m.group(1)), int(m.group(2)))
-                    state['last_progress_ts']  = _parse_ts(line)
-                    continue
+    # Resolve _last_embed_prog for every tracked file
+    for fs in files.values():
+        lp = fs.pop('_last_embed_prog')
+        if lp is not None and fs['phase'] == 'embedding':
+            fs['chunks_embedded'] = lp[0]
 
-                # Fallback: count successful HTTP embedding responses
-                if _RE_EMBED_HTTP.search(line):
-                    state['chunks_embedded'] += 1
+    # Pick the most interesting file to display:
+    #   1. embedding phase — most recently active (highest last_progress_ts)
+    #   2. parsing phase   — most recently started (last in dict order)
+    #   3. done phase      — most recently completed (last in dict order)
+    #   4. nothing seen    — return idle sentinel
+    if not files:
+        return {
+            'files_done': None, 'files_failed': None, 'current_file_path': None,
+            'total_chunks': None, 'chunks_embedded': 0, 'initial_pending': initial_pending,
+            'phase': 'idle', 'file_type': None, 'strategy': None,
+            'embed_start_ts': None, 'last_progress_ts': None,
+        }
 
-    # Explicit progress lines are more reliable than HTTP counting
-    lp = state.pop('_last_embed_prog')
-    if lp is not None and state['phase'] == 'embedding':
-        state['chunks_embedded'] = lp[0]
+    embedding = [fs for fs in files.values() if fs['phase'] == 'embedding']
+    if embedding:
+        best = max(embedding, key=lambda fs: fs.get('last_progress_ts') or 0.0)
+    else:
+        # Prefer parsing over done; within each phase take last-seen (dict insertion order)
+        parsing = [fs for fs in files.values() if fs['phase'] == 'parsing']
+        best = parsing[-1] if parsing else list(files.values())[-1]
 
-    return state
+    best['initial_pending'] = initial_pending
+    return best
 
 
 # ---------------------------------------------------------------------------

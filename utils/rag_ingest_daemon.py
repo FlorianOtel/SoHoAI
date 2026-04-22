@@ -5,14 +5,25 @@ Process pending files from the RAG ingestion queue.
 Runs the 7-step atomic ingestion loop (parse → chunk → embed → upsert) until
 the queue is empty. Files are fetched from SQLite in batches of 10 (hardcoded).
 
---batch controls the Ollama embedding concurrency (queue depth), NOT the number
-of files fetched. Lower values reduce httpx.ReadTimeout errors when Ollama is
-under load; higher values improve throughput when Ollama has headroom.
+Both --workers and --batch are required. They are separate knobs for different
+bottlenecks — the right values depend on where the embedding server lives:
 
-Usage (run from project root):
-    python utils/rag_ingest_daemon.py            # default concurrency=5
-    python utils/rag_ingest_daemon.py --batch 2  # conservative; fewer timeouts
-    python utils/rag_ingest_daemon.py --batch 8  # aggressive; more throughput
+  --workers  Number of files processed concurrently. Each worker runs docling
+             parsing in its own OS thread (thread-local DocumentConverter), so
+             workers overlap CPU parse time with GPU/CPU embed time from other
+             files. Set higher when the embedding server is a remote GPU (parse
+             is the bottleneck); set to 1 when embedding is CPU-local (parse and
+             embed compete for the same cores).
+
+  --batch    Max concurrent Ollama embedding requests per file. Controls how
+             many chunks are in-flight to Ollama at once. Set higher for a
+             remote GPU (RTX 5070 can saturate many requests); set lower for
+             CPU-local Ollama (it serialises inference anyway, high values just
+             queue up).
+
+Recommended operating points:
+  GPU embed (Server 2, RTX 5070):  --workers 4 --batch 20
+  CPU embed (Server 1, local):     --workers 1 --batch 5
 """
 
 from __future__ import annotations
@@ -38,38 +49,46 @@ logger = logging.getLogger(__name__)
 _FETCH_BATCH_SIZE = 10  # files fetched from SQLite per loop iteration (hardcoded)
 
 
-async def run(state_db: StateDB, qdrant_client, rag_cfg: dict, embed_concurrency: int) -> None:
-    """Main worker loop."""
+async def run(
+    state_db: StateDB,
+    qdrant_client,
+    rag_cfg: dict,
+    embed_concurrency: int,
+    file_workers: int,
+) -> None:
+    """Main worker loop — processes files in parallel up to file_workers at a time."""
     recovered = state_db.crash_recovery()
     if recovered:
         logger.info("Crash recovery: reset %d stuck file(s) to pending", len(recovered))
 
-    processed = failed = skipped = 0
+    processed = failed = 0
+    sem = asyncio.Semaphore(file_workers)
 
-    while True:
-        rows = state_db.fetch_pending_full(limit=_FETCH_BATCH_SIZE)
-        if not rows:
-            break
-
-        for row in rows:
-            file_path = row["file_path"]
-            owner = row["owner"]
+    async def ingest_one(row: dict) -> None:
+        nonlocal processed, failed
+        file_path = row["file_path"]
+        async with sem:
             logger.info("Processing [%d done / %d failed]: %s", processed, failed, file_path)
             try:
                 await ingest_file(
                     file_path=file_path,
-                    owner=owner,
+                    owner=row["owner"],
                     rag_cfg=rag_cfg,
                     state_db=state_db,
                     qdrant_client=qdrant_client,
                     embed_concurrency=embed_concurrency,
                 )
                 processed += 1
-            except Exception as exc:
-                logger.error("Failed: %s — %s", file_path, exc)
-                failed += 1
+            except Exception:
+                failed += 1  # ingest_file already logged + marked failed
 
-        # After processing a batch, re-fetch; loop exits when queue is empty
+    while True:
+        rows = state_db.fetch_pending_full(limit=_FETCH_BATCH_SIZE)
+        if not rows:
+            break
+
+        await asyncio.gather(*[ingest_one(row) for row in rows])
+
         counts = state_db.get_counts()
         logger.info(
             "Batch done — pending: %d  completed: %d  failed: %d",
@@ -80,12 +99,35 @@ async def run(state_db: StateDB, qdrant_client, rag_cfg: dict, embed_concurrency
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Process pending RAG ingestion files")
+    parser = argparse.ArgumentParser(
+        description="Process pending RAG ingestion files",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Both flags are required — their correct values depend on the embedding server:\n"
+            "  GPU embed (Server 2):  --workers 4 --batch 20\n"
+            "  CPU embed (Server 1):  --workers 1 --batch 5"
+        ),
+    )
     parser.add_argument(
-        "--batch", type=int, default=5,
-        help="Ollama embedding concurrency — max parallel requests per file (default: 5). "
-             "Lower to reduce httpx.ReadTimeout errors under load. "
-             "Files fetched from SQLite per iteration is hardcoded to 10.",
+        "--workers",
+        type=int,
+        required=True,
+        metavar="N",
+        help=(
+            "Number of files to parse+embed concurrently. "
+            "Higher values overlap docling CPU parse with remote GPU embed. "
+            "Use 1 when embedding is CPU-local to avoid core contention."
+        ),
+    )
+    parser.add_argument(
+        "--batch",
+        type=int,
+        required=True,
+        metavar="M",
+        help=(
+            "Max concurrent Ollama embedding requests per file (chunk-level parallelism). "
+            "Higher values suit a remote GPU; keep low (3–5) for CPU-local Ollama."
+        ),
     )
     args = parser.parse_args()
 
@@ -105,10 +147,21 @@ def main() -> None:
         state_db.close()
         return
 
-    print(f"Starting ingest: {counts_before['pending']} files pending")
+    print(
+        f"Starting ingest: {counts_before['pending']} files pending  "
+        f"workers={args.workers}  batch={args.batch}"
+    )
 
     try:
-        asyncio.run(run(state_db, qdrant_client, rag_cfg, embed_concurrency=args.batch))
+        asyncio.run(
+            run(
+                state_db,
+                qdrant_client,
+                rag_cfg,
+                embed_concurrency=args.batch,
+                file_workers=args.workers,
+            )
+        )
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
 

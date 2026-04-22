@@ -1,7 +1,7 @@
 ---
 title: "HomeAI-Lab — Project Context & Design Reference"
 date: 2026-04-07
-last_updated: 2026-04-16
+last_updated: 2026-04-22
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
 last_updated_by: Claude Code (Claude Sonnet 4.6)
 context: >

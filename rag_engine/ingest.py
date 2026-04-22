@@ -26,6 +26,7 @@ import logging
 import shutil
 import subprocess
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 
@@ -87,8 +88,15 @@ _DOCLING_TYPES = {"pdf", "docx", "pptx"}   # ipynb handled by _parse_ipynb()
 # tiktoken cl100k_base — consistent encoding across ingest and search
 _enc = tiktoken.get_encoding("cl100k_base")
 
-# DocumentConverter — instantiated once at module load; designed for reuse
-_converter = DocumentConverter()
+# Thread-local DocumentConverter — one instance per OS thread so concurrent
+# asyncio.to_thread() calls don't share docling's internal conversion state.
+_thread_local = threading.local()
+
+
+def _get_converter() -> DocumentConverter:
+    if not hasattr(_thread_local, "converter"):
+        _thread_local.converter = DocumentConverter()
+    return _thread_local.converter
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +225,7 @@ def _parse_to_text(file_path: str, file_type: str) -> str:
         return path.read_text(encoding="utf-8", errors="replace")
 
     try:
-        result = _converter.convert(source=str(path))
+        result = _get_converter().convert(source=str(path))
         return result.document.export_to_markdown()
     except Exception as exc:
         if file_type == "pptx":
