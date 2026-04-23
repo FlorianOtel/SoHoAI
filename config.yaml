@@ -49,21 +49,21 @@ model_list:
     model_info:
       id: "specialist-llama-server"
       description: "Gemma 4 E4B Q8_0 — summarization, offline fallback, background"
-      # Advertised context window: per-slot capacity with `-c 262144 --parallel 2`.
-      # 262144 / 2 = 131072. This is what external clients (Cline) read via
+      # Advertised context window: per-slot capacity with `-c 220048 --parallel 2`.
+      # 220048 / 2 = 110024. This is what external clients (Cline) read via
       # /proxy/v1/model/info for their contextWindow setting.
-      max_tokens: 131072
-      max_input_tokens: 131072
-      context_window: 131072
+      max_tokens: 110024
+      max_input_tokens: 110024
+      context_window: 110024
 
 # -- Routing Policy ------------------------------------------------------------
 routing:
   default_model: "external"
   fallback_chain: ["external", "specialist"]
   # Route to cloud when context exceeds threshold.
-  # Hard limit: -c 131072 (~128K tokens). At 120K we route to cloud,
-  # leaving ~11K headroom for output (default max_tokens=1024 + safety margin).
-  complexity_threshold_tokens: 120000
+  # Hard limit: -c 220048 / 2 = 110024 tokens per slot. At 100K we route to cloud,
+  # leaving ~10K headroom for output (default max_tokens=1024 + safety margin).
+  complexity_threshold_tokens: 100000
   cloud_model: "external"
   summarization_model: "specialist"
 
@@ -110,25 +110,35 @@ rag:
       - .yaml
       - .yml
       - .ipynb
-    # Directory names that os.walk will not descend into.
+    # Directory names/paths that os.walk will not descend into.
+    # All entries MUST have a trailing slash. Single-component entries (e.g. "Library/")
+    # match any directory with that exact name at any depth. Multi-component entries
+    # (e.g. "Microsoft--flotel/Documents/") match only that exact path-segment sequence.
+    # Matching uses endswith("/" + pattern) so "Library/" won't match "PublicLibrary/".
     exclude_dir_names:
-      - .Gin-AI-python-3.12   # Python virtualenv
-      - __pycache__
-      - .git
-      - node_modules
-      - .claude
-      - .vscode
-      - .venv
-      - Library  # macOS stuff
-      - Applications # macOS stuff
-      - LLMs-cache   # HuggingFace model cache — READMEs/licenses, not RAG content
-      - Downloads # garbage
+      - ".Gin-AI-python-3.12/"  # Python virtualenv
+      - "__pycache__/"
+      - ".git/"
+      - "node_modules/"
+      - ".claude/"
+      - ".vscode/"
+      - ".venv/"
+      - "Library/"              # macOS stuff
+      - "Applications/"         # macOS stuff
+      - "LLMs-cache/"           # HuggingFace model cache — READMEs/licenses, not RAG content
+      - "Downloads/"            # garbage
+      - "Microsoft--flotel/Documents/"  # IRM/DRM-encrypted old PPTs — unrecoverable
     # Directory name suffixes to skip (matched with str.endswith).
     exclude_dir_suffixes:
       - .dist-info             # pip package metadata
     # Substrings — any filename containing one of these is skipped.
     exclude_file_patterns:
       - "@synoeastream"        # Synology NAS streaming metadata
+      - "._"                   # macOS AppleDouble resource fork sidecars (e.g. ._foo.pptx) —
+                               # created automatically by macOS on non-HFS+ filesystems (NFS/Synology);
+                               # same extension as the real file but binary metadata, not parseable
+      - "~$"                   # Microsoft Office lock/temp files (e.g. ~$foo.pptx) —
+                               # created while a document is open; tiny binary lock stubs, not real docs
 
 # -- Multi-user NFS roots (maps Google email → owner + NFS paths) -------------
 users:
@@ -154,7 +164,7 @@ llama_server:
   # Must match --slot-save-path passed to llama-server on Server 2
   slot_save_path: "/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v-caches/"
   # Number of parallel slots (must match --parallel N on llama-server).
-  # Gemma 4 + f16 KV + 131072 ctx: ~2,088 MiB per slot (4 global KV layers + 20 SWA layers at 512-window).
+  # Gemma 4 + f16 KV + 110024 ctx: ~1,760 MiB per slot (4 global KV layers + 20 SWA layers at 512-window).
   # New llama.cpp SWA-aware implementation: f16 uses same VRAM as old q8_0 but with better precision.
   num_slots: 2
   timeout_seconds: 120
@@ -165,7 +175,7 @@ chat:
   export_format: "markdown"  # markdown | jsonl
   # Rolling summarization: when total Redis context size exceeds threshold,
   # summarize older turns and keep only the most recent N turns verbatim.
-  # ~400K chars ≈ 100K tokens (4 chars/token). Hard limit is 131072 tokens;
-  # 100K input + 1024 output = ~101K, leaving ~30K safety margin.
+  # ~400K chars ≈ 100K tokens (4 chars/token). Hard limit is 110024 tokens per slot;
+  # 100K input + 1024 output = ~101K, leaving ~9K safety margin.
   summarize_threshold_chars: 400000
   summarize_keep_turns: 20

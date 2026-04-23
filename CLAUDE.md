@@ -64,7 +64,7 @@ Server 1 (192.168.1.93)             │          Server 2 (192.168.1.95)
 ┌──────────────────────────┐  fallback/       ┌──────────────────────────┐
 │ FastAPI orchestrator:8000│──summarize/────→ │ llama-server :8000       │
 │  SmartRouter (LiteLLM)   │  variants →      │  Gemma 4 E4B 7.52B Q8_0  │
-│  ConversationCache       │─── /slots ─────→ │  2×131072 ctx (2 slots)  │
+│  ConversationCache       │─── /slots ─────→ │  2×110024 ctx (2 slots)  │
 │    Redis (short-term)    │                  │  KV slot save/restore    │
 │    KV cache mgr          │                  │  CLIP (Phase 4)          │
 │    rolling summarization │                  └──────────────────────────┘
@@ -184,7 +184,7 @@ HomeAI-Lab/
 │   ├── collection.py           # Collection name, vector size, get_client(), ensure_collection()
 │   ├── embeddings.py           # embed_text(), embed_batch(progress_cb) via Ollama on Server 1
 │   ├── state.py                # StateDB — ingestion queue CRUD + crash recovery
-│   ├── scanner.py              # NFS filesystem scanner → populates StateDB; filters read from config.yaml rag.scanner; followlinks=True with visited_real_dirs + visited_real_files global dedup sets to prevent re-ingesting symlink aliases
+│   ├── scanner.py              # NFS filesystem scanner → populates StateDB; filters read from config.yaml rag.scanner; followlinks=True with visited_real_dirs + visited_real_files global dedup sets to prevent re-ingesting symlink aliases; exclude_dir_names uses trailing-slash path-suffix matching (supports multi-component paths like "Microsoft--flotel/Documents/")
 │   ├── ingest.py               # docling parse + parent-child chunking + Qdrant upsert
 │   ├── search.py               # query → embed → Qdrant query_points → parent_text + provenance
 │   ├── multi_query.py          # §8.3: expand_query() + parallel search + MMR reranking (permanently disabled — no-go 2026-04-22)
@@ -250,7 +250,7 @@ OpenAI-compatible response format is a Phase 3 requirement for Open WebUI integr
 - FastAPI orchestrator on Server 1
 - LiteLLM routing with fallback chain: external (Sonnet 4.6, cloud) → specialist (Gemma 4, local) on external failure (reversed 2026-04-22)
 - Anthropic prompt caching on the external path (`SmartRouter._apply_cache_control()`) ✅ — ephemeral breakpoints on system + `messages[-2]` rolling prefix
-- llama-server on Server 2 GPU: Gemma 4 E4B 7.52B Q8_0, 2 slots × 131072 ctx (`-c 262144 --parallel 2`) — fallback + summarization role ✅
+- llama-server on Server 2 GPU: Gemma 4 E4B 7.52B Q8_0, 2 slots × 110024 ctx (`-c 220048 --parallel 2`) — fallback + summarization role ✅
 - Per-conversation KV cache persisted to NAS via llama-server slot API ✅ (used on specialist path only)
 - Rolling summarization at ~100K token threshold (via specialist/llama-server) ✅ — summary + boundary `message_id` persisted to SQLite `chats` row
 - Redis conversation cache with NAS AOF persistence
@@ -352,9 +352,9 @@ would add 6–10s to every RAG chat query. bge-m3 is the practical optimum:
 top MTEB quality, 8192-token context, 650ms/chunk on CPU, fits alongside all workloads.
 
 Server 2 RTX 5070: model is Gemma 4 E4B Q8_0 (7.52B params, 7.5 GB file → ~4,788 MiB VRAM).
-KV cache: new llama.cpp SWA-aware implementation uses 4 global KV layers (131072-ctx, f16: 2,048 MiB) +
-20 SWA layers (512-window, f16: 40 MiB) = 2,088 MiB per slot. 2 slots × 2,088 = 4,176 MiB KV.
-Total VRAM: 9,977 MiB used / 12,227 MiB (1,799 MiB headroom) — measured 2026-04-20.
+KV cache: new llama.cpp SWA-aware implementation uses 4 global KV layers (110024-ctx, f16: ~1,719 MiB) +
+20 SWA layers (512-window, f16: 40 MiB) ≈ 1,760 MiB per slot. 2 slots × 1,760 ≈ 3,520 MiB KV.
+Total VRAM: ~9,321 MiB / 12,227 MiB (~2,906 MiB headroom) — estimated from measured 131072-ctx baseline.
 No reliable embedding model fits alongside llama-server without VRAM risk under load.
 
 **Vector DB — Qdrant confirmed**
@@ -456,11 +456,14 @@ Other user directories (`/mnt/nfs/{Eva,Annika,Laura}`) and `/mnt/nfs/La-Familia`
 | Videos | ~384 | `.mp4`/`.avi` (Phase 4) |
 | MSG | 2 | Email — negligible |
 
-**Exclude at ingestion time (path filter):**
-- `*/Gin-AI/.Gin-AI-python-3.12/**` — virtualenv (~46K `.py`, 37K `.pyc`, 15K `.h`/`.hpp`)
-- `**/*.pyc`, `**/*.so`, `**/*.mo` — compiled artifacts
-- `**/*@synoeastream` — Synology NAS streaming metadata
-- `**/*.dist-info/**` — package metadata
+**Exclude at ingestion time (config.yaml `rag.scanner`):**
+- `.Gin-AI-python-3.12/` — virtualenv (~46K `.py`, 37K `.pyc`, 15K `.h`/`.hpp`)
+- `*.pyc`, `*.so`, `*.mo` — compiled artifacts (via extension whitelist — not in RAG extensions)
+- `@synoeastream` — Synology NAS streaming metadata (exclude_file_patterns)
+- `.dist-info` — pip package metadata (exclude_dir_suffixes)
+- `._` prefix — macOS AppleDouble resource fork sidecars (exclude_file_patterns; binary metadata, not parseable)
+- `~$` prefix — Microsoft Office lock/temp files (exclude_file_patterns; binary stubs)
+- `Microsoft--flotel/Documents/` — IRM/DRM-encrypted old PPTs, unrecoverable (exclude_dir_names)
 
 **Qdrant size estimate:**
 - `documents` collection: ~30K–50K chunks × 1024-dim float32 ≈ ~200MB on NAS
@@ -537,13 +540,13 @@ source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
 
 # Server 2 — llama-server (GPU inference + KV cache)
 # Gemma 4 E4B 7.52B Q8_0 — hybrid SWA+global attention (42 layers, 2 KV heads)
-# New llama.cpp SWA-aware KV: 4 global KV layers (131072-ctx) + 20 SWA layers (512-window)
-# VRAM: ~4.8 GB model weights + 2×2,088 MiB KV (f16, 2 slots × 131072 ctx) + ~1 GB overhead = ~9.97 GB / 12 GB (measured)
+# New llama.cpp SWA-aware KV: 4 global KV layers (110024-ctx) + 20 SWA layers (512-window)
+# VRAM: ~4.8 GB model weights + 2×1,760 MiB KV (f16, 2 slots × 110024 ctx) + ~1 GB overhead = ~9.3 GB / 12 GB (estimated)
 # --cache-ram 0: KV pre-allocated in VRAM (no RAM offload); --parallel 2 matches config.yaml num_slots: 2
 # NOTE: existing .bin KV slot files are incompatible when switching quantizations — erase k-v-caches/*.bin first
 llama-server \
   -m ~/Gin-AI/LLMs-cache/llama-server/google_gemma-4-E4B-it-Q8_0.gguf \
-  -c 262144 -ngl 99 \
+  -c 220048 -ngl 99 \
   --flash-attn on \
   --cache-type-k f16 --cache-type-v f16 \
   --cache-ram 0 \
@@ -621,7 +624,7 @@ Results: `~/Gin-AI/tools/llama-performance-test/results_q6k.json` (Q6_K baseline
 Benchmark methodology: 3 runs averaged per scenario, `/completion` native endpoint, `cache_prompt: false`
 (cold prefill every run), `ignore_eos: true`, `n_predict: 200`, `temperature: 0` (greedy).
 
-#### Q6_K → Q8_0 comparison (measured 2026-04-20, RTX 5070 12 GB, 2 slots × 131072 ctx)
+#### Q6_K → Q8_0 comparison (measured 2026-04-20, RTX 5070 12 GB, 2 slots × 131072 ctx at time of measurement)
 
 | Scenario | Q6_K tok/s | Q8_0 tok/s | Δ |
 |---|---|---|---|
@@ -646,13 +649,13 @@ Benchmark methodology: 3 runs averaged per scenario, `/completion` native endpoi
 ### Important design decisions
 - **Sonnet 4.6 as interactive primary (flipped 2026-04-22)** — Claude Sonnet 4.6 (`anthropic/claude-sonnet-4-5`) is the default for interactive chat; Gemma 4 is reserved for fallback + summarization + offline use. Driver: at ~50–100 turns/day for a 4-user family, Sonnet with prompt caching costs ~$30–60/mo — tolerable — while delivering substantially better reasoning and tool-use fidelity than a 4B local model. Gemma's role shifted from "default inferencer" to "specialized worker" without removing the infrastructure.
 - **Anthropic prompt caching on the external path** — `SmartRouter._apply_cache_control()` injects ephemeral `cache_control` on the system message (long-lived anchor) and on `messages[-2]` (rolling prefix anchor). Verified end-to-end: turn-2 onwards hits with `cache_read_input_tokens ≈ 98% of prompt_tokens` on multi-turn chats. ~10× input-cost reduction on steady-state turns. Specialist path is skipped — llama-server's OpenAI-compat endpoint does not cache.
-- **Prompt caching vs. summarization trade-off (documented)** — each `maybe_summarize()` event rewrites Redis (summary replaces old turns), which invalidates Anthropic's rolling prefix cache on the next turn. At 100K-token threshold this fires roughly once per ~50-turn chat; the one-time cost spike (~$0.05 on the summary turn) is dominated by the ongoing savings from a smaller cached prefix on all subsequent turns. The threshold is deliberately NOT raised to preserve Gemma fallback's context-fit headroom (Gemma per-slot is ~110K tokens).
+- **Prompt caching vs. summarization trade-off (documented)** — each `maybe_summarize()` event rewrites Redis (summary replaces old turns), which invalidates Anthropic's rolling prefix cache on the next turn. At 100K-token threshold this fires roughly once per ~50-turn chat; the one-time cost spike (~$0.05 on the summary turn) is dominated by the ongoing savings from a smaller cached prefix on all subsequent turns. The summarization threshold (100K) is deliberately aligned with the cloud-routing threshold (`complexity_threshold_tokens: 100000`) so both triggers fire at the same point; Gemma per-slot hard limit is 110,024 tokens.
 - **Summary persistence to SQLite** — summaries are persisted to `chats.summary_text` + `chats.summary_covers_through_message_id`. On cold resume (Redis TTL expiry), `warm_from_store` reconstructs Redis as `[system?, summary_msg, messages WHERE id > boundary]` — no data duplication, full conversation raw log always retained in `messages` table. Closes a pre-existing gap where summaries were lost across 24h TTL.
-- **llama-server over vLLM** — native KV slot save/restore API (`/slots/{id}?action=save|restore`); 2 slots × 131072 ctx at 9,977 MiB VRAM with f16 KV, flash-attn, SWA-aware KV allocation (Gemma 4 E4B 7.52B Q8_0)
+- **llama-server over vLLM** — native KV slot save/restore API (`/slots/{id}?action=save|restore`); 2 slots × 110024 ctx at ~9,321 MiB VRAM with f16 KV, flash-attn, SWA-aware KV allocation (Gemma 4 E4B 7.52B Q8_0)
 - **KV cache in `ConversationCache`** — `conversation.py` is the single owner of all conversation state (Redis + KV). `resume()`/`park()` keep save/restore co-located with Redis ops
 - **Specialist bypasses LiteLLM** — native `/completion` required to pass `slot_id`. External path goes through LiteLLM; specialist path calls llama-server directly. Branch at [main.py:333-347](main.py#L333-L347).
-- **Cline-facing proxy endpoints (2026-04-22, Option 2)** — external clients (Cline VSCode plugin, any OpenAI-compatible tool) hit HomeAI-Lab directly at `http://192.168.1.93:8000/proxy/v1/{model/info,models,chat/completions}`. Stateless OpenAI-compatible pass-through to `SmartRouter.complete()` — bypasses Redis, SQLite, KV cache, RAG, summarization; Cline manages its own history. Model-name mapping in `_CLINE_EXPOSED_MODELS` in [main.py](main.py): `gemma-4-e4b` → `specialist`, `claude-sonnet-4-6` → `external`. `model_info.max_input_tokens` is populated from `config.yaml` (131072 for Gemma per-slot, 200000 for Sonnet) so Cline's LiteLLM provider reads the correct context window. Prompt caching still applies to the external path (same `SmartRouter` instance). Supersedes the old Server-2 LiteLLM wrapper at `:8001`. Trade-off: Cline now coupled to orchestrator uptime — accepted.
-- **Shared llama-server (2026-04-22)** — the same Server 2 llama-server still backs both HomeAI-Lab's internal `specialist` path and Cline's `gemma-4-e4b` proxy path. Per-slot context 131,072. Known race: a Cline request landing on a slot between HomeAI-Lab's restore→inference→save sequence corrupts that chat's KV state. Post-flip, HomeAI-Lab's Gemma hits are rare (summarization + fallback only), so collision probability is low and the corruption self-heals on the next turn. No coordination code — accepted risk.
+- **Cline-facing proxy endpoints (2026-04-22, Option 2)** — external clients (Cline VSCode plugin, any OpenAI-compatible tool) hit HomeAI-Lab directly at `http://192.168.1.93:8000/proxy/v1/{model/info,models,chat/completions}`. Stateless OpenAI-compatible pass-through to `SmartRouter.complete()` — bypasses Redis, SQLite, KV cache, RAG, summarization; Cline manages its own history. Model-name mapping in `_CLINE_EXPOSED_MODELS` in [main.py](main.py): `gemma-4-e4b` → `specialist`, `claude-sonnet-4-6` → `external`. `model_info.max_input_tokens` is populated from `config.yaml` (110024 for Gemma per-slot, 200000 for Sonnet) so Cline's LiteLLM provider reads the correct context window. Prompt caching still applies to the external path (same `SmartRouter` instance). Supersedes the old Server-2 LiteLLM wrapper at `:8001`. Trade-off: Cline now coupled to orchestrator uptime — accepted.
+- **Shared llama-server (2026-04-22)** — the same Server 2 llama-server still backs both HomeAI-Lab's internal `specialist` path and Cline's `gemma-4-e4b` proxy path. Per-slot context 110,024. Known race: a Cline request landing on a slot between HomeAI-Lab's restore→inference→save sequence corrupts that chat's KV state. Post-flip, HomeAI-Lab's Gemma hits are rare (summarization + fallback only), so collision probability is low and the corruption self-heals on the next turn. No coordination code — accepted risk.
 - **Rolling summarization uses specialist (llama-server)** — `maybe_summarize()` erases the KV slot before calling; both summarization and subsequent inference start cold sequentially on the same slot; triggered at ~100K tokens, keeps last 20 turns verbatim. Model pinned via `routing.summarization_model` in `config.yaml` (default `specialist`).
 - **LiteLLM stays as the routing + fallback layer** — handles OpenAI/Anthropic API differences and executes the fallback chain `external → specialist` (reversed direction of pre-flip implementation)
 - **Tool-use — XML sentinel path only (native Anthropic tool-use deferred)** — both external and specialist paths emit and parse the custom `<tool_call>...</tool_call>` sentinel. Sonnet handles it reliably in practice. Native Anthropic `tools=[...]` + `tool_use` content blocks remains a deferred follow-up; unifying the two paths isn't blocking current quality.

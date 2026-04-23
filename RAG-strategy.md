@@ -60,7 +60,7 @@ Other user directories not yet surveyed — ingestion will scan all configured r
     `certifications--training` directory (may overlap with employer backups)
   - Other users (Eva, Annika, Laura): not yet surveyed — to be scanned at ingestion time
 
-### 1.2 Exclusion filters
+### 1.2 Exclusion filters (updated 2026-04-23)
 
 Exclusion filters are configured in `config.yaml` under `rag.scanner` (required — no
 hardcoded fallback). `rag_engine/scanner.py` validates all four keys at startup and
@@ -80,27 +80,52 @@ rag:
       - .yml
       - .ipynb
 
-    exclude_dir_names:       # directory names os.walk will not descend into
-      - .Gin-AI-python-3.12  # Python virtualenv
-      - __pycache__
-      - .git
-      - node_modules
-      - .claude
-      - .vscode
-      - .venv
-      - Library              # macOS Application Support / Preferences
-      - Applications         # macOS app bundles
-      - LLMs-cache           # HuggingFace model cache (READMEs/licenses, not RAG content)
+    # All entries MUST have a trailing slash.
+    # Single-component entries (e.g. "Library/") match any directory with that exact
+    # name at any depth. Multi-component entries (e.g. "Microsoft--flotel/Documents/")
+    # match only that exact path-segment sequence.
+    # Matching uses endswith("/" + pattern) so "Library/" won't match "PublicLibrary/".
+    exclude_dir_names:
+      - ".Gin-AI-python-3.12/"  # Python virtualenv
+      - "__pycache__/"
+      - ".git/"
+      - "node_modules/"
+      - ".claude/"
+      - ".vscode/"
+      - ".venv/"
+      - "Library/"              # macOS Application Support / Preferences
+      - "Applications/"         # macOS app bundles
+      - "LLMs-cache/"           # HuggingFace model cache (READMEs/licenses, not RAG content)
+      - "Downloads/"            # garbage
+      - "Microsoft--flotel/Documents/"  # IRM/DRM-encrypted old PPTs — unrecoverable
 
-    exclude_dir_suffixes:    # directory name suffixes (matched with str.endswith)
+    exclude_dir_suffixes:    # directory name suffixes (matched with str.endswith on bare name)
       - .dist-info           # pip package metadata
 
     exclude_file_patterns:   # filename substrings — any match → file skipped
       - "@synoeastream"      # Synology NAS streaming metadata
+      - "._"                 # macOS AppleDouble resource fork sidecars (e.g. ._foo.pptx) —
+                             # auto-created by macOS on non-HFS+ (NFS/Synology); binary metadata,
+                             # same extension as the real file but not a ZIP — fails all parsers
+      - "~$"                 # Microsoft Office lock/temp files (e.g. ~$foo.pptx) —
+                             # created while a document is open; tiny binary stubs, not real docs
 ```
 
+**`exclude_dir_names` matching logic (updated 2026-04-23):** `_is_excluded_dir()` in
+`scanner.py` now receives both the parent `dirpath` and the child `dirname`. It forms the
+full child path (`os.path.join(dirpath, dirname)`), strips the trailing slash from each
+pattern, and checks `full_child.endswith("/" + pattern)`. The leading `/` in the test
+enforces an exact path-boundary match — `"Library/"` matches `.../Library` but not
+`.../PublicLibrary`. Multi-component patterns like `"Microsoft--flotel/Documents/"` work
+naturally with the same logic.
+
+`exclude_dir_suffixes` continues to match against the bare `dirname` only (not the full
+path) using `dirname.endswith(suffix)` — kept separate because `.dist-info` is a name
+suffix, not a path pattern.
+
 To add or remove an exclusion, edit `config.yaml` and re-run `rag_sync_nfs.py`.
-No code change is required.
+No code change is required. When a directory is newly excluded, `rag_sync_nfs.py`
+purges its files from the queue and Qdrant automatically (via `handle_deleted`).
 
 ### 1.3 Symlink handling (updated 2026-04-21)
 
@@ -514,7 +539,7 @@ A separate vector DB is not needed.
 | Redis | Key-value lookup | TTL risk; Redis already used for conversation state |
 
 Storage overhead: 50K child chunks × ~2KB average parent text ≈ ~100MB extra on NAS —
-negligible at this scale. Gemma 4 E4B's 131,072-token context window handles 800–1200 token
+negligible at this scale. Gemma 4 E4B's 110,024-token per-slot context window handles 800–1200 token
 parents with no pressure.
 
 On retrieval, `chunk["parent_text"]` (not `chunk["text"]`) is injected into the LLM prompt.

@@ -8,6 +8,13 @@ Shared by:
 Exclusion rules are read from config["rag"]["scanner"] in config.yaml.
 All four keys (include_extensions, exclude_dir_names, exclude_dir_suffixes,
 exclude_file_patterns) are required — missing config raises ValueError.
+
+exclude_dir_names convention: every entry must have a trailing slash.
+Single-component entries (e.g. "Library/") match any directory named exactly
+"Library" at any depth. Multi-component entries (e.g. "Microsoft--flotel/Documents/")
+match any directory whose full path ends with that exact path segment sequence.
+Matching is done against the full child path, so "Library/" will NOT match
+"PublicLibrary/" — the leading "/" in the suffix check enforces an exact boundary.
 """
 
 from __future__ import annotations
@@ -26,12 +33,19 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _is_excluded_dir(
+    dirpath: str,
     dirname: str,
-    skip_names: frozenset[str],
+    skip_patterns: tuple[str, ...],
     skip_suffixes: tuple[str, ...],
 ) -> bool:
-    if dirname in skip_names:
-        return True
+    full_child = os.path.join(dirpath, dirname)
+    for pattern in skip_patterns:
+        # Strip trailing slash, prepend "/" to enforce exact path-boundary match.
+        # "Library/" matches ".../Library" but not ".../PublicLibrary".
+        # "Microsoft--flotel/Documents/" matches ".../Microsoft--flotel/Documents".
+        p = pattern.rstrip("/")
+        if full_child.endswith("/" + p):
+            return True
     for suffix in skip_suffixes:
         if dirname.endswith(suffix):
             return True
@@ -95,7 +109,7 @@ def scan_nfs_roots(
         )
 
     include_exts = frozenset(scanner_cfg["include_extensions"])
-    skip_names = frozenset(scanner_cfg["exclude_dir_names"])
+    skip_patterns = tuple(scanner_cfg["exclude_dir_names"])
     skip_suffixes = tuple(scanner_cfg["exclude_dir_suffixes"])
     exclude_patterns = tuple(scanner_cfg["exclude_file_patterns"])
 
@@ -145,7 +159,7 @@ def scan_nfs_roots(
             # Prune excluded subtrees in-place — prevents os.walk from descending
             dirnames[:] = [
                 d for d in dirnames
-                if not _is_excluded_dir(d, skip_names, skip_suffixes)
+                if not _is_excluded_dir(dirpath, d, skip_patterns, skip_suffixes)
             ]
 
             for filename in filenames:
