@@ -5,7 +5,7 @@ HomeAI-Lab — Terminal Chat Client (Phase 1)
 A simple but functional CLI that talks to the orchestrator API.
 Supports:
   - Multi-turn conversation with memory
-  - Model selection (/specialist, /model)
+  - Model selection (/internal, /model)
   - Chat management (/list, /load, /export, /save)
   - RAG toggle (/rag on|off|only|search)
   - Feedback (/thumbsup, /thumbsdown)
@@ -58,7 +58,7 @@ Commands:
   /help                 Show this help
   /new                  Start a new chat
   /model [name]         Show/switch external model (e.g., gpt4, claude; auto=default)
-  /specialist           Switch to specialist LLM (Gemma 4 on GPU)
+  /internal             Switch to internal LLM (Gemma 4 on GPU)
   /cloud                Force next message to use cloud model
   /rag [on|off|only]    Set RAG mode (default: off)
   /rag status           Show RAG config (mode, user, top_k, Qdrant points)
@@ -85,7 +85,7 @@ class CLIChat:
         self.server = server_url.rstrip("/")
         self.client = httpx.Client(timeout=120.0)
         self.chat_id = str(uuid.uuid4())
-        self.model: str | None = None  # External model override; None = specialist (Gemma 4 on GPU)
+        self.model: str | None = None  # Explicit model override; None = use router default (external)
         self.force_cloud = False
         self.rag_mode = "off"  # opt-in — caller enables via /rag on or /rag only
         self.user_id = user_id
@@ -218,23 +218,24 @@ class CLIChat:
         elif command == "/model":
             if not arg:
                 if self.model is None:
-                    mode_info = "SPECIALIST (Gemma 4 on GPU)"
+                    mode_info = "AUTO (router default: external/Sonnet)"
+                elif self.model == "internal":
+                    mode_info = "INTERNAL (Gemma 4 on GPU)"
                 else:
                     mode_info = f"EXTERNAL ({self.model})"
                 return f"  Current LLM mode: {mode_info}"
 
-            if arg.lower() == "specialist":
-                self.model = None
-                return "  Switched to specialist LLM (Gemma 4 on GPU)."
+            if arg.lower() == "internal":
+                self.model = "internal"
+                return "  Switched to internal LLM (Gemma 4 on GPU)."
             else:
                 # Assume any other argument is an external model name
                 self.model = arg if arg != "auto" else None
                 return f"  External model set to: {self.model or 'auto'}."
 
-        elif command == "/specialist":
-            self.llm_mode = "specialist"
-            self.model = None
-            return "  Switched to specialist LLM (Gemma 4 on GPU)."
+        elif command == "/internal":
+            self.model = "internal"
+            return "  Switched to internal LLM (Gemma 4 on GPU)."
 
         elif command == "/cloud":
             self.force_cloud = True

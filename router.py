@@ -5,15 +5,16 @@ Routing strategy (post 2026-04-22 flip):
   1. If user explicitly requests a model → use it
   2. If force_cloud flag → use cloud (kept for API compat; cloud is now default anyway)
   3. If message context is very long → use cloud (better context handling)
-  4. Default → external (Sonnet 4.6, cloud); LiteLLM falls back to specialist
+  4. Default → external (Sonnet 4.6, cloud); LiteLLM falls back to internal
      (local Gemma via llama-server) if the external call fails.
 
 LiteLLM handles the actual fallback retries; this module decides
 the *starting point* and any pre-routing logic.
 
-Anthropic prompt caching is applied on the external path via
-`_apply_cache_control()` — ephemeral cache_control markers on the system
-message and a rolling prefix anchor at messages[-2].
+Anthropic prompt caching is applied when the selected model is served by
+Anthropic (`_uses_anthropic()` checks the litellm_params.model prefix).
+This is provider-agnostic: swapping external to Gemini/OpenAI in config.yaml
+automatically disables the Anthropic-specific cache_control injection.
 """
 
 from __future__ import annotations
@@ -46,10 +47,10 @@ class SmartRouter:
         self.litellm_router = Router(
             model_list=self.config["model_list"],
             routing_strategy="simple-shuffle",
-            # Fallback: if external (cloud) fails, go to specialist (local)
+            # Fallback: if external (cloud) fails, go to internal (local)
             fallbacks=[
                 {
-                    "external": ["specialist"],
+                    "external": ["internal"],
                 }
             ],
             # Retry config
@@ -58,7 +59,7 @@ class SmartRouter:
         )
 
         self.routing_config = self.config.get("routing", {})
-        self.default_model = self.routing_config.get("default_model", "specialist")
+        self.default_model = self.routing_config.get("default_model", "internal")
         self.cloud_model = self.routing_config.get("cloud_model", "external")
         self.complexity_threshold = self.routing_config.get(
             "complexity_threshold_tokens", 2000
@@ -114,10 +115,10 @@ class SmartRouter:
         logger.info(f"Routing to model: {target}")
 
         # Anthropic prompt caching: inject ephemeral cache_control breakpoints
-        # on the external path. Skipped for specialist since llama-server's
-        # OpenAI-compat endpoint does not support prompt caching.
+        # only when the target is served via Anthropic API. Skipped for all
+        # other providers (Gemini, OpenAI, internal llama-server, etc.).
         messages_to_send = (
-            self._apply_cache_control(messages) if target == "external" else messages
+            self._apply_cache_control(messages) if self._uses_anthropic(target) else messages
         )
 
         try:
@@ -141,6 +142,19 @@ class SmartRouter:
         except Exception as e:
             logger.error(f"All models failed: {e}")
             raise
+
+    def _uses_anthropic(self, target: str) -> bool:
+        """Return True if the target model alias is served via Anthropic API.
+
+        Reads litellm_params.model from config.yaml for the given alias.
+        Used to gate Anthropic-specific cache_control injection so that
+        swapping external to Gemini/OpenAI in config.yaml requires no code change.
+        """
+        model_cfg = next(
+            (m for m in self.config["model_list"] if m["model_name"] == target), {}
+        )
+        model_id = model_cfg.get("litellm_params", {}).get("model", "")
+        return model_id.startswith("anthropic/")
 
     @staticmethod
     def _apply_cache_control(messages: list[dict]) -> list[dict]:

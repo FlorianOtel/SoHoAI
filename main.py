@@ -126,7 +126,7 @@ async def lifespan(app: FastAPI):
             "preserving all key facts, decisions, and context needed to continue:\n\n"
             + text
         )
-        summarization_model = config.get("routing", {}).get("summarization_model", "specialist")
+        summarization_model = config.get("routing", {}).get("summarization_model", "internal")
         resp = await app.state.router.complete(
             messages=[{"role": "user", "content": prompt}],
             model=summarization_model,
@@ -148,8 +148,8 @@ async def lifespan(app: FastAPI):
         app.state.qdrant_client = None
 
     # Variant LLM function for multi-query expansion (§8.3).
-    # Uses the specialist via LiteLLM's OpenAI-compat endpoint — no KV slot involved.
-    _variant_model = app.state.rag_cfg.get("multi_query", {}).get("variant_model", "specialist")
+    # Uses the internal model via LiteLLM's OpenAI-compat endpoint — no KV slot involved.
+    _variant_model = app.state.rag_cfg.get("multi_query", {}).get("variant_model", "internal")
 
     async def variant_llm_fn(prompt: str) -> str:
         resp = await app.state.router.complete(
@@ -205,7 +205,7 @@ def _apply_system_prompt(messages: list[dict], system_prompt: str) -> list[dict]
 def _fold_tool_messages(messages: list[dict]) -> list[dict]:
     """Fold role=tool messages into role=user for models without native tool support.
 
-    Both the specialist (Gemma chat template) and the external path (plain text
+    Both the internal (Gemma chat template) and the external path (plain text
     conversation via LiteLLM) use this transformation so tool results are always
     readable by the model.
     """
@@ -317,27 +317,27 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
     rag_sources: list[str] | None = None
     rag_chunks_used: list[dict] = []
     assistant_content = ""
-    model_used = "specialist"
-    used_specialist = False
+    model_used = "internal"
+    used_internal = False
     inference_ok = False
 
     try:
         for iteration in range(max_iter + 1):
             # 5a. Select model and run inference
             target_model = router.select_model(messages, req.model, req.force_cloud)
-            used_specialist = (
-                target_model == "specialist"
+            used_internal = (
+                target_model == "internal"
                 and cache.kv_cache is not None
                 and slot_id is not None
             )
 
             llm_messages = _fold_tool_messages(messages)
 
-            if used_specialist:
+            if used_internal:
                 prompt = apply_gemma_template(llm_messages)
                 result = await cache.kv_cache.inference(slot_id=slot_id, prompt=prompt)
                 raw_text = result["content"].strip()
-                model_used = "specialist"
+                model_used = "internal"
             else:
                 response = await router.complete(
                     messages=llm_messages,
@@ -386,11 +386,11 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
         raise HTTPException(status_code=502, detail=f"LLM error: {str(e)}")
 
     finally:
-        if inference_ok and used_specialist:
+        if inference_ok and used_internal:
             await cache.park(chat_id)      # save KV slot + refresh Redis TTL
-        elif inference_ok and not used_specialist:
+        elif inference_ok and not used_internal:
             await cache.touch(chat_id)     # refresh Redis TTL (no KV slot used)
-        elif used_specialist:
+        elif used_internal:
             # Inference failed — discard undefined slot state
             if cache.kv_cache is not None:
                 await cache.kv_cache.erase(chat_id)
@@ -688,7 +688,7 @@ async def model_health():
 # Both paths reach the same LiteLLM Router, so prompt caching on external
 # applies here too; Gemma routing still lands on the shared llama-server.
 _CLINE_EXPOSED_MODELS: dict[str, str] = {
-    "gemma-4-e4b": "specialist",
+    "gemma-4-e4b": "internal",
     "claude-sonnet-4-6": "external",
 }
 
@@ -725,7 +725,7 @@ def _resolve_cline_model(name: str | None) -> str | None:
     Accepts any of:
       - bare public name:   "gemma-4-e4b", "claude-sonnet-4-6"
       - provider-prefixed:  "openai/gemma-4-e4b", "anthropic/claude-sonnet-4-6"
-      - internal aliases:   "specialist", "external"  (for direct testing)
+      - internal aliases:   "internal", "external"  (for direct testing)
     Returns the internal router alias or None if unknown.
     """
     if not name:

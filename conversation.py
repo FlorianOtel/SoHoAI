@@ -13,7 +13,7 @@ KV cache integration (optional):
 
 Rolling summarization:
 - maybe_summarize(chat_id, summarize_fn, store=None) → if conversation exceeds threshold,
-  summarizes older turns via specialist LLM (Gemma) and rebuilds Redis with condensed
+  summarizes older turns via internal LLM (Gemma) and rebuilds Redis with condensed
   context. If store is provided, persists summary + boundary message_id to SQLite for
   cold-resume recovery. Summarization failure is tolerated (turn proceeds with oversized
   context). Also erases KV cache (prompt changed, cached tokens are stale).

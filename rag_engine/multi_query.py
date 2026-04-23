@@ -11,7 +11,7 @@ Design notes:
     extra embedding round-trip for reranking.
   * Original query embedding is computed once and reused for both variant 0
     (search) and MMR relevance scoring.
-  * Variant generation uses the specialist model by default (fast, free);
+  * Variant generation uses the internal model by default (fast, free);
     config key allows routing to external for higher quality.
 """
 from __future__ import annotations
@@ -51,7 +51,7 @@ async def expand_query(query: str, n_variants: int, llm_fn) -> list[str]:
 
     Args:
         llm_fn: async callable(prompt: str) -> str. Supplied by caller so this
-                module stays agnostic of specialist/external routing.
+                module stays agnostic of internal/external routing.
     Returns:
         [original_query, variant_1, ..., variant_N]. If generation fails or
         returns fewer lines than requested, falls back to what was returned

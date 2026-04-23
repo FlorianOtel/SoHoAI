@@ -98,7 +98,7 @@ def _bar(n: int, total: int, width: int = 5) -> str:
 # LLM fn factories for variant generation
 # ---------------------------------------------------------------------------
 
-def _make_specialist_llm_fn(server2_ip: str, model: str) -> callable:
+def _make_internal_llm_fn(server2_ip: str, model: str) -> callable:
     """Calls Gemma 4 on Server 2 via llama-server /v1/chat/completions."""
     url = f"http://{server2_ip}:8000/v1/chat/completions"
 
@@ -143,10 +143,10 @@ def _make_llm_fn(variant_model: str, config: dict) -> callable:
     if variant_model == "external":
         server1_ip = config.get("server1_ip", "192.168.1.93")
         return _make_external_llm_fn(f"http://{server1_ip}:8000")
-    # default: specialist
+    # default: internal
     server2_ip = config.get("server2_ip", "192.168.1.95")
     model      = config.get("model_list", [{}])[0].get("litellm_params", {}).get("model", "gemma4")
-    return _make_specialist_llm_fn(server2_ip, model)
+    return _make_internal_llm_fn(server2_ip, model)
 
 
 def _capturing_llm_fn(llm_fn: callable) -> tuple[callable, list]:
@@ -304,12 +304,12 @@ def main() -> int:
     p.add_argument("--variants", type=int, default=None,
                    help="Override rag.multi_query.n_variants")
     p.add_argument("--mode",          choices=["single", "multi", "both"], default="both")
-    p.add_argument("--variant-model", choices=["specialist", "external"], default="specialist",
-                   help="LLM used for query expansion (specialist=Gemma4, external=Sonnet)")
+    p.add_argument("--variant-model", choices=["internal", "external"], default="internal",
+                   help="LLM used for query expansion (internal=Gemma4, external=Sonnet)")
     p.add_argument("--show-variants", action="store_true",
                    help="Print the LLM-generated query variants for each query")
     p.add_argument("--compare",       action="store_true",
-                   help="Run multi-query with BOTH specialist AND external; "
+                   help="Run multi-query with BOTH internal AND external; "
                         "shows variants + recall side-by-side. Requires orchestrator.")
     args = p.parse_args()
 
@@ -327,16 +327,16 @@ def main() -> int:
 
     lam_str = f"λ={args.lam:.2f}" if args.lam is not None else f"λ={rag_cfg.get('multi_query',{}).get('lambda',0.5):.2f}"
     var_str = f"n={args.variants}" if args.variants is not None else f"n={rag_cfg.get('multi_query',{}).get('n_variants',3)}"
-    mode_desc = "compare(specialist vs external)" if args.compare else args.mode
+    mode_desc = "compare(internal vs external)" if args.compare else args.mode
 
     print(f"\n  MMR benchmark  user={args.user}  top_k={args.top_k}  {lam_str}  {var_str}")
     print(f"  Qdrant: {qdrant_url}  |  queries: {len(queries)}  |  mode: {mode_desc}")
     if not args.compare:
         print(f"  Variant LLM: {args.variant_model}")
 
-    # ── compare mode: specialist vs external side-by-side ──────────────────
+    # ── compare mode: internal vs external side-by-side ──────────────────
     if args.compare:
-        spec_fn = _make_llm_fn("specialist", config)
+        spec_fn = _make_llm_fn("internal", config)
         ext_fn  = _make_llm_fn("external", config)
 
         async def run_compare():
