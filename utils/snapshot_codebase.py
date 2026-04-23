@@ -25,7 +25,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path("/mnt/nfs/Florian/Gin-AI/projects/HomeAI-Lab")
+PROJECT_ROOT = Path("/mnt/nfs/Florian/Gin-AI/projects/HomeAI")
 DEFAULT_OUTPUT = PROJECT_ROOT / "utils" / "codebase_snapshot.md"
 
 SNAPSHOT_FILES: list[str] = [
@@ -103,7 +103,7 @@ def generate_snapshot(
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
     sections: list[str] = [
-        f"# HomeAI-Lab — Codebase Snapshot\n\nGenerated: {now}\n",
+        f"# HomeAI — Codebase Snapshot\n\nGenerated: {now}\n",
         "---\n",
     ]
 

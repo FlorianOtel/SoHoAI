@@ -1,5 +1,5 @@
 """
-HomeAI-Lab — API Gateway & Orchestrator
+HomeAI — API Gateway & Orchestrator
 
 This is the central nervous system running on Server 1.
 It wires together:
@@ -61,13 +61,13 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
-logger = logging.getLogger("HomeAI-Lab")
+logger = logging.getLogger("HomeAI")
 
 # -- Load config ---------------------------------------------------------------
 with open("config.yaml") as f:
     config = yaml.safe_load(f)
 
-_db_base = config.get("db_base_path", "/mnt/nfs/__Backups/HomeAI-lab--databases")
+_db_base = config.get("db_base_path", "/mnt/nfs/__Backups/HomeAI--databases")
 
 
 # -- App lifecycle -------------------------------------------------------------
@@ -75,7 +75,7 @@ _db_base = config.get("db_base_path", "/mnt/nfs/__Backups/HomeAI-lab--databases"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown hooks."""
-    logger.info("Starting HomeAI-Lab orchestrator...")
+    logger.info("Starting HomeAI orchestrator...")
 
     chat_cfg = config.get("chat", {})
     llama_cfg = config.get("llama_server")
@@ -177,7 +177,7 @@ async def lifespan(app: FastAPI):
 # -- FastAPI app ---------------------------------------------------------------
 
 app = FastAPI(
-    title="HomeAI-Lab",
+    title="HomeAI",
     description="Distributed two-server AI orchestrator",
     version="0.1.0",
     lifespan=lifespan,
@@ -469,7 +469,7 @@ async def save_markdown_to_disk(chat_id: str):
     if not md:
         raise HTTPException(404, "Chat not found")
 
-    export_dir = Path(config.get("nas_mount", "/mnt/nfs/Florian/Gin-AI/projects/HomeAI-Lab")) / "exports"
+    export_dir = Path(config.get("nas_mount", "/mnt/nfs/Florian/Gin-AI/projects/HomeAI")) / "exports"
     export_dir.mkdir(parents=True, exist_ok=True)
 
     chat = app.state.store.get_chat(chat_id)
@@ -672,7 +672,7 @@ async def model_health():
 #  Cline-facing LiteLLM-compatible pass-through (Option 2, 2026-04-22)
 #
 #  These endpoints let external clients (Cline VSCode plugin, and any other
-#  OpenAI-compatible client) hit HomeAI-Lab's LiteLLM Router directly,
+#  OpenAI-compatible client) hit HomeAI's LiteLLM Router directly,
 #  bypassing the orchestrator's stateful machinery (Redis, SQLite, KV cache,
 #  RAG tool-use loop, rolling summarization). Cline manages its own history.
 #
@@ -762,7 +762,7 @@ async def proxy_models():
     return {
         "object": "list",
         "data": [
-            {"id": name, "object": "model", "created": created, "owned_by": "homeai-lab"}
+            {"id": name, "object": "model", "created": created, "owned_by": "homeai"}
             for name in _CLINE_EXPOSED_MODELS
         ],
     }
@@ -798,7 +798,7 @@ async def proxy_chat_completions(req: Request):
     reported_model = public_model
 
     # force_cloud/max_tokens and any other OpenAI-standard params flow through
-    # via **body into router.complete → LiteLLM. Drop anything HomeAI-Lab-internal.
+    # via **body into router.complete → LiteLLM. Drop anything HomeAI-internal.
     body.pop("force_cloud", None)
     body.pop("chat_id", None)
     body.pop("user_id", None)

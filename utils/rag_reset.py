@@ -42,7 +42,7 @@ def main() -> None:
         config = yaml.safe_load(f)
 
     rag_cfg = config.get("rag", {})
-    db_base = config.get("db_base_path", "/mnt/nfs/__Backups/HomeAI-lab--databases")
+    db_base = config.get("db_base_path", "/mnt/nfs/__Backups/HomeAI--databases")
     db_path = f"{db_base}/sqlite/rag_state.db"
     scope = f"owner={args.user}" if args.user else "ALL USERS"
     action = (

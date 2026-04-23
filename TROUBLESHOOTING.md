@@ -1,4 +1,4 @@
-# Troubleshooting Guide — HomeAI-Lab RAG Engine
+# Troubleshooting Guide — HomeAI RAG Engine
 
 ## Qdrant HTTP Timeouts During Ingestion
 

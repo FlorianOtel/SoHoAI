@@ -1,5 +1,5 @@
 [project]
-name = "homeai-lab"
+name = "homeai"
 version = "0.1.0"
 description = "Home AI Chatbot"
 readme = "README.md"

@@ -1,4 +1,4 @@
-"""Pydantic schemas for the HomeAI-Lab API."""
+"""Pydantic schemas for the HomeAI API."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ class ChatRequest(BaseModel):
     messages: list[Message]
     chat_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     stream: bool = False
-    # HomeAI-Lab extensions
+    # HomeAI extensions
     user_id: Optional[str] = None  # Google OAuth owner (e.g. "florian"); set by auth middleware
     rag_mode: RagMode = RagMode.off  # off | on | only — server default overrides when field omitted
     force_cloud: bool = False

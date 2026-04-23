@@ -1,23 +1,23 @@
 ---
-title: "HomeAI-Lab — Project Context & Design Reference"
+title: "HomeAI — Project Context & Design Reference"
 date: 2026-04-07
 last_updated: 2026-04-22
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
 last_updated_by: Claude Code (Claude Sonnet 4.6)
 context: >
-  HomeAI-Lab project (https://github.com/FlorianOtel/HomeAI-Lab);
+  HomeAI project (https://github.com/FlorianOtel/HomeAI);
   Project instructions and design decisions for Claude Code;
   Infrastructure, architecture, API, implementation phases, RAG strategy,
   multi-tenancy (Google OAuth2, per-user NFS roots, Qdrant owner filtering)
 ---
 
-# CLAUDE.md — HomeAI-Lab Project Context
+# CLAUDE.md — HomeAI Project Context
 
-**Repository**: https://github.com/FlorianOtel/HomeAI-Lab
+**Repository**: https://github.com/FlorianOtel/HomeAI
 
 ## What is this project?
 
-HomeAI-Lab is a distributed, two-server home-office AI system. It provides a unified
+HomeAI is a distributed, two-server home-office AI system. It provides a unified
 gateway for LLM inference (local + cloud), with conversation memory, document RAG,
 and an MCP server for tooling integration. The long-term goal includes image search
 for family photos and RL training data collection from chat interactions.
@@ -36,19 +36,19 @@ for family photos and RL training data collection from chat interactions.
 
 > SQLite and Redis paths are derived from `db_base_path` in `config.yaml`. Qdrant active storage is local-only (see below).
 
-- Chat DB: `/mnt/nfs/__Backups/HomeAI-lab--databases/sqlite/chats.db` (SQLite, NAS)
-- RAG state DB: `/mnt/nfs/__Backups/HomeAI-lab--databases/sqlite/rag_state.db` (SQLite, NAS)
+- Chat DB: `/mnt/nfs/__Backups/HomeAI--databases/sqlite/chats.db` (SQLite, NAS)
+- RAG state DB: `/mnt/nfs/__Backups/HomeAI--databases/sqlite/rag_state.db` (SQLite, NAS)
 - Vector store (active): `/var/lib/qdrant/storage` (local NVMe, Server 1 only — **not NFS**)
-- Vector store (snapshots/DR): `/mnt/nfs/__Backups/HomeAI-lab--databases/qdrant-snapshots/` (NAS)
-  - **Note**: `/mnt/nfs/__Backups/HomeAI-lab--databases/qdrant/` is intentionally empty — it is NOT used.
+- Vector store (snapshots/DR): `/mnt/nfs/__Backups/HomeAI--databases/qdrant-snapshots/` (NAS)
+  - **Note**: `/mnt/nfs/__Backups/HomeAI--databases/qdrant/` is intentionally empty — it is NOT used.
     Qdrant server uses RocksDB which is incompatible with NFS file locking. Active data must stay local.
     Snapshots (passive files) are safe on NFS and taken daily at 03:00 via cron.
-- Redis persistence: `/mnt/nfs/__Backups/HomeAI-lab--databases/redis/`
+- Redis persistence: `/mnt/nfs/__Backups/HomeAI--databases/redis/`
 - KV cache slots: `/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v-caches/` (one `.bin` per chat_id)
 - LLM model cache: `/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/`
-- Documents for RAG: `/mnt/nfs/Florian/Gin-AI/projects/HomeAI-Lab/documents/`
-- RL training exports: `/mnt/nfs/Florian/Gin-AI/projects/HomeAI-Lab/rl-data/`
-- Chat markdown exports: `/mnt/nfs/Florian/Gin-AI/projects/HomeAI-Lab/exports/`
+- Documents for RAG: `/mnt/nfs/Florian/Gin-AI/projects/HomeAI/documents/`
+- RL training exports: `/mnt/nfs/Florian/Gin-AI/projects/HomeAI/rl-data/`
+- Chat markdown exports: `/mnt/nfs/Florian/Gin-AI/projects/HomeAI/exports/`
 
 ## Architecture
 
@@ -142,7 +142,7 @@ Files:
 - `server_config.json` — server configuration
 
 Exposes all files under `/mnt/nfs/Florian/Gin-AI` to any MCP client.
-Project files are under `/mnt/nfs/Florian/Gin-AI/projects/HomeAI-Lab`.
+Project files are under `/mnt/nfs/Florian/Gin-AI/projects/HomeAI`.
 
 MCP server name (as seen by clients): **`nfs-files`**
 
@@ -153,18 +153,18 @@ Resources: `file:///nfs_files/config`, `file://structure`
 Transport: streamable HTTP on port 3001 (default) or stdio
 
 Path safety: all paths resolved against ALLOWED_ROOTS; traversal blocked.
-Env var `HOMEAI_LAB_PROJECT_DIR` controls the root (defaults to `~/Gin-AI`).
+Root is hardcoded to `/mnt/nfs/Florian` in `nfs_files_mcp_server.py` (ALLOWED_ROOTS).
 
 Listing supports depth 0-20 (0 = unlimited recursive). Search uses rglob
 (always recursive) with up to 1000 result lines.
 
 **Note**: relative paths resolve from the Gin-AI root, so project files need
-the `projects/HomeAI-Lab/` prefix (e.g. `projects/HomeAI-Lab/config.yaml`).
+the `projects/HomeAI/` prefix (e.g. `projects/HomeAI/config.yaml`).
 
 ## Project structure
 
 ```
-HomeAI-Lab/
+HomeAI/
 ├── main.py                     # FastAPI app — the central orchestrator
 ├── config.yaml                 # All configuration (models, Redis, RAG, routing, llama-server)
 ├── .env                        # ANTHROPIC_API_KEY (not committed)
@@ -368,7 +368,7 @@ considered and rejected:
   Python process — subsequent calls append to the existing collection instead of creating a fresh one,
   silently duplicating documents and corrupting search result ranking. `EphemeralClient` does NOT fix
   this (it is still a process singleton). Qdrant has no such issue: collections are explicitly named,
-  isolated on disk, and there is no shared process state. HomeAI-Lab also uses `qdrant-client`
+  isolated on disk, and there is no shared process state. HomeAI also uses `qdrant-client`
   directly (no LangChain wrapper), so no default-name trap can occur.
 - LanceDB: good columnar metadata but less mature; no existing integration
 - pgvector: requires Postgres (project uses SQLite)
@@ -518,10 +518,10 @@ Full design details and worker loop spec: `RAG-strategy.md`.
 - Logging via stdlib `logging` module
 
 ### Naming
-- Project name: **HomeAI-Lab** (hyphenated in paths/dirs)
-- Python identifiers: `homeai_lab_*` (underscored)
-- MCP tool names: `homeai_lab_{action}_{resource}` (e.g. `homeai_lab_read_file`)
-- Env var prefix: `HOMEAI_LAB_`
+- Project name: **HomeAI**
+- Python identifiers: `homeai_*` (underscored)
+- MCP tool names: `homeai_{action}_{resource}` (e.g. `homeai_read_file`)
+- Env var prefix: `HOMEAI_`
 - Config file: `config.yaml` (single file, all settings)
 
 ### Dependencies
@@ -557,15 +557,15 @@ llama-server \
 # Server 1 — Qdrant vector store (enabled at boot; restart after reboot)
 sudo systemctl start qdrant          # starts /usr/local/bin/qdrant on port 6333
 # Active storage: /var/lib/qdrant/storage (local NVMe — NOT NFS)
-# Snapshots (DR):  /mnt/nfs/__Backups/HomeAI-lab--databases/qdrant-snapshots/
+# Snapshots (DR):  /mnt/nfs/__Backups/HomeAI--databases/qdrant-snapshots/
 # Manual snapshot: bash scripts/qdrant/qdrant-snapshot.sh   (auto-runs daily 03:00 via cron)
 # Restore from snapshot: PUT http://192.168.1.93:6333/collections/documents/snapshots/recover
 
 # Server 1 — Redis
-redis-server --appendonly yes --dir /mnt/nfs/__Backups/HomeAI-lab--databases/redis
+redis-server --appendonly yes --dir /mnt/nfs/__Backups/HomeAI--databases/redis
 
 # Server 1 — orchestrator
-cd ~/Gin-AI/projects/HomeAI-Lab
+cd ~/Gin-AI/projects/HomeAI
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 # Server 1 — MCP server (HTTP mode for remote access)
@@ -654,8 +654,8 @@ Benchmark methodology: 3 runs averaged per scenario, `/completion` native endpoi
 - **llama-server over vLLM** — native KV slot save/restore API (`/slots/{id}?action=save|restore`); 2 slots × 110024 ctx at ~9,321 MiB VRAM with f16 KV, flash-attn, SWA-aware KV allocation (Gemma 4 E4B 7.52B Q8_0)
 - **KV cache in `ConversationCache`** — `conversation.py` is the single owner of all conversation state (Redis + KV). `resume()`/`park()` keep save/restore co-located with Redis ops
 - **Internal bypasses LiteLLM** — native `/completion` required to pass `slot_id`. External path goes through LiteLLM; internal path calls llama-server directly. Branch at [main.py:333-347](main.py#L333-L347).
-- **Cline-facing proxy endpoints (2026-04-22, Option 2)** — external clients (Cline VSCode plugin, any OpenAI-compatible tool) hit HomeAI-Lab directly at `http://192.168.1.93:8000/proxy/v1/{model/info,models,chat/completions}`. Stateless OpenAI-compatible pass-through to `SmartRouter.complete()` — bypasses Redis, SQLite, KV cache, RAG, summarization; Cline manages its own history. Model-name mapping in `_CLINE_EXPOSED_MODELS` in [main.py](main.py): `gemma-4-e4b` → `internal`, `claude-sonnet-4-6` → `external`. `model_info.max_input_tokens` is populated from `config.yaml` (110024 for Gemma per-slot, 200000 for Sonnet) so Cline's LiteLLM provider reads the correct context window. Prompt caching still applies to the external path (same `SmartRouter` instance). Supersedes the old Server-2 LiteLLM wrapper at `:8001`. Trade-off: Cline now coupled to orchestrator uptime — accepted.
-- **Shared llama-server (2026-04-22)** — the same Server 2 llama-server still backs both HomeAI-Lab's internal `internal` path and Cline's `gemma-4-e4b` proxy path. Per-slot context 110,024. Known race: a Cline request landing on a slot between HomeAI-Lab's restore→inference→save sequence corrupts that chat's KV state. Post-flip, HomeAI-Lab's Gemma hits are rare (summarization + fallback only), so collision probability is low and the corruption self-heals on the next turn. No coordination code — accepted risk.
+- **Cline-facing proxy endpoints (2026-04-22, Option 2)** — external clients (Cline VSCode plugin, any OpenAI-compatible tool) hit HomeAI directly at `http://192.168.1.93:8000/proxy/v1/{model/info,models,chat/completions}`. Stateless OpenAI-compatible pass-through to `SmartRouter.complete()` — bypasses Redis, SQLite, KV cache, RAG, summarization; Cline manages its own history. Model-name mapping in `_CLINE_EXPOSED_MODELS` in [main.py](main.py): `gemma-4-e4b` → `internal`, `claude-sonnet-4-6` → `external`. `model_info.max_input_tokens` is populated from `config.yaml` (110024 for Gemma per-slot, 200000 for Sonnet) so Cline's LiteLLM provider reads the correct context window. Prompt caching still applies to the external path (same `SmartRouter` instance). Supersedes the old Server-2 LiteLLM wrapper at `:8001`. Trade-off: Cline now coupled to orchestrator uptime — accepted.
+- **Shared llama-server (2026-04-22)** — the same Server 2 llama-server still backs both HomeAI's internal `internal` path and Cline's `gemma-4-e4b` proxy path. Per-slot context 110,024. Known race: a Cline request landing on a slot between HomeAI's restore→inference→save sequence corrupts that chat's KV state. Post-flip, HomeAI's Gemma hits are rare (summarization + fallback only), so collision probability is low and the corruption self-heals on the next turn. No coordination code — accepted risk.
 - **Rolling summarization uses internal (llama-server)** — `maybe_summarize()` erases the KV slot before calling; both summarization and subsequent inference start cold sequentially on the same slot; triggered at ~100K tokens, keeps last 20 turns verbatim. Model pinned via `routing.summarization_model` in `config.yaml` (default `internal`).
 - **LiteLLM stays as the routing + fallback layer** — handles OpenAI/Anthropic API differences and executes the fallback chain `external → internal` (reversed direction of pre-flip implementation)
 - **Tool-use — XML sentinel path only (native Anthropic tool-use deferred)** — both external and internal paths emit and parse the custom `<tool_call>...</tool_call>` sentinel. Sonnet handles it reliably in practice. Native Anthropic `tools=[...]` + `tool_use` content blocks remains a deferred follow-up; unifying the two paths isn't blocking current quality.

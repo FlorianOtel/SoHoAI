@@ -24,8 +24,8 @@
       "Bash(claude mcp:*)",
       "Bash(mv gin_ai_files_mcp_server.py nfs_files_mcp_server.py)",
       "Bash(mv gin_ai_files_mcp_server.sh nfs_files_mcp_server.sh)",
-      "Bash(mv /home/florian/Gin-AI/projects/HomeAI-Lab/.amazonq/rules/Home-AI-Chatbot.md /home/florian/Gin-AI/projects/HomeAI-Lab/.amazonq/rules/HomeAI-Lab.md)",
-      "Bash(sed -i -e 's|Home-AI-Chatbot|HomeAI-Lab|g' -e 's|Home-AI-ChatBot|HomeAI-Lab|g' -e 's|/home/florian/Gin-AI/projects/Home-AI-ChatBot|/home/florian/Gin-AI/projects/HomeAI-Lab|g' /home/florian/Gin-AI/projects/HomeAI-Lab/.amazonq/rules/HomeAI-Lab.md)",
+      "Bash(mv /home/florian/Gin-AI/projects/HomeAI/.amazonq/rules/Home-AI-Chatbot.md /home/florian/Gin-AI/projects/HomeAI/.amazonq/rules/HomeAI.md)",
+      "Bash(sed -i -e 's|Home-AI-Chatbot|HomeAI|g' -e 's|Home-AI-ChatBot|HomeAI|g' -e 's|/home/florian/Gin-AI/projects/Home-AI-ChatBot|/home/florian/Gin-AI/projects/HomeAI|g' /home/florian/Gin-AI/projects/HomeAI/.amazonq/rules/HomeAI.md)",
       "Bash(cp:*)"
     ]
   },

@@ -7,7 +7,7 @@ of the rag_engine package.
 """
 from schemas import RagMode
 
-_BASE = "You are HomeAI-Lab's assistant. Be concise, accurate, and helpful."
+_BASE = "You are HomeAI's assistant. Be concise, accurate, and helpful."
 
 _MODE_OFF = f"""{_BASE}
 

@@ -28,7 +28,7 @@ cisco DCNIDS certificate networking | cisco-DCNIDS
 time series forecasting methods | Data Mining for Business Analytics
 
 # Our own project docs — should always be top result
-HomeAI-Lab Qdrant vector store | HomeAI-Lab
+HomeAI Qdrant vector store | HomeAI
 
 # Azure slides — specific deck with clear path substring
 Kubernetes Azure microservices deployment | Azure Kubernetes Service

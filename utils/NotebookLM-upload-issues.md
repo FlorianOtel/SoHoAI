@@ -3,7 +3,7 @@
 **Author**: Claude (claude-sonnet-4-6)
 **Created**: 2026-04-15
 **Updated**: 2026-04-15 (session 2 — encoding fix, deletion loop bugs; session 3 — split mode retired)
-**Context**: End-of-session sync of HomeAI-Lab codebase to NotebookLM notebook
+**Context**: End-of-session sync of HomeAI codebase to NotebookLM notebook
   `2f18268d-5e5b-4f40-8eaf-2909bbc945db`
 **Files referenced**:
 - `utils/snapshot_codebase.py`

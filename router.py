@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 class SmartRouter:
-    """Wraps LiteLLM Router with HomeAI-Lab-specific routing logic."""
+    """Wraps LiteLLM Router with HomeAI-specific routing logic."""
 
     def __init__(self, config_path: str = "config.yaml"):
         with open(config_path) as f:
