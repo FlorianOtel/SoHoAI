@@ -45,6 +45,15 @@ from rag_engine.state import StateDB
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+_LOG_FORMAT = "%(asctime)s %(levelname)s: %(message)s"
+
+
+def _add_file_handler(log_path: str) -> None:
+    """Add a FileHandler to the root logger so all output also goes to log_path."""
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    logging.getLogger().addHandler(handler)
+
 
 _FETCH_BATCH_SIZE = 10  # files fetched from SQLite per loop iteration (hardcoded)
 
@@ -129,7 +138,19 @@ def main() -> None:
             "Higher values suit a remote GPU; keep low (3–5) for CPU-local Ollama."
         ),
     )
+    parser.add_argument(
+        "--log-file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Write all log output to this file in addition to stderr. "
+            "Required for rag_status.py --watch to work."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.log_file:
+        _add_file_handler(args.log_file)
 
     with open(Path(__file__).resolve().parent.parent / "config.yaml") as f:
         config = yaml.safe_load(f)
@@ -147,9 +168,9 @@ def main() -> None:
         state_db.close()
         return
 
-    print(
-        f"Starting ingest: {counts_before['pending']} files pending  "
-        f"workers={args.workers}  batch={args.batch}"
+    logger.info(
+        "Starting ingest: %d files pending  workers=%d  batch=%d",
+        counts_before["pending"], args.workers, args.batch,
     )
 
     try:

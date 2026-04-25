@@ -1,9 +1,9 @@
 ---
 title: "HomeAI — Project Context & Design Reference"
 date: 2026-04-07
-last_updated: 2026-04-22
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
-last_updated_by: Claude Code (Claude Sonnet 4.6)
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_on: 2026-04-25
 context: >
   HomeAI project (https://github.com/FlorianOtel/HomeAI);
   Project instructions and design decisions for Claude Code;
@@ -180,18 +180,18 @@ HomeAI/
 │   └── rag_system_prompts.py   # build_system_prompt(mode, tool_spec) → off/on/only prompts
 ├── rag_engine/                 # RAG pipeline (Phase 2 ✅ + §8 advanced retrieval ✅)
 │   ├── __init__.py             # re-exports search_rag, multi_query_search
-│   ├── schema.py               # Qdrant payload field constants + derive_owner()
+│   ├── schema.py               # Qdrant payload field constants + derive_owner(); FIELD_SESSION_ID + FIELD_PROJECT added for claude_chat documents
 │   ├── collection.py           # Collection name, vector size, get_client(), ensure_collection()
 │   ├── embeddings.py           # embed_text(), embed_batch(progress_cb) via Ollama on Server 1
-│   ├── state.py                # StateDB — ingestion queue CRUD + crash recovery
-│   ├── scanner.py              # NFS filesystem scanner → populates StateDB; filters read from config.yaml rag.scanner; followlinks=True with visited_real_dirs + visited_real_files global dedup sets to prevent re-ingesting symlink aliases; exclude_dir_names uses trailing-slash path-suffix matching (supports multi-component paths like "Microsoft--flotel/Documents/")
-│   ├── ingest.py               # docling parse + parent-child chunking + Qdrant upsert
+│   ├── state.py                # StateDB — ingestion queue CRUD + crash recovery; find_deleted()/purge_deleted() are the crash-safe split of the old handle_deleted() — callers must Qdrant-clean before calling purge_deleted() so a kill leaves SQLite intact for retry
+│   ├── scanner.py              # NFS + claude chat scanner → populates StateDB; scan_nfs_roots() walks configured NFS roots (filters from config.yaml rag.scanner) and returns {scanned, existing_paths}; scan_claude_chats() walks config.yaml claude_chats.roots for .jsonl sessions and returns {scanned, existing_paths}; callers merge existing_paths sets and call state_db.find_deleted() once before Qdrant cleanup + purge_deleted(); followlinks=True with visited_real_dirs + visited_real_files global dedup sets; exclude_dir_names uses trailing-slash path-suffix matching
+│   ├── ingest.py               # docling parse + parent-child chunking + Qdrant upsert; _parse_claude_chat() extracts user/assistant text turns from .jsonl session files and returns (text, {session_id, project}) metadata for Qdrant payload
 │   ├── search.py               # query → embed → Qdrant query_points → parent_text + provenance
 │   ├── multi_query.py          # §8.3: expand_query() + parallel search + MMR reranking (permanently disabled — no-go 2026-04-22)
 │   └── tool_use.py             # §8.2: build_tool_spec(), parse_tool_call(), format_tool_result()
 ├── utils/
 │   ├── cli_chat.py             # Terminal chat client; RAG off by default (opt-in); --user OWNER sends user_id; /rag on|off|only; /rag search <query> inspects retrieval; /user <id> changes owner mid-session
-│   ├── rag_sync_nfs.py         # CLI: scan NFS roots → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files
+│   ├── rag_sync_nfs.py         # CLI: scan NFS roots + claude chat dirs → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files; calls scan_nfs_roots() + scan_claude_chats(), merges existing_paths, calls find_deleted() once
 │   ├── rag_ingest_daemon.py    # CLI: process pending files (parse → chunk → embed → upsert)
 │   ├── rag_status.py           # CLI: queue counts + Qdrant point stats; --ignored for detail; --watch LOG_FILE for live ETA monitor; --list-pending [N] to print pending paths (pipeable)
 │   ├── rag_search_cli.py       # CLI: retrieval-only — embed query + Qdrant search; prints top-k hits + parent_text preview
@@ -423,14 +423,19 @@ Each child chunk point stores:
                            # values: "florian", "eva", "annika", "laura", "la-familia"
     "source_path": str,    # full NFS path — this IS the reference returned to the user
     "file_name": str,
-    "file_type": str,      # pdf / docx / pptx / txt / ipynb / md / yaml
+    "file_type": str,      # pdf / docx / pptx / txt / ipynb / md / yaml / claude_chat
     "page": int,           # or slide_number for PPTX; cell_index for notebooks
     "chunk_index": int,    # child chunk index within its parent
     "tag": str,            # e.g. "certifications", "cisco-backup", "family"
+    # claude_chat documents only (absent on NFS document points):
+    "session_id": str,     # Claude Code session UUID — Qdrant-filterable (find all chunks of a session)
+    "project": str,        # derived project name, e.g. "HomeAI" — Qdrant-filterable (find sessions by project)
 }
 ```
 
-`owner` is derived from the NFS path root at ingestion time (`/mnt/nfs/Eva/... → "eva"`).
+`owner` is derived from the NFS path root at ingestion time (`/mnt/nfs/Eva/... → "eva"`), or from the `.claude` parent dir for chat sessions (`/home/florian/.claude → "florian"`).
+For `claude_chat` documents, `session_id` and `project` enable cross-referencing:
+`Filter(must=[FieldCondition(key="session_id", match=MatchValue(value="<uuid>"))])` retrieves all chunks of a specific session ordered by `chunk_index`.
 Search filters: `MatchAny(any=[user_owner, "la-familia"])` — user sees own + shared docs.
 `source_path` is the full NFS path — directly usable without a second lookup.
 `main.py:_build_rag_prompt()` uses `chunk["source_path"]`.
@@ -583,12 +588,12 @@ python utils/cli_chat.py --server http://192.168.1.93:8000 --user florian
 #   in-session: /rag on | /rag only | /rag status | /rag search <query> | /user <id>
 
 # RAG ingestion (see RAG-strategy.md §5 for full walkthrough)
-python utils/rag_sync_nfs.py                   # scan NFS → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files
-python utils/rag_ingest_daemon.py --workers 1 --batch 5    # CPU embed (Server 1); both flags required
-python utils/rag_ingest_daemon.py --workers 3 --batch 20   # GPU embed (Server 2, RTX 5070); see RAG-strategy.md §5.4
+python utils/rag_sync_nfs.py                   # scan NFS roots + claude chat dirs → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files
+python utils/rag_ingest_daemon.py --workers 1 --batch 5 --log-file /tmp/rag-ingestion.log    # CPU embed (Server 1); --log-file required for --watch
+python utils/rag_ingest_daemon.py --workers 3 --batch 20 --log-file /tmp/rag-ingestion.log   # GPU embed (Server 2, RTX 5070); see RAG-strategy.md §5.4
 python utils/rag_status.py                     # one-shot queue counts + Qdrant stats (ignored count always shown)
 python utils/rag_status.py --ignored           # detail listing of ignored files + rationale
-python utils/rag_status.py --watch /tmp/rag-ingestion.log   # live monitor: chunk progress bar + ETA
+python utils/rag_status.py --watch /tmp/rag-ingestion.log   # live monitor: chunk progress bar + ETA (requires --log-file on daemon)
 python utils/rag_status.py --list-pending              # print every pending file path (pipeable; combine with --user)
 
 # RAG testing
@@ -665,4 +670,5 @@ Benchmark methodology: 3 runs averaged per scenario, `/completion` native endpoi
 - **Embeddings via Ollama on Server 1** — `bge-m3` (1024-dim, 8192-tok context) served by Ollama; Server 2 GPU uses ~9 GB with 2 parallel slots at full context with Gemma 4 (leaving ~3.2 GB headroom, not enough for a reliable embedding model under load); `sentence-transformers` removed. `embed_batch()` concurrency controlled by `--batch` in `rag_ingest_daemon.py` (default 5, `_BATCH_CONCURRENCY`); lower `--batch` to reduce `httpx.ReadTimeout` errors, raise it for more throughput. Ollama serializes model computation — when ingest daemon runs, search queries queue behind it and can wait 28–30s; `embed_text()` timeout is 120s to survive this. `embed_batch()` fires a `progress_cb(done, total)` every 50 chunks (`_PROGRESS_INTERVAL`); `ingest.py` wires this to a logger call; `rag_status.py --watch` parses those log lines to compute real-time chunk rate + ETA. SQLite fetch batch size is hardcoded to 10 files per iteration (`_FETCH_BATCH_SIZE` in `rag_ingest_daemon.py`). Qdrant upsert is batched in groups of `_UPSERT_BATCH_SIZE=256` points (`ingest.py`) to avoid HTTP 400 on large files.
 - **Qdrant client HTTP timeout** — `rag_engine/collection.py::get_client()` initializes the `QdrantClient` with `timeout=60` (increased from httpx default ~5s in 2026-04-22). During heavy bulk ingestion (e.g., 70K+ points from a single file), Qdrant performs extended index optimization that can block response handling for 10–30s. The 5s timeout was too short, causing regular `httpcore.ReadTimeout` cascades during large ingestion runs. 60s allows Qdrant time to complete index restructuring. See `TROUBLESHOOTING.md` for full analysis.
 - **Multi-tenancy via `owner` field + Google OAuth2** — every Qdrant point carries an `owner` derived from NFS path root at ingestion; search applies `MatchAny(any=[user_owner, "la-familia"])` filter; user identity from Google OIDC JWT mapped to `owner` via `config.yaml` `users:` section; data model designed before first ingestion to avoid re-ingesting
+- **Qdrant-before-SQLite deletion ordering (2026-04-24, refactored 2026-04-25)** — `scan_nfs_roots()` and `scan_claude_chats()` each return `{'scanned': N, 'existing_paths': set[str]}` without calling `find_deleted()` internally. Both callers (`rag_sync_nfs.py` and `main.py /v1/rag/ingest/sync`) merge the two `existing_paths` sets, then call `state_db.find_deleted(merged)` once to get `(deleted_paths, stale_paths)`. Callers then: (1) delete Qdrant points for each path in `deleted_paths`, (2) call `state_db.purge_deleted(stale_paths)`. If killed mid-Qdrant-loop, the SQLite rows survive intact and the next sync retries automatically. Merging before `find_deleted()` is critical — if only NFS paths were passed, claude chat rows in SQLite would be falsely flagged as deleted. The old `handle_deleted()` committed SQLite atomically before Qdrant cleanup and has been deprecated. Observed orphan incident 2026-04-24: 12 paths required manual Qdrant scroll + targeted delete.
 - **MCP server uses path sandboxing** — all operations validated against ALLOWED_ROOTS, no escape possible
