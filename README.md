@@ -1,3 +1,3 @@
 # SoHo (Small office / Home office) AI stack 
 
-Two-server lab with RAG, MCP and Nvidia eGPU 
+Two-server local AI setup with RAG, MCP and Nvidia eGPU 
