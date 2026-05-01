@@ -1,6 +1,6 @@
 ---
 title: "SoHoAI Design History"
-date: 2026-05-01
+created_at: 20260501-134028
 created_by: Claude Code (Claude Sonnet 4.6)
 context: >
   Running log of significant design decisions, feature additions, and architectural

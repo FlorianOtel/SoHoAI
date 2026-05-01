@@ -9,6 +9,7 @@ wheels/
 # uv and  virtual environments
 .venv/
 uv.lock
+.claude/ 
 
 # Local settings
 .env

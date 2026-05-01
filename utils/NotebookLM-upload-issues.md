@@ -1,9 +1,9 @@
 ---
 title: "NotebookLM Upload Issues — Findings & Workarounds"
-date: 2026-04-15
+created_at: 20260415-000000
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_on: 2026-04-24
+updated_at: 20260501-032433
 context: >
   NotebookLM upload issues and workarounds;
   End-of-session sync of SoHoAI codebase to NotebookLM notebook;

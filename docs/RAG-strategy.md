@@ -1,9 +1,9 @@
 ---
 title: "SoHoAI — RAG Strategy"
-date: 2026-03-30
+created_at: 20260330-000000
 created_by: Florian Otel
 updated_by: Claude Code (Claude Opus 4.7)
-updated_on: 2026-04-22
+updated_at: 20260501-032433
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
