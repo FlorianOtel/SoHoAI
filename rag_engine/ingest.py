@@ -21,8 +21,10 @@ Parsing:
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -52,6 +54,7 @@ from .schema import (
     FIELD_PARENT_TEXT,
     FIELD_PROJECT,
     FIELD_SESSION_ID,
+    FIELD_SESSION_TITLE,
     FIELD_SOURCE_PATH,
     FIELD_TAG,
     FIELD_TEXT,
@@ -105,6 +108,39 @@ def _get_converter() -> DocumentConverter:
 # Parsing
 # ---------------------------------------------------------------------------
 
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+@functools.lru_cache(maxsize=8)
+def _build_title_map(dot_claude_dir: Path) -> dict[str, str]:
+    """Walk ~/.claude/chats/ symlinks → {realpath: human_title}.
+    Excludes UUID-named symlinks (auto-created by Claude Code, not user-chosen).
+    Returns {} if chats dir absent or inaccessible.
+    """
+    chats_dir = dot_claude_dir / "chats"
+    if not chats_dir.is_dir():
+        return {}
+    title_map: dict[str, str] = {}
+    try:
+        for category in chats_dir.iterdir():
+            if not category.is_dir():
+                continue
+            for f in category.iterdir():
+                if f.suffix != ".jsonl" or not f.is_symlink():
+                    continue
+                if _UUID_RE.match(f.stem):
+                    continue
+                try:
+                    title_map[str(f.resolve())] = f.stem
+                except OSError:
+                    continue
+    except OSError as exc:
+        logger.warning("_build_title_map: cannot scan %s: %s", chats_dir, exc)
+    return title_map
+
+
 def _parse_ipynb(path: Path) -> str:
     """
     Extract clean text from a Jupyter notebook.
@@ -134,6 +170,41 @@ def _parse_ipynb(path: Path) -> str:
 
 # OLE2 magic bytes — Composite Document File V2 (binary .ppt format)
 _OLE2_MAGIC = b"\xD0\xCF\x11\xE0"
+
+
+def _synthesize_title(path: Path, max_chars: int = 60) -> str:
+    """Derive a title from the first non-empty, non-command user message.
+    Falls back to path.stem (UUID) on any failure.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return path.stem
+    for raw in lines:
+        try:
+            entry = json.loads(raw.strip())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if entry.get("type") != "user" or entry.get("isMeta"):
+            continue
+        content = (entry.get("message") or {}).get("content", "")
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            text = " ".join(
+                b.get("text", "").strip()
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        else:
+            text = ""
+        if not text or text.startswith("<"):
+            continue
+        title = text.replace("\n", " ").strip()[:max_chars]
+        if len(text) > max_chars:
+            title += "..."
+        return title
+    return path.stem
 
 
 def _parse_claude_chat(path: Path) -> tuple[str, dict]:
@@ -241,9 +312,25 @@ def _parse_claude_chat(path: Path) -> tuple[str, dict]:
     body = "\n\n".join(turns)
     text = header + body
 
+    # --- session_title derivation ---
+    is_subagent = path.parent.name == "subagents"
+    if is_subagent:
+        # path: .../projects/<mangled>/<uuid>/subagents/agent-xxx.jsonl
+        parent_jsonl = path.parent.parent.parent / (path.parent.parent.name + ".jsonl")
+        dot_claude_dir = path.parents[4]
+        title_map = _build_title_map(dot_claude_dir)
+        parent_title = title_map.get(str(parent_jsonl.resolve())) or _synthesize_title(parent_jsonl)
+        session_title = f"{parent_title} [subagent]"
+    else:
+        # path: .../projects/<mangled>/<uuid>.jsonl
+        dot_claude_dir = path.parents[2]
+        title_map = _build_title_map(dot_claude_dir)
+        session_title = title_map.get(str(path.resolve())) or _synthesize_title(path)
+
     metadata = {
-        FIELD_SESSION_ID: session_id,
-        FIELD_PROJECT: project,
+        FIELD_SESSION_ID:    session_id,
+        FIELD_PROJECT:       project,
+        FIELD_SESSION_TITLE: session_title,
     }
     return text, metadata
 

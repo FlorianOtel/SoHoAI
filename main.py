@@ -218,7 +218,7 @@ def _fold_tool_messages(messages: list[dict]) -> list[dict]:
     return folded
 
 
-async def _retrieve(query: str, user_id: str | None) -> list[dict]:
+async def _retrieve(query: str, user_id: str | None, file_types: list[str] | None = None) -> list[dict]:
     """Dispatch to multi-query+MMR or standard search based on config."""
     rag_cfg = app.state.rag_cfg
     limit = rag_cfg.get("top_k", 5)
@@ -242,6 +242,7 @@ async def _retrieve(query: str, user_id: str | None) -> list[dict]:
         limit=limit,
         qdrant_client=app.state.qdrant_client,
         rag_cfg=rag_cfg,
+        file_types=file_types,
     )
 
 
@@ -370,13 +371,14 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
                 continue
 
             query = tool_call["arguments"].get("query", "").strip()
+            file_types = tool_call["arguments"].get("file_types") or None
             if not query:
                 messages.append({"role": "assistant", "content": raw_text})
                 messages.append({"role": "tool", "content": "Empty query — please provide a search term."})
                 continue
 
             # 5d. Retrieve and feed result back
-            chunks = await _retrieve(query, req.user_id)
+            chunks = await _retrieve(query, req.user_id, file_types)
             rag_chunks_used.extend(chunks)
             messages.append({"role": "assistant", "content": raw_text})
             messages.append({"role": "tool", "content": format_tool_result(chunks)})

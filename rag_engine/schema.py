@@ -22,6 +22,7 @@ FIELD_CHUNK_INDEX = "chunk_index"   # child chunk index within its parent
 FIELD_TAG = "tag"                   # e.g. "certifications", "cisco-backup", "family"
 FIELD_SESSION_ID = "session_id"     # UUID of the Claude Code session — indexed for Qdrant filter queries
 FIELD_PROJECT = "project"           # derived project name (Path(cwd).name, e.g. "SoHoAI") — indexed for filtering
+FIELD_SESSION_TITLE = "session_title"  # claude_chat only; absent on NFS document points
 
 
 # ---------------------------------------------------------------------------

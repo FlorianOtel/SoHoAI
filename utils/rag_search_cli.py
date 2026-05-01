@@ -27,7 +27,7 @@ from rag_engine.collection import get_client
 from rag_engine.search import search_rag
 
 
-async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_cfg: dict) -> None:
+async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_cfg: dict, file_types: list[str] | None = None) -> None:
     qdrant_client = get_client(qdrant_url)
 
     results = await search_rag(
@@ -36,6 +36,7 @@ async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_
         limit=top_k,
         qdrant_client=qdrant_client,
         rag_cfg=rag_cfg,
+        file_types=file_types,
     )
 
     if not results:
@@ -43,13 +44,13 @@ async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_
         return
 
     print(f"\n{len(results)} result(s) for query: {query!r}  (user_id={user_id})\n")
-    print(f"{'#':<3}  {'Score':>6}  {'File':<40}  Source")
+    print(f"{'#':<3}  {'Score':>6}  {'File/Title':<40}  Source")
     print("─" * 100)
     for i, r in enumerate(results, 1):
-        score = r["score"]
-        fname = r["file_name"][:38]
-        source = r["source_path"]
-        print(f"{i:<3}  {score:>6.4f}  {fname:<40}  {source}")
+        ftype  = r.get("file_type", "")
+        stitle = r.get("session_title", "")
+        display = (stitle if ftype == "claude_chat" and stitle else r.get("file_name", ""))[:38]
+        print(f"{i:<3}  {r['score']:>6.4f}  {display:<40}  {r['source_path']}")
 
     print()
     if results:
@@ -67,6 +68,8 @@ def main() -> None:
     parser.add_argument("--no-filter", action="store_true",
                         help="Search all documents regardless of owner")
     parser.add_argument("--top-k", type=int, default=5, help="Number of results (default: 5)")
+    parser.add_argument("--file-types", nargs="+", metavar="TYPE",
+                        help="Filter by file type(s): pdf, pptx, ppt, docx, ipynb, md, yaml, txt, claude_chat")
     args = parser.parse_args()
 
     if not args.no_filter and not args.user:
@@ -79,7 +82,7 @@ def main() -> None:
 
     rag_cfg = config.get("rag", {})
 
-    asyncio.run(run(args.query, user_id, args.top_k, rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"), rag_cfg))
+    asyncio.run(run(args.query, user_id, args.top_k, rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"), rag_cfg, file_types=args.file_types or None))
 
 
 if __name__ == "__main__":

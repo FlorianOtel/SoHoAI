@@ -20,6 +20,7 @@ from .schema import (
     FIELD_FILE_TYPE,
     FIELD_OWNER,
     FIELD_PARENT_TEXT,
+    FIELD_SESSION_TITLE,
     FIELD_SOURCE_PATH,
 )
 
@@ -31,6 +32,7 @@ async def search_rag(
     limit: int,
     qdrant_client: QdrantClient,
     rag_cfg: dict,
+    file_types: list[str] | None = None,
 ) -> list[dict]:
     """
     Semantic search over the user's documents + shared (la-familia) content.
@@ -66,17 +68,23 @@ async def search_rag(
     # -- 1. Embed the query ------------------------------------------------
     vector = await embed_text(query, model=model, ollama_url=ollama_url)
 
-    # -- 2. Ownership filter -----------------------------------------------
-    query_filter: Filter | None = None
+    # -- 2. Build filter (ownership + optional file_types) ------------------
+    must: list = []
     if user_id:
-        query_filter = Filter(
-            must=[
-                FieldCondition(
-                    key=FIELD_OWNER,
-                    match=MatchAny(any=[user_id, "la-familia"]),
-                )
-            ]
+        must.append(
+            FieldCondition(
+                key=FIELD_OWNER,
+                match=MatchAny(any=[user_id, "la-familia"]),
+            )
         )
+    if file_types:
+        must.append(
+            FieldCondition(
+                key=FIELD_FILE_TYPE,
+                match=MatchAny(any=file_types),
+            )
+        )
+    query_filter: Filter | None = Filter(must=must) if must else None
 
     # -- 3. Search ---------------------------------------------------------
     ensure_collection(qdrant_client)
@@ -91,11 +99,12 @@ async def search_rag(
     # -- 4. Unpack hits ----------------------------------------------------
     results = [
         {
-            "content":     (hit.payload or {}).get(FIELD_PARENT_TEXT, ""),
-            "source_path": (hit.payload or {}).get(FIELD_SOURCE_PATH, ""),
-            "score":       hit.score,
-            "file_name":   (hit.payload or {}).get(FIELD_FILE_NAME, ""),
-            "file_type":   (hit.payload or {}).get(FIELD_FILE_TYPE, ""),
+            "content":       (hit.payload or {}).get(FIELD_PARENT_TEXT, ""),
+            "source_path":   (hit.payload or {}).get(FIELD_SOURCE_PATH, ""),
+            "score":         hit.score,
+            "file_name":     (hit.payload or {}).get(FIELD_FILE_NAME, ""),
+            "file_type":     (hit.payload or {}).get(FIELD_FILE_TYPE, ""),
+            "session_title": (hit.payload or {}).get(FIELD_SESSION_TITLE, ""),
         }
         for hit in result.points
     ]
