@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HomeAI — Terminal Chat Client (Phase 1)
+SoHoAI — Terminal Chat Client (Phase 1)
 
 A simple but functional CLI that talks to the orchestrator API.
 Supports:
@@ -351,7 +351,7 @@ class CLIChat:
     def run(self):
         """Main REPL loop with history and emacs-style line editing."""
         print("╔══════════════════════════════════════╗")
-        print("║       HomeAI — Terminal Chat     ║")
+        print("║       SoHoAI — Terminal Chat     ║")
         print("║  Type /help for commands, /quit to   ║")
         print("║  exit. Just type to chat.            ║")
         print("║  ↑/↓ for history, Ctrl+A/E for line  ║")
@@ -381,7 +381,7 @@ class CLIChat:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="HomeAI CLI Chat")
+    parser = argparse.ArgumentParser(description="SoHoAI CLI Chat")
     parser.add_argument("--server", default=DEFAULT_SERVER, help="Orchestrator URL")
     parser.add_argument(
         "--user",

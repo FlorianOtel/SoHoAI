@@ -1,7 +1,7 @@
 [project]
-name = "homeai"
+name = "sohoai"
 version = "0.1.0"
-description = "Home AI Chatbot"
+description = "SoHoAI Chatbot"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

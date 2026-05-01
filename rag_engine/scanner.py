@@ -180,8 +180,65 @@ def scan_nfs_roots(
 
         logger.info("  → %d file(s) found in %s", root_count, root)
 
-    deleted = state_db.handle_deleted(existing_paths)
-    if deleted:
-        logger.info("Removed %d deleted file(s) from queue", len(deleted))
+    return {
+        "scanned": scanned,
+        "existing_paths": existing_paths,
+    }
 
-    return {"scanned": scanned, "deleted": len(deleted), "deleted_paths": deleted}
+
+def scan_claude_chats(
+    state_db: StateDB,
+    config: dict,
+    user_filter: str | None = None,
+) -> dict:
+    """
+    Walk configured claude_chats roots and update the ingestion queue with .jsonl session files.
+
+    Reads config["claude_chats"]["roots"] (list of {path, owner} dicts).
+    Skips gracefully if the key is absent.
+
+    Returns:
+        {'scanned': N, 'existing_paths': set[str]}
+    """
+    roots_cfg = config.get("claude_chats", {}).get("roots", [])
+    if not roots_cfg:
+        logger.info("No claude_chats roots configured — skipping chat scan")
+        return {"scanned": 0, "existing_paths": set()}
+
+    scanned = 0
+    existing_paths: set[str] = set()
+    visited_real_files: set[str] = set()
+
+    for entry in roots_cfg:
+        root = entry.get("path", "")
+        owner = entry.get("owner", "")
+        if user_filter and owner != user_filter:
+            continue
+        if not root or not os.path.isdir(root):
+            logger.warning("claude_chats root not accessible, skipping: %s", root)
+            continue
+
+        root_count = 0
+        logger.info("Scanning claude chats: %s  (owner=%s)", root, owner)
+
+        for dirpath, _dirnames, filenames in os.walk(root, topdown=True, followlinks=True):
+            for filename in filenames:
+                if not filename.endswith(".jsonl"):
+                    continue
+                filepath = os.path.join(dirpath, filename)
+                real_filepath = os.path.realpath(filepath)
+                if real_filepath in visited_real_files:
+                    continue
+                visited_real_files.add(real_filepath)
+                try:
+                    mtime = os.path.getmtime(filepath)
+                except OSError:
+                    continue
+                state_db.discover_or_update(filepath, owner, mtime)
+                existing_paths.add(filepath)
+                scanned += 1
+                root_count += 1
+
+        logger.info("  → %d session(s) found in %s", root_count, root)
+
+    return {"scanned": scanned, "existing_paths": existing_paths}

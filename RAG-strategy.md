@@ -1,21 +1,23 @@
 ---
-title: "HomeAI — RAG Strategy"
+title: "SoHoAI — RAG Strategy"
 date: 2026-03-30
-last_updated: 2026-04-22 (§8.3 multi-query+MMR evaluated — no-go verdict, permanently disabled; §8.4 contextual retrieval still frozen)
 created_by: Florian Otel
-last_updated_by: Claude Code (Claude Opus 4.7)
+updated_by: Claude Code (Claude Opus 4.7)
+updated_on: 2026-04-22
 context: >
-  HomeAI project (https://github.com/FlorianOtel/HomeAI);
+  SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
   NFS corpus survey, Qdrant payload schema, multi-tenancy (Google OAuth2),
   rag_engine/ package layout, fail-safe ingestion (crash recovery, retry,
   delete-before-insert idempotency), incremental sync (additions + deletions),
   Phase 2 implementation plan, ingestion runbook, advanced retrieval and
   generation patterns (rag_mode, system-prompt tool-use, multi-query + MMR,
-  contextual retrieval)
+  contextual retrieval). Updated 2026-04-22: §8.3 multi-query+MMR evaluated
+  — no-go verdict, permanently disabled; §8.4 contextual retrieval still frozen.
+---
 ---
 
-# RAG Strategy — HomeAI
+# RAG Strategy — SoHoAI
 
 ---
 
@@ -275,7 +277,7 @@ search result — this is exactly how provenance (source file path references) w
 | pgvector | Requires Postgres; project uses SQLite |
 
 **Qdrant has none of ChromaDB's issues**: collections are explicitly named, isolated on disk,
-no shared process state. HomeAI uses `qdrant-client` directly — no LangChain default-name trap.
+no shared process state. SoHoAI uses `qdrant-client` directly — no LangChain default-name trap.
 
 #### Collections — one per modality
 
@@ -340,7 +342,7 @@ NFS-incompatibility issue from silent risk to an explicit startup refusal.
 different format from the RocksDB-based server storage (`collections/`). Existing data
 ingested under the Python embedded client cannot be read by the server binary — a full
 re-ingest is required when switching modes. The NFS directory
-`/mnt/nfs/__Backups/HomeAI--databases/qdrant/` was cleared of old SQLite data after
+`/mnt/nfs/__Backups/SoHoAI--databases/qdrant/` was cleared of old SQLite data after
 the migration and is intentionally left empty.
 
 #### Storage architecture
@@ -356,14 +358,14 @@ Server 1 (192.168.1.93)
 
 NAS (NFS-mounted)
 │
-├── /mnt/nfs/__Backups/HomeAI--databases/qdrant-snapshots/
+├── /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/
 │     ├── documents/
 │     │     ├── documents-<id>-<timestamp>.snapshot      ← snapshot archive
 │     │     ├── documents-<id>-<timestamp>.snapshot.checksum
 │     │     └── ... (up to 3 kept)
 │     └── (future: images/, videos/ as Phase 4 collections are added)
 │
-└── /mnt/nfs/__Backups/HomeAI--databases/qdrant/
+└── /mnt/nfs/__Backups/SoHoAI--databases/qdrant/
       (intentionally empty — not used for anything)
 ```
 
@@ -389,7 +391,7 @@ The snapshot directory is configured in `scripts/qdrant/qdrant-config.yaml`:
 ```yaml
 storage:
   storage_path: /var/lib/qdrant/storage
-  snapshots_path: /mnt/nfs/__Backups/HomeAI--databases/qdrant-snapshots
+  snapshots_path: /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots
 ```
 
 #### Snapshot frequency and retention
@@ -432,12 +434,12 @@ If Server 1 is rebuilt or `/var/lib/qdrant/storage` is lost:
 sudo systemctl start qdrant
 
 # 2. Identify the latest snapshot on NFS
-ls -lt /mnt/nfs/__Backups/HomeAI--databases/qdrant-snapshots/documents/
+ls -lt /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/
 
 # 3. Restore via the API (Qdrant reads the file path directly)
 curl -X PUT "http://192.168.1.93:6333/collections/documents/snapshots/recover" \
   -H "Content-Type: application/json" \
-  -d '{"location": "file:///mnt/nfs/__Backups/HomeAI--databases/qdrant-snapshots/documents/<snapshot-name>.snapshot"}'
+  -d '{"location": "file:///mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/<snapshot-name>.snapshot"}'
 
 # 4. Verify
 curl -s http://192.168.1.93:6333/collections/documents | python3 -m json.tool
@@ -577,7 +579,7 @@ The MCP server at port 3001 already exposes these paths.
 
 ### 3.6 Multi-tenancy & authentication (confirmed 2026-04-16)
 
-HomeAI serves a family of users, each with private NFS storage and a shared directory.
+SoHoAI serves a family of users, each with private NFS storage and a shared directory.
 Authentication is via **Google OAuth2 (OIDC)** — all users are members of the same Google
 Family Group but have separate Google accounts.
 
@@ -729,7 +731,7 @@ rag_engine/
 
 ### 4.3 State Management (The Tracker)
 
-A dedicated SQLite database (`/mnt/nfs/__Backups/HomeAI--databases/sqlite/rag_state.db`) guarantees a fail-safe process that can pause and resume seamlessly.
+A dedicated SQLite database (`/mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db`) guarantees a fail-safe process that can pause and resume seamlessly.
 
 #### `ingestion_queue` table schema
 
@@ -864,7 +866,7 @@ from the project root.
 
 ```bash
 source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
-cd ~/Gin-AI/projects/HomeAI
+cd ~/Gin-AI/projects/SoHoAI
 ```
 
 #### Verify Ollama is running with bge-m3
@@ -891,7 +893,7 @@ If not running: `sudo systemctl start qdrant`
 #### Verify database directories exist on NAS
 
 ```bash
-ls /mnt/nfs/__Backups/HomeAI--databases/
+ls /mnt/nfs/__Backups/SoHoAI--databases/
 # Expected: qdrant-snapshots/  sqlite/  redis/
 ```
 
@@ -1165,7 +1167,7 @@ Remedy: lower `--batch` (e.g. `--batch 2`) and re-queue via `rag_sync_nfs.py`. B
 
 ```bash
 # Force-reset ignored files to pending (run before rag_sync_nfs.py)
-sqlite3 /mnt/nfs/__Backups/HomeAI--databases/sqlite/rag_state.db \
+sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
   "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL WHERE status='ignored' AND (skip_reason IS NULL OR skip_reason='')"
 python utils/rag_sync_nfs.py
 python utils/rag_ingest_daemon.py --batch 2
@@ -1204,7 +1206,7 @@ any of the failed attempts. No Qdrant cleanup is needed before retrying.
 To retry specific files after fixing the underlying issue:
 
 ```bash
-sqlite3 /mnt/nfs/__Backups/HomeAI--databases/sqlite/rag_state.db \
+sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
   "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL WHERE file_path='<path>'"
 python utils/rag_ingest_daemon.py --batch 2
 ```
@@ -1439,7 +1441,7 @@ one don't drift away from the others.
 """System prompts for the three RAG modes. Composed with the tool-use section (§8.2)
 at call time by build_system_prompt(mode, tool_spec)."""
 
-_BASE = "You are HomeAI's assistant. Be concise, accurate, and helpful."
+_BASE = "You are SoHoAI's assistant. Be concise, accurate, and helpful."
 
 _MODE_OFF = f"""{_BASE}
 
@@ -2186,7 +2188,7 @@ Anthropic's published benchmarks show 35% reduction in retrieval failures when
 combined with embedding search alone; 49% when combined with hybrid (embedding + BM25);
 67% with reranking on top.
 
-#### Why it is a strong fit for HomeAI
+#### Why it is a strong fit for SoHoAI
 
 The corpus is dominated by dense technical content (certifications, notebooks, work
 docs) where individual chunks are meaningless without the surrounding document: a
@@ -2273,7 +2275,7 @@ Nothing in this subsection should be implemented ahead of that gate.
 
 ### Context
 
-HomeAI originally architected with Gemma 4 E4B on local RTX 5070 as primary interactive inference, with Claude Sonnet as fallback-only. This reflected two assumptions circa 2024:
+SoHoAI originally architected with Gemma 4 E4B on local RTX 5070 as primary interactive inference, with Claude Sonnet as fallback-only. This reflected two assumptions circa 2024:
 
 1. Cloud API cost would be prohibitive for family-scale daily use (~50–100 interactive turns/day).
 2. Quality gap between 4B local model and frontier cloud was narrow enough that local-first was defensible.

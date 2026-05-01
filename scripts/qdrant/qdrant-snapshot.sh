@@ -6,7 +6,7 @@ set -euo pipefail
 
 QDRANT_URL="http://192.168.1.93:6333"
 COLLECTION="documents"
-SNAPSHOTS_NFS_DIR="/mnt/nfs/__Backups/HomeAI--databases/qdrant-snapshots/${COLLECTION}"
+SNAPSHOTS_NFS_DIR="/mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/${COLLECTION}"
 KEEP=3
 
 while [[ $# -gt 0 ]]; do

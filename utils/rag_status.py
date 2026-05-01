@@ -357,7 +357,7 @@ def main() -> None:
         config = yaml.safe_load(f)
 
     rag_cfg = config.get("rag", {})
-    db_base = config.get("db_base_path", "/mnt/nfs/__Backups/HomeAI--databases")
+    db_base = config.get("db_base_path", "/mnt/nfs/__Backups/SoHoAI--databases")
     db_path = f"{db_base}/sqlite/rag_state.db"
     state_db = StateDB(db_path)
 

@@ -153,17 +153,18 @@ class StateDB:
         # ignored (mtime unchanged), pending, processing, completed → no-op
         self._conn.commit()
 
-    def handle_deleted(self, existing_paths: set[str]) -> list[str]:
+    def find_deleted(self, existing_paths: set[str]) -> tuple[list[str], list[str]]:
         """
-        Remove rows for files that are no longer present in the scan.
+        Identify files no longer present in the scan without modifying SQLite.
 
-        Deletes ALL rows (any status) whose file_path is absent from
-        existing_paths. Returns only the paths that were 'completed' so
-        the caller can delete the corresponding Qdrant points (only
-        completed files have been ingested into Qdrant).
+        Returns:
+            (completed_gone, all_gone):
+              - completed_gone: status='completed' paths that are gone; these have
+                Qdrant points and must be cleaned up before purge_deleted() is called.
+              - all_gone: ALL gone paths (any status) that should be removed from SQLite.
 
-        Args:
-            existing_paths: Set of all file paths currently present on NFS.
+        Call purge_deleted(all_gone) after Qdrant cleanup so that a crash/kill between
+        the two calls leaves SQLite intact — the next sync retries automatically.
         """
         cur = self._conn.execute(
             "SELECT file_path, status FROM ingestion_queue"
@@ -171,15 +172,41 @@ class StateDB:
         all_rows = [(row["file_path"], row["status"]) for row in cur.fetchall()]
         gone = [(p, s) for p, s in all_rows if p not in existing_paths]
         if not gone:
-            return []
-        gone_paths = [p for p, _ in gone]
+            return [], []
+        all_gone = [p for p, _ in gone]
+        completed_gone = [p for p, s in gone if s == "completed"]
+        return completed_gone, all_gone
+
+    def purge_deleted(self, paths: list[str]) -> None:
+        """
+        Remove the given paths from SQLite. Call only after Qdrant cleanup is complete.
+
+        Separating this from find_deleted() ensures that a kill/crash during Qdrant
+        deletion leaves the SQLite rows intact; the next scan retries automatically.
+        """
+        if not paths:
+            return
         self._conn.executemany(
             "DELETE FROM ingestion_queue WHERE file_path = ?",
-            [(p,) for p in gone_paths],
+            [(p,) for p in paths],
         )
         self._conn.commit()
-        logger.info("Removed %d deleted file(s) from queue", len(gone_paths))
-        return [p for p, s in gone if s == "completed"]
+        logger.info("Removed %d deleted file(s) from queue", len(paths))
+
+    def handle_deleted(self, existing_paths: set[str]) -> list[str]:
+        """
+        Remove rows for files that are no longer present in the scan.
+
+        Deletes ALL rows (any status) whose file_path is absent from
+        existing_paths. Returns only the paths that were 'completed' so
+        the caller can delete the corresponding Qdrant points.
+
+        Deprecated: prefer find_deleted() + purge_deleted() so Qdrant cleanup
+        happens between the two calls (crash-safe ordering).
+        """
+        completed_gone, all_gone = self.find_deleted(existing_paths)
+        self.purge_deleted(all_gone)
+        return completed_gone
 
     # ------------------------------------------------------------------
     # Worker state transitions

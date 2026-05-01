@@ -1,5 +1,5 @@
 # =============================================================================
-# HomeAI Configuration
+# SoHoAI Configuration
 # =============================================================================
 
 # -- Network ------------------------------------------------------------------
@@ -7,12 +7,12 @@ server1_ip: &server1_ip "192.168.1.93"
 server2_ip: &server2_ip "192.168.1.95"
 
 # -- Storage (NAS mount point) ------------------------------------------------
-nas_mount: "/mnt/nfs/Florian/Gin-AI/projects/HomeAI"
+nas_mount: "/mnt/nfs/Florian/Gin-AI/projects/SoHoAI"
 # Change db_base_path to relocate all databases in one place.
 # Python derives: {db_base_path}/sqlite/chats.db, {db_base_path}/sqlite/rag_state.db, {db_base_path}/qdrant/, {db_base_path}/redis/
 # Note: redis.dir below must be updated manually if db_base_path changes (not auto-derived in Python).
-db_base_path: "/mnt/nfs/__Backups/HomeAI--databases"
-rl_export_dir: "/mnt/nfs/Florian/Gin-AI/projects/HomeAI/rl-data"
+db_base_path: "/mnt/nfs/__Backups/SoHoAI--databases"
+rl_export_dir: "/mnt/nfs/Florian/Gin-AI/projects/SoHoAI/rl-data"
 
 # -- Redis (conversation short-term memory) ------------------------------------
 redis:
@@ -21,7 +21,7 @@ redis:
   db: 0
   # Persist to NAS for reboot survival
   appendonly: true
-  dir: "/mnt/nfs/__Backups/HomeAI--databases/redis"
+  dir: "/mnt/nfs/__Backups/SoHoAI--databases/redis"
   default_ttl_seconds: 86400  # 24 hours
 
 # -- LiteLLM Model Routing ----------------------------------------------------
@@ -79,7 +79,7 @@ rag:
   qdrant_collection: "documents"
   qdrant_url: "http://192.168.1.93:6333"         # Qdrant on Server 1 (local NVMe)
   # Active Qdrant storage: /var/lib/qdrant/storage (local NVMe, Server 1)
-  # Snapshots (DR):        /mnt/nfs/__Backups/HomeAI--databases/qdrant-snapshots/
+  # Snapshots (DR):        /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/
   default_mode: "off"                            # off | on | only — server default for rag_mode (opt-in)
 
   # -- Tool-use loop (§8.2) ---------------------------------------------------
@@ -105,11 +105,14 @@ rag:
       - .pptx
       - .docx
       - .md
+      - .sh
       - .txt
       - .csv
       - .yaml
       - .yml
       - .ipynb
+      - .html
+      - .jsonl # Claude chats 
     # Directory names/paths that os.walk will not descend into.
     # All entries MUST have a trailing slash. Single-component entries (e.g. "Library/")
     # match any directory with that exact name at any depth. Multi-component entries
@@ -157,6 +160,12 @@ users:
 shared:
   owner: "la-familia"
   nfs_roots: ["/mnt/nfs/La-Familia"]
+
+# -- Claude Code session ingestion -----------------------------------------------
+claude_chats:
+  roots:
+    - path: /home/florian/.claude/projects
+      owner: florian
 
 # -- llama-server native API (KV cache slot management) -----------------------
 llama_server:

@@ -1,18 +1,21 @@
+---
+title: "NotebookLM Upload Issues — Findings & Workarounds"
+date: 2026-04-15
+created_by: Claude Code (Claude Sonnet 4.6)
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_on: 2026-04-24
+context: >
+  NotebookLM upload issues and workarounds;
+  End-of-session sync of SoHoAI codebase to NotebookLM notebook;
+  Encoding fixes, deletion loop bugs, split mode retirement;
+  Files: snapshot_codebase.py, sync_to_notebook.py, notebooklm_auth.py.
+---
+
 # NotebookLM Upload Issues — Findings & Workarounds
 
-**Author**: Claude (claude-sonnet-4-6)
-**Created**: 2026-04-15
-**Updated**: 2026-04-15 (session 2 — encoding fix, deletion loop bugs; session 3 — split mode retired)
-**Context**: End-of-session sync of HomeAI codebase to NotebookLM notebook
-  `2f18268d-5e5b-4f40-8eaf-2909bbc945db`
-**Files referenced**:
-- `utils/snapshot_codebase.py`
-- `utils/sync_to_notebook.py`
-- `utils/notebooklm_auth.py`
-
-> **Current state (session 3):** Split mode and the `.txt` workaround have been
-> retired. `sync_to_notebook.py` uploads a single `codebase_snapshot.md` (all
-> 15 files, ~122 KB) plus three separate doc Markdown files. The code paths below
+**Current state (session 3):** Split mode and the `.txt` workaround have been
+retired. `sync_to_notebook.py` uploads a single `codebase_snapshot.md` (all
+15 files, ~122 KB) plus three separate doc Markdown files. The code paths below
 > marked ~~strikethrough~~ are historical only — they no longer exist in the codebase.
 
 ---

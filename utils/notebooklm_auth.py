@@ -38,7 +38,7 @@ NOTEBOOK_URL = "https://notebooklm.google.com/notebook/2f18268d-5e5b-4f40-8eaf-2
 NOTEBOOKLM_HOME = "https://notebooklm.google.com"
 
 # Session stored on NAS alongside the rest of the project
-SESSION_FILE = Path("/mnt/nfs/Florian/Gin-AI/projects/HomeAI/utils/notebooklm_session.json")
+SESSION_FILE = Path("/mnt/nfs/Florian/Gin-AI/projects/SoHoAI/utils/notebooklm_session.json")
 
 # How long to wait for the user to complete Google login (seconds)
 LOGIN_TIMEOUT_S = 180

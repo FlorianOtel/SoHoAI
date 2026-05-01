@@ -1,4 +1,18 @@
-# Troubleshooting Guide — HomeAI RAG Engine
+---
+title: "SoHoAI — Troubleshooting Guide"
+date: 2026-04-22
+created_by: Claude Code (Claude Sonnet 4.6)
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_on: 2026-04-30
+context: >
+  SoHoAI RAG pipeline troubleshooting guide;
+  Qdrant HTTP timeouts during ingestion, embedding failure modes,
+  large PDF parsing, search latency under concurrent ingestion,
+  ignored file retry procedures, clean restart procedures.
+  Project rename (HomeAI → SoHoAI) database migration.
+---
+
+# Troubleshooting Guide — SoHoAI RAG Engine
 
 ## Qdrant HTTP Timeouts During Ingestion
 
@@ -81,3 +95,91 @@ If timeouts persist after applying this fix:
 | Date | Issue | Fix | Status |
 |------|-------|-----|--------|
 | 2026-04-22 | HTTP read timeout (5s) during 70K-point ingestion | Increase timeout to 60s | ✅ Implemented |
+
+---
+
+## All Files Re-queued for Ingestion After Project Rename
+
+### Symptom
+Running `python utils/rag_sync_nfs.py` shows all files as `pending` even though they were
+previously ingested. Every subsequent daemon run re-embeds and re-upserts files that are
+already present in Qdrant, wasting hours of compute.
+
+### Root Cause
+Renaming the project changed `db_base_path` in `config.yaml`:
+
+```diff
+-db_base_path: "/mnt/nfs/__Backups/HomeAI--databases"
++db_base_path: "/mnt/nfs/__Backups/SoHoAI--databases"
+```
+
+`StateDB.__init__` calls `sqlite3.connect(new_path)`, which **silently creates a new empty
+database** when the path does not exist. All previously completed rows vanish — the next
+`rag_sync_nfs.py` run inserts every scanned file as `pending`. Qdrant is unaffected (active
+storage is on local NVMe and does not depend on `db_base_path`).
+
+The same issue affects `chats.db` (SQLite chat history) and the Redis AOF directory, though
+Redis creates its directory automatically.
+
+### Fix
+Use SQLite's online backup API to copy each database from the old path to the new one.
+The backup API correctly merges any uncommitted WAL data.
+
+```python
+import sqlite3, pathlib
+
+for name in ["rag_state.db", "chats.db"]:
+    src_path = f"/mnt/nfs/__Backups/HomeAI--databases/sqlite/{name}"
+    dst_path = f"/mnt/nfs/__Backups/SoHoAI--databases/sqlite/{name}"
+    pathlib.Path(dst_path).parent.mkdir(parents=True, exist_ok=True)
+    src = sqlite3.connect(src_path)
+    dst = sqlite3.connect(dst_path)
+    src.backup(dst)
+    dst.close(); src.close()
+    print(f"Migrated {name}")
+```
+
+Also create the missing subdirectories and copy Qdrant snapshots:
+
+```bash
+# Create directory structure
+mkdir -p /mnt/nfs/__Backups/SoHoAI--databases/{qdrant,qdrant-snapshots/documents,qdrant-snapshots/tmp/upload,redis}
+
+# Copy Qdrant DR snapshots (NFS-resident, not the active NVMe storage)
+cp --preserve /mnt/nfs/__Backups/HomeAI--databases/qdrant-snapshots/documents/* \
+              /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/
+
+# Update cron job (snapshot script path)
+crontab -e   # change HomeAI → SoHoAI in the qdrant-snapshot.sh path
+
+# Update deployed systemd unit and reload (no restart needed if configs are identical)
+sudo cp /mnt/nfs/Florian/Gin-AI/projects/SoHoAI/scripts/qdrant/qdrant.service \
+        /etc/systemd/system/qdrant.service
+sudo systemctl daemon-reload
+```
+
+### Verification
+
+```bash
+# Confirm row counts match the old database
+sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
+  "SELECT status, COUNT(*) FROM ingestion_queue GROUP BY status;"
+# Expected: completed|<N>  (should match the old DB count)
+
+# Confirm no re-queuing — pending should be 0 (or only truly new files)
+python utils/rag_sync_nfs.py
+python utils/rag_status.py
+```
+
+### Prevention
+When renaming the project or changing `db_base_path`:
+1. Update the config first (so the new path is known).
+2. Migrate the SQLite databases **before** running `rag_sync_nfs.py` for the first time.
+3. Also update cron and the deployed systemd unit — they are not managed by git and reference
+   the project directory path explicitly.
+
+### Historical Issues Log
+| Date | Issue | Fix | Status |
+|------|-------|-----|--------|
+| 2026-04-22 | HTTP read timeout (5s) during 70K-point ingestion | Increase timeout to 60s | ✅ Implemented |
+| 2026-04-30 | All files re-queued after HomeAI → SoHoAI rename (empty new `rag_state.db`) | SQLite backup copy + directory migration | ✅ Fixed |

@@ -1,5 +1,5 @@
 """
-HomeAI — API Gateway & Orchestrator
+SoHoAI — API Gateway & Orchestrator
 
 This is the central nervous system running on Server 1.
 It wires together:
@@ -46,7 +46,7 @@ from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchVa
 from rag_engine import search_rag, multi_query_search
 from rag_engine.collection import DOCUMENTS_COLLECTION, ensure_collection, get_client
 from rag_engine.ingest import ingest_file
-from rag_engine.scanner import scan_nfs_roots
+from rag_engine.scanner import scan_nfs_roots, scan_claude_chats
 from rag_engine.schema import FIELD_SOURCE_PATH
 from rag_engine.state import StateDB
 from rag_engine.tool_use import build_tool_spec, format_tool_result, parse_tool_call
@@ -61,13 +61,13 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
-logger = logging.getLogger("HomeAI")
+logger = logging.getLogger("SoHoAI")
 
 # -- Load config ---------------------------------------------------------------
 with open("config.yaml") as f:
     config = yaml.safe_load(f)
 
-_db_base = config.get("db_base_path", "/mnt/nfs/__Backups/HomeAI--databases")
+_db_base = config.get("db_base_path", "/mnt/nfs/__Backups/SoHoAI--databases")
 
 
 # -- App lifecycle -------------------------------------------------------------
@@ -75,7 +75,7 @@ _db_base = config.get("db_base_path", "/mnt/nfs/__Backups/HomeAI--databases")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown hooks."""
-    logger.info("Starting HomeAI orchestrator...")
+    logger.info("Starting SoHoAI orchestrator...")
 
     chat_cfg = config.get("chat", {})
     llama_cfg = config.get("llama_server")
@@ -177,7 +177,7 @@ async def lifespan(app: FastAPI):
 # -- FastAPI app ---------------------------------------------------------------
 
 app = FastAPI(
-    title="HomeAI",
+    title="SoHoAI",
     description="Distributed two-server AI orchestrator",
     version="0.1.0",
     lifespan=lifespan,
@@ -469,7 +469,7 @@ async def save_markdown_to_disk(chat_id: str):
     if not md:
         raise HTTPException(404, "Chat not found")
 
-    export_dir = Path(config.get("nas_mount", "/mnt/nfs/Florian/Gin-AI/projects/HomeAI")) / "exports"
+    export_dir = Path(config.get("nas_mount", "/mnt/nfs/Florian/Gin-AI/projects/SoHoAI")) / "exports"
     export_dir.mkdir(parents=True, exist_ok=True)
 
     chat = app.state.store.get_chat(chat_id)
@@ -533,15 +533,25 @@ async def _ingest_worker(
 
 @app.post("/v1/rag/ingest/sync")
 async def rag_ingest_sync(user: str | None = Query(None)):
-    """Scan configured NFS roots and populate the ingestion queue."""
-    result = await asyncio.to_thread(
+    """Scan configured NFS roots and claude chat directories; populate the ingestion queue."""
+    result_nfs = await asyncio.to_thread(
         scan_nfs_roots,
         app.state.state_db,
         config,
         user,
     )
+    result_chats = await asyncio.to_thread(
+        scan_claude_chats,
+        app.state.state_db,
+        config,
+        user,
+    )
 
-    deleted_paths = result.pop("deleted_paths", [])
+    all_existing = result_nfs["existing_paths"] | result_chats["existing_paths"]
+    deleted_paths, stale_paths = app.state.state_db.find_deleted(all_existing)
+
+    # Qdrant cleanup BEFORE SQLite deletion — if killed mid-loop, the SQLite rows
+    # survive intact and the next sync retries automatically (no orphaned Qdrant points).
     if deleted_paths and app.state.qdrant_client is not None:
         for path in deleted_paths:
             app.state.qdrant_client.delete(
@@ -558,9 +568,16 @@ async def rag_ingest_sync(user: str | None = Query(None)):
                 ),
             )
         logger.info("Deleted Qdrant points for %d removed file(s)", len(deleted_paths))
+    if stale_paths:
+        app.state.state_db.purge_deleted(stale_paths)
 
     counts = app.state.state_db.get_counts()
-    return {**result, "queue": counts}
+    return {
+        "nfs_scanned": result_nfs["scanned"],
+        "chats_scanned": result_chats["scanned"],
+        "deleted": len(stale_paths),
+        "queue": counts,
+    }
 
 
 @app.post("/v1/rag/ingest/start")
@@ -672,7 +689,7 @@ async def model_health():
 #  Cline-facing LiteLLM-compatible pass-through (Option 2, 2026-04-22)
 #
 #  These endpoints let external clients (Cline VSCode plugin, and any other
-#  OpenAI-compatible client) hit HomeAI's LiteLLM Router directly,
+#  OpenAI-compatible client) hit SoHoAI's LiteLLM Router directly,
 #  bypassing the orchestrator's stateful machinery (Redis, SQLite, KV cache,
 #  RAG tool-use loop, rolling summarization). Cline manages its own history.
 #
@@ -762,7 +779,7 @@ async def proxy_models():
     return {
         "object": "list",
         "data": [
-            {"id": name, "object": "model", "created": created, "owned_by": "homeai"}
+            {"id": name, "object": "model", "created": created, "owned_by": "sohoai"}
             for name in _CLINE_EXPOSED_MODELS
         ],
     }
@@ -798,7 +815,7 @@ async def proxy_chat_completions(req: Request):
     reported_model = public_model
 
     # force_cloud/max_tokens and any other OpenAI-standard params flow through
-    # via **body into router.complete → LiteLLM. Drop anything HomeAI-internal.
+    # via **body into router.complete → LiteLLM. Drop anything SoHoAI-internal.
     body.pop("force_cloud", None)
     body.pop("chat_id", None)
     body.pop("user_id", None)

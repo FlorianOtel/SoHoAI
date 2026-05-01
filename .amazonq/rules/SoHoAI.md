@@ -1,6 +1,6 @@
-# HomeAI
+# SoHoAI
 
-Project directory: `/home/florian/Gin-AI/projects/HomeAI`
+Project directory: `/home/florian/Gin-AI/projects/SoHoAI`
 
 Distributed two-server AI orchestrator with:
 - FastAPI gateway (Server 1: 192.168.1.93)
@@ -16,7 +16,7 @@ RAG package: rag_engine/ (schema, collection, embeddings, state, scanner, ingest
 RAG CLI: utils/rag_sync_nfs.py, rag_ingest_daemon.py, rag_status.py, rag_search_cli.py, rag_reset.py
 
 Databases (SQLite under db_base_path in config.yaml; Qdrant active storage is local NVMe):
-- /mnt/nfs/__Backups/HomeAI--databases/sqlite/chats.db
-- /mnt/nfs/__Backups/HomeAI--databases/sqlite/rag_state.db
-- /mnt/nfs/__Backups/HomeAI--databases/qdrant-snapshots/ (Qdrant snapshots on NAS)
+- /mnt/nfs/__Backups/SoHoAI--databases/sqlite/chats.db
+- /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db
+- /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/ (Qdrant snapshots on NAS)
 - /var/lib/qdrant/storage (Qdrant active storage — local NVMe, Server 1)

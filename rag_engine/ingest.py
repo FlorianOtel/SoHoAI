@@ -50,6 +50,8 @@ from .schema import (
     FIELD_OWNER,
     FIELD_PAGE,
     FIELD_PARENT_TEXT,
+    FIELD_PROJECT,
+    FIELD_SESSION_ID,
     FIELD_SOURCE_PATH,
     FIELD_TAG,
     FIELD_TEXT,
@@ -132,6 +134,118 @@ def _parse_ipynb(path: Path) -> str:
 
 # OLE2 magic bytes — Composite Document File V2 (binary .ppt format)
 _OLE2_MAGIC = b"\xD0\xCF\x11\xE0"
+
+
+def _parse_claude_chat(path: Path) -> tuple[str, dict]:
+    """
+    Extract user/assistant text turns from a Claude Code session JSONL.
+
+    Returns (text, metadata) where metadata contains session_id and project
+    for storage as Qdrant payload fields.
+
+    Skips: meta entries, tool_use blocks, tool_result blocks, thinking blocks,
+    XML-tagged command strings, and file-history-snapshot entries.
+    """
+    import json as _json
+
+    session_id = ""
+    cwd = ""
+    timestamp = ""
+    model = ""
+    git_branch = ""
+    version = ""
+
+    turns: list[str] = []
+
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return "", {}
+
+    for raw_line in lines:
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            entry = _json.loads(raw_line)
+        except _json.JSONDecodeError:
+            continue
+
+        entry_type = entry.get("type", "")
+
+        # Collect session metadata from any entry
+        if not session_id:
+            session_id = entry.get("sessionId", "")
+        if not cwd:
+            cwd = entry.get("cwd", "")
+        if not git_branch:
+            git_branch = entry.get("gitBranch", "")
+        if not version:
+            version = entry.get("version", "")
+
+        if entry_type == "user":
+            if entry.get("isMeta"):
+                continue
+            msg = entry.get("message", {})
+            content = msg.get("content", "")
+            text = ""
+            if isinstance(content, str):
+                c = content.strip()
+                if c and not c.startswith("<"):
+                    text = c
+            elif isinstance(content, list):
+                parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        t = block.get("text", "").strip()
+                        if t:
+                            parts.append(t)
+                text = "\n".join(parts)
+            if text:
+                if not timestamp:
+                    timestamp = entry.get("timestamp", "")
+                turns.append(f"**User**: {text}")
+
+        elif entry_type == "assistant":
+            msg = entry.get("message", {})
+            if not model:
+                model = msg.get("model", "")
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        t = block.get("text", "").strip()
+                        if t:
+                            parts.append(t)
+                text = "\n".join(parts)
+                if text:
+                    turns.append(f"**Claude**: {text}")
+
+    if not turns:
+        return "", {}
+
+    project = Path(cwd).name if cwd else "unknown"
+
+    header = (
+        f"# Claude Code Session\n\n"
+        f"Session: {session_id}\n"
+        f"Project: {project}  ({cwd})\n"
+        f"Date: {timestamp}\n"
+        f"Model: {model}\n"
+        f"Branch: {git_branch}\n"
+        f"Version: {version}\n\n"
+        f"---\n\n"
+    )
+
+    body = "\n\n".join(turns)
+    text = header + body
+
+    metadata = {
+        FIELD_SESSION_ID: session_id,
+        FIELD_PROJECT: project,
+    }
+    return text, metadata
 
 
 def _parse_pptx(path: Path) -> str:
@@ -221,6 +335,9 @@ def _parse_to_text(file_path: str, file_type: str) -> str:
     path = Path(file_path)
     if file_type == "ipynb":
         return _parse_ipynb(path)
+    if file_type == "jsonl":
+        text, _ = _parse_claude_chat(path)
+        return text
     if file_type not in _DOCLING_TYPES:
         return path.read_text(encoding="utf-8", errors="replace")
 
@@ -347,8 +464,8 @@ async def ingest_file(
     model      = rag_cfg.get("embedding_model", "bge-m3")
     ollama_url = rag_cfg.get("ollama_url", "http://192.168.1.93:11434/api/embeddings")
 
-    file_name = Path(file_path).name
-    file_type = Path(file_path).suffix.lstrip(".").lower()
+    file_name     = Path(file_path).name
+    raw_file_type = Path(file_path).suffix.lstrip(".").lower()
 
     try:
         # ------------------------------------------------------------------
@@ -380,11 +497,19 @@ async def ingest_file(
         # ------------------------------------------------------------------
         # Step 2: parse document
         #
-        # _parse_to_text is blocking (docling can take minutes on large PDFs).
+        # Claude Code session files (.jsonl) are parsed directly to extract
+        # user/assistant turns and cross-reference metadata (session_id, project).
+        # All other formats go through _parse_to_text (docling / ipynb / utf-8).
         # asyncio.to_thread keeps the event loop responsive for other tasks.
         # ------------------------------------------------------------------
         state_db.set_progress(file_path, "parsing")
-        text = await asyncio.to_thread(_parse_to_text, file_path, file_type)
+        if raw_file_type == "jsonl":
+            text, chat_meta = await asyncio.to_thread(_parse_claude_chat, Path(file_path))
+            file_type = "claude_chat"
+        else:
+            text = await asyncio.to_thread(_parse_to_text, file_path, raw_file_type)
+            file_type = raw_file_type
+            chat_meta = {}
 
         if not text.strip():
             logger.warning("Empty document, skipping: %s", file_path)
@@ -443,6 +568,7 @@ async def ingest_file(
                     FIELD_PAGE:        0,   # page-level tracking: future enhancement
                     FIELD_CHUNK_INDEX: chunk_idx,
                     FIELD_TAG:         tag,
+                    **chat_meta,
                 },
             )
             for chunk_idx, ((child_text, parent_text), vector) in enumerate(zip(pairs, vectors))

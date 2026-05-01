@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # --- Global State Management ----------------------------------------------------
 
-app = FastAPI(title="HomeAI RAG Orchestrator")
+app = FastAPI(title="SoHoAI RAG Orchestrator")
 app.state = {}
 
 # Cache for conversation history (Redis)
@@ -296,4 +296,4 @@ async def stop_ingestion_daemon():
 # Health check endpoint
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "service": "HomeAI"}
+    return {"status": "ok", "service": "SoHoAI"}

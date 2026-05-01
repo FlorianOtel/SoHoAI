@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=florian
 WorkingDirectory=/var/lib/qdrant
-ExecStart=/usr/local/bin/qdrant --config-path /mnt/nfs/Florian/Gin-AI/projects/HomeAI/scripts/qdrant/qdrant-config.yaml
+ExecStart=/usr/local/bin/qdrant --config-path /mnt/nfs/Florian/Gin-AI/projects/SoHoAI/scripts/qdrant/qdrant-config.yaml
 Restart=on-failure
 RestartSec=5
 

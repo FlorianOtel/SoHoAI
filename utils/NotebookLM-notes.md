@@ -1,3 +1,15 @@
+---
+title: "NotebookLM Playwright Automation — Operational Notes"
+date: 2026-04-15
+created_by: Claude Code (Claude Sonnet 4.6)
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_on: 2026-04-24
+context: >
+  NotebookLM Playwright automation debugging notes;
+  Recurring issues encountered while automating NotebookLM source uploads
+  via Playwright (headless Chrome), spinner/loading issues, indexing problems.
+---
+
 # NotebookLM Playwright Automation — Operational Notes
 
 Debugging log for recurring issues encountered while automating NotebookLM

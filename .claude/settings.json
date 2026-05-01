@@ -2,7 +2,7 @@
   "permissions": {
     "allow": [
       "Bash(claude --resume 5bf9752b-f631-42ec-a796-7c45c888bccf)",
-      "Read(//mnt/nfs/Florian/Gin-AI/.claude/projects/-mnt-nfs-Florian-Gin-AI-projects-HomeAI/**)",
+      "Read(//mnt/nfs/Florian/Gin-AI/.claude/projects/-mnt-nfs-Florian-Gin-AI-projects-SoHoAI/**)",
       "Read(//mnt/nfs/Florian/Gin-AI/chats/**)",
       "Read(//mnt/nfs/Florian/certifications--training/__private/Gin-AI/Production AI Agents with LangChain + LangGraph--Udemy/**)"
     ]

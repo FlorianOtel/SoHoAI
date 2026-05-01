@@ -26,7 +26,7 @@ from schemas import ChatExport, ChatSummary, Message, Role
 class ChatStore:
     """SQLite-backed persistent chat history."""
 
-    def __init__(self, db_path: str = "/mnt/nfs/__Backups/HomeAI--databases/sqlite/chats.db"):
+    def __init__(self, db_path: str = "/mnt/nfs/__Backups/SoHoAI--databases/sqlite/chats.db"):
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
