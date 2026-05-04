@@ -3,7 +3,7 @@ title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 20260501-150624
+updated_at: 2026-05-04--18-12
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -14,6 +14,111 @@ context: >
 ---
 
 # SoHoAI RAG Pipeline — Troubleshooting
+
+---
+
+## Session — 2026-05-04
+
+### Ollama bge-m3 CUDA OOM + broken rag_sync_nfs import
+
+#### Symptoms
+
+Two separate bugs discovered during a RAG ingestion run on Server 2 (192.168.1.95):
+
+1. `rag_sync_nfs.py` crashed immediately with `ImportError` on every run — deleted files were
+   never cleaned from Qdrant or SQLite, and failed rows were never re-queued.
+2. Ollama embedding calls returned HTTP 500 for all chunks, crashing the ingest daemon.
+
+#### Bug 1 — broken import in `rag_sync_nfs.py`
+
+**Root cause:** `rag_sync_nfs.py` imported `re_queue_failed` as a module-level name, but it only
+exists as a method on `StateDB`. The module-level wrapper was added in commit `b8e1f43`
+(2026-04-30) then silently removed during the bulk project rename in commit `a3f2c91`
+(2026-05-04), leaving the import broken.
+
+Effect: `rag_sync_nfs.py` was a no-op since 2026-05-04. The shell command
+`python utils/rag_sync_nfs.py ; python utils/rag_ingest_daemon.py ...` ran the daemon
+unconditionally via `;` even though sync had crashed, so ghost files (deleted from disk but
+still in the queue) were retried on every daemon run.
+
+**Fix:** Remove `re_queue_failed` from the import; call `state_db.re_queue_failed()` directly.
+
+```python
+# Before (broken)
+from rag_engine.state import StateDB, re_queue_failed
+...
+n_requeued = re_queue_failed()
+
+# After (fixed)
+from rag_engine.state import StateDB
+...
+n_requeued = state_db.re_queue_failed()
+```
+
+Committed in `7d4a1b9`.
+
+#### Bug 2 — Ollama bge-m3 CUDA OOM (HTTP 500)
+
+**Root cause:** The Ollama runner crashed with `cudaMalloc failed: out of memory` when trying
+to allocate the compute graph buffer. The failure sequence from the journal:
+
+```
+gpu memory available="569.2 MiB" free="1.3 GiB"
+CUDA0 model buffer size = 456.96 MiB          ← weights load OK
+allocating 1170.00 MiB on device 0: cudaMalloc failed: out of memory
+graph_reserve: failed to allocate compute buffers
+llama runner terminated: exit status 2
+HTTP 500
+```
+
+Ollama automatically sets `batch_size = context_length` for embedding models. With the default
+`OLLAMA_CONTEXT_LENGTH=0` (→ 4096), the compute graph required **1170 MiB**. When
+llama-server's KV cache fills under load (Gemma 4 Q8_0, 2×110024 ctx ≈ 9.3 GiB VRAM), the
+remaining free VRAM drops below 1.3 GiB — not enough for weights (457 MiB) + compute buffer
+(1170 MiB) = 1627 MiB.
+
+The model reloads successfully when llama-server slots are idle (2.4 GiB free), but fails
+under concurrent load — making this an intermittent, load-dependent failure.
+
+**Fix:** Set `OLLAMA_CONTEXT_LENGTH=768` in `/etc/systemd/system/ollama.service`.
+RAG child chunks are ~250 tokens; 768 is more than sufficient with headroom above the
+512-token flat-chunk ceiling.
+
+```
+# /etc/systemd/system/ollama.service
+Environment="OLLAMA_CONTEXT_LENGTH=768"
+```
+
+Effect on VRAM (measured before/after):
+
+| Component | ctx=4096 (before) | ctx=768 (after) |
+|---|---|---|
+| batch_size | 4096 | 768 |
+| kv cache | 19 MiB | 4.5 MiB |
+| compute buffer | **1168 MiB** | **53 MiB** |
+| **Total VRAM** | **~1.75 GiB** | **~635 MiB** |
+
+The compute buffer dropped 22× from 1168 MiB to 53 MiB. bge-m3 now fits reliably alongside
+llama-server even with both KV slots active.
+
+**Immediate workaround applied in parallel:** `config.yaml` `ollama_url` reverted to
+Server 1 CPU embed (`192.168.1.93:11434`) while Server 2 was being fixed. Can be
+pointed back at Server 2 (`192.168.1.95:11434`) for GPU-accelerated embedding now that
+the context cap is in place.
+
+**Verification:**
+```bash
+# Confirm context_length=768 in the loaded model
+curl -s http://localhost:11434/api/ps | python3 -m json.tool
+# → "context_length": 768, "size_vram" > 0
+
+# Confirm embeddings work
+curl -s http://localhost:11434/api/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"bge-m3","prompt":"test"}' | \
+  python3 -c "import json,sys; d=json.load(sys.stdin); print(f'OK — {len(d[\"embedding\"])} dims')"
+# → OK — 1024 dims
+```
 
 ---
 
