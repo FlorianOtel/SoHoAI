@@ -343,20 +343,28 @@ retrieval + chat injection verified via `utils/rag_smoke_test.py`.
 
 #### Phase 2 design decisions (confirmed 2026-03-30)
 
-**Embedding model — bge-m3 via Ollama (updated 2026-04-17)**
-`bge-m3` (1024-dim, 570M params, ~1.2GB) served by Ollama on Server 1 CPU.
+**Embedding model — bge-m3 via Ollama (updated 2026-05-04)**
+`bge-m3` (1024-dim, 570M params, ~1.2GB) served by Ollama on **Server 2 GPU** (RTX 5070).
+Active config: `ollama_url: http://192.168.1.95:11434/api/embeddings`
+
+GPU embed is stable since 2026-05-04 after setting `OLLAMA_CONTEXT_LENGTH=768` in the Ollama
+systemd service on Server 2. This caps the embedding compute buffer at 53 MiB (down from 1168 MiB
+at the default ctx=4096), reducing bge-m3's total VRAM footprint from ~1.75 GiB to ~635 MiB.
+bge-m3 now coexists reliably with llama-server even when both KV slots are active.
+RAG child chunks are ~250 tokens; flat chunks cap at 512 tokens — 768 ctx is sufficient with headroom.
+Server 1 CPU (`192.168.1.93:11434`) remains the fallback if Server 2 is unavailable.
+
 Chosen over `mxbai-embed-large` (512 BERT-token hard limit caused constant Ollama 500 errors
 for technical content — tiktoken BPE undercounts vs BERT WordPiece tokenizer).
 Chosen over `qwen3-embedding:8b` (4.7GB, best MTEB): Server 2 VRAM conflict —
-llama-server uses 11.6/12GB, leaving no room; Server 1 CPU inference at 8B params
-would add 6–10s to every RAG chat query. bge-m3 is the practical optimum:
-top MTEB quality, 8192-token context, 650ms/chunk on CPU, fits alongside all workloads.
+llama-server uses ~9.3 GB; qwen3 Q4 ~5 GB = 14.3 GB > 12 GB RTX 5070. bge-m3 is the practical
+optimum: top MTEB quality, 8192-token context, ~10–20ms/chunk on GPU.
 
 Server 2 RTX 5070: model is Gemma 4 E4B Q8_0 (7.52B params, 7.5 GB file → ~4,788 MiB VRAM).
 KV cache: new llama.cpp SWA-aware implementation uses 4 global KV layers (110024-ctx, f16: ~1,719 MiB) +
 20 SWA layers (512-window, f16: 40 MiB) ≈ 1,760 MiB per slot. 2 slots × 1,760 ≈ 3,520 MiB KV.
 Total VRAM: ~9,321 MiB / 12,227 MiB (~2,906 MiB headroom) — estimated from measured 131072-ctx baseline.
-No reliable embedding model fits alongside llama-server without VRAM risk under load.
+With `OLLAMA_CONTEXT_LENGTH=768`, bge-m3 needs ~635 MiB total — fits in the ~2,906 MiB headroom.
 
 **Vector DB — Qdrant confirmed**
 Qdrant's payload system stores arbitrary JSON per vector point and returns it with every
@@ -667,7 +675,7 @@ Benchmark methodology: 3 runs averaged per scenario, `/completion` native endpoi
 - **Redis for short-term memory** — fast, TTL-based, LLM context builder reads it every request (server-managed only)
 - **SQLite for long-term** — single file on NAS, zero ops overhead, plenty fast for ~10K chats (server-managed only)
 - **Qdrant for vectors** — persistent local mode (on NAS), gRPC + REST API; `qdrant-client` Python dep
-- **Embeddings via Ollama on Server 1** — `bge-m3` (1024-dim, 8192-tok context) served by Ollama; Server 2 GPU uses ~9 GB with 2 parallel slots at full context with Gemma 4 (leaving ~3.2 GB headroom, not enough for a reliable embedding model under load); `sentence-transformers` removed. `embed_batch()` concurrency controlled by `--batch` in `rag_ingest_daemon.py` (default 5, `_BATCH_CONCURRENCY`); lower `--batch` to reduce `httpx.ReadTimeout` errors, raise it for more throughput. Ollama serializes model computation — when ingest daemon runs, search queries queue behind it and can wait 28–30s; `embed_text()` timeout is 120s to survive this. `embed_batch()` fires a `progress_cb(done, total)` every 50 chunks (`_PROGRESS_INTERVAL`); `ingest.py` wires this to a logger call; `rag_status.py --watch` parses those log lines to compute real-time chunk rate + ETA. SQLite fetch batch size is hardcoded to 10 files per iteration (`_FETCH_BATCH_SIZE` in `rag_ingest_daemon.py`). Qdrant upsert is batched in groups of `_UPSERT_BATCH_SIZE=256` points (`ingest.py`) to avoid HTTP 400 on large files.
+- **Embeddings via Ollama on Server 2 GPU** — `bge-m3` (1024-dim, 8192-tok context) served by Ollama on Server 2 (RTX 5070, `192.168.1.95:11434`); stable since 2026-05-04 with `OLLAMA_CONTEXT_LENGTH=768` in the Ollama service (reduces compute buffer from 1168 MiB to 53 MiB, total VRAM ~635 MiB — fits alongside llama-server even under load); `sentence-transformers` removed. Server 1 CPU (`192.168.1.93:11434`) is the fallback. `embed_batch()` concurrency controlled by `--batch` in `rag_ingest_daemon.py` (default 5, `_BATCH_CONCURRENCY`); lower `--batch` to reduce `httpx.ReadTimeout` errors, raise it for more throughput. Ollama serializes model computation — when ingest daemon runs, search queries queue behind it and can wait 28–30s; `embed_text()` timeout is 120s to survive this. `embed_batch()` fires a `progress_cb(done, total)` every 50 chunks (`_PROGRESS_INTERVAL`); `ingest.py` wires this to a logger call; `rag_status.py --watch` parses those log lines to compute real-time chunk rate + ETA. SQLite fetch batch size is hardcoded to 10 files per iteration (`_FETCH_BATCH_SIZE` in `rag_ingest_daemon.py`). Qdrant upsert is batched in groups of `_UPSERT_BATCH_SIZE=256` points (`ingest.py`) to avoid HTTP 400 on large files.
 - **Qdrant client HTTP timeout** — `rag_engine/collection.py::get_client()` initializes the `QdrantClient` with `timeout=60` (increased from httpx default ~5s in 2026-04-22). During heavy bulk ingestion (e.g., 70K+ points from a single file), Qdrant performs extended index optimization that can block response handling for 10–30s. The 5s timeout was too short, causing regular `httpcore.ReadTimeout` cascades during large ingestion runs. 60s allows Qdrant time to complete index restructuring. See `TROUBLESHOOTING.md` for full analysis.
 - **Multi-tenancy via `owner` field + Google OAuth2** — every Qdrant point carries an `owner` derived from NFS path root at ingestion; search applies `MatchAny(any=[user_owner, "la-familia"])` filter; user identity from Google OIDC JWT mapped to `owner` via `config.yaml` `users:` section; data model designed before first ingestion to avoid re-ingesting
 - **Qdrant-before-SQLite deletion ordering (2026-04-24, refactored 2026-04-25)** — `scan_nfs_roots()` and `scan_claude_chats()` each return `{'scanned': N, 'existing_paths': set[str]}` without calling `find_deleted()` internally. Both callers (`rag_sync_nfs.py` and `main.py /v1/rag/ingest/sync`) merge the two `existing_paths` sets, then call `state_db.find_deleted(merged)` once to get `(deleted_paths, stale_paths)`. Callers then: (1) delete Qdrant points for each path in `deleted_paths`, (2) call `state_db.purge_deleted(stale_paths)`. If killed mid-Qdrant-loop, the SQLite rows survive intact and the next sync retries automatically. Merging before `find_deleted()` is critical — if only NFS paths were passed, claude chat rows in SQLite would be falsely flagged as deleted. The old `handle_deleted()` committed SQLite atomically before Qdrant cleanup and has been deprecated. Observed orphan incident 2026-04-24: 12 paths required manual Qdrant scroll + targeted delete.
