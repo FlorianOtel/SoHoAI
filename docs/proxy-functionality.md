@@ -2,19 +2,21 @@
 title: "SoHoAI Proxy — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-04--17-30
 context: >
-  SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router
-  used by the main orchestrator. One path is OpenAI-compatible (for Cline VSCode plugin
-  and any other OpenAI-API client). The other is Anthropic-compatible (for Claude Code
-  using ANTHROPIC_BASE_URL). Both are implemented in main.py and share the same
-  _PROXY_EXPOSED_MODELS mapping and SmartRouter instance.
+  SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
+  One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
+  for Claude Code (ANTHROPIC_BASE_URL), with model-aware routing: Anthropic models use
+  a transparent HTTP forward (full fidelity including tools and caching); local models
+  (gemma-4-e4b) use the LiteLLM conversion path (text-only, no tool use currently).
+  Future tool-use work for local models is tracked in docs/TODO.md.
 ---
 
 # SoHoAI proxy — Cline and Claude Code integration
 
-Both paths are **stateless**: no Redis, no SQLite, no RAG, no KV cache, no rolling
-summarization. The caller manages its own history. Prompt caching via Anthropic
-`cache_control` still applies on the external path (same `SmartRouter` instance).
+Both proxy paths are **stateless**: no Redis, no SQLite, no RAG, no KV cache, no rolling
+summarization. The caller manages its own conversation history.
 
 ---
 
@@ -37,11 +39,11 @@ summarization. The caller manages its own history. Prompt caching via Anthropic
 | `claude-sonnet-4-6` | `external` | Anthropic API (with Gemma fallback) | 200,000 |
 | `claude-opus-4-7` | `claude-opus-4-7` | Anthropic API | 200,000 |
 
-`claude-sonnet-4-6` maps to `external` (not the direct alias) to preserve the
-automatic Gemma fallback in case Anthropic is unreachable. The other two Anthropic
-models use direct aliases and will hard-fail if Anthropic is down.
+`claude-sonnet-4-6` maps to `external` to preserve the automatic Gemma fallback
+if Anthropic is unreachable. The other Anthropic models use direct aliases and
+hard-fail if Anthropic is down.
 
-`_resolve_proxy_model()` accepts bare names, `anthropic/`-prefixed names, or `openai/`-prefixed names.
+`_resolve_proxy_model()` accepts bare names, `anthropic/`-prefixed, or `openai/`-prefixed forms.
 
 ### Cline configuration
 
@@ -70,57 +72,6 @@ lands on a slot between SoHoAI's `restore → inference → save` sequence will 
 chat's KV state. Accepted risk: SoHoAI's Gemma usage is rare post-flip, and the
 corruption self-heals on the next turn.
 
-**Symptom**: if a chat looks corrupted after summarization, check whether Cline was
-active simultaneously.
-
----
-
-## 3. LiteLLM `model_info` parameter semantics
-
-These three fields can appear in a `model_list` entry's `model_info` block in
-`config.yaml`. None of them is ever forwarded to the provider API.
-
-| Field | Controls | Forwarded to API? | Needed in config? |
-|---|---|---|---|
-| `max_tokens` | Maximum output tokens the model can generate per response | No | Only if you want LiteLLM to enforce a lower cap than the model's native limit |
-| `max_input_tokens` | Input size guard — LiteLLM rejects requests that exceed this before sending | No | Only if you want a guard stricter than the model's native context window |
-| `context_window` | Total context window metadata (input + output); used by router pre-call checks and cost tracking | No | Only for models not in LiteLLM's registry |
-
-### When each is actually needed
-
-**For well-known Anthropic models** (`anthropic/claude-opus-4-7`, `anthropic/claude-sonnet-4-6`,
-`anthropic/claude-haiku-4-5`): LiteLLM auto-resolves all three from its internal
-`model_prices_and_context_window.json` registry at startup. No `model_info` block is
-needed — and none is present in `config.yaml` for those entries.
-
-**For `internal` (Gemma / llama-server)**: llama-server is not in LiteLLM's registry.
-`model_info` with explicit `max_tokens`, `max_input_tokens`, and `context_window` is
-required so that:
-- Cline reads the correct `max_input_tokens` from `/proxy/v1/model/info`
-  (`refreshLiteLlmModels.ts:37`) to set its context-window display
-- `enable_pre_call_checks` can enforce the 110,024-token per-slot limit
-
-**For `external` (Sonnet via the main routing alias)**: same as above — explicit values
-needed for the `/proxy/v1/model/info` response and pre-call checks.
-
-### Who reads `max_tokens` on a request
-
-Claude Code and Cline both send their own `max_tokens` in every request.
-LiteLLM passes that value through transparently to the provider — it does **not**
-override it with the `model_info.max_tokens` value unless `enable_pre_call_checks: true`
-is set *and* the caller's value exceeds the configured limit. In practice the caller's
-value always wins.
-
-### `enable_pre_call_checks` in this setup
-
-`router_settings.enable_pre_call_checks: true` is set in `config.yaml`.
-This activates input-size enforcement: if a request's estimated input token count
-exceeds `max_input_tokens` (from `model_info` or LiteLLM's registry), the router
-rejects it before hitting the provider and attempts any configured
-`context_window_fallbacks`. For the three direct Anthropic models this is a no-op in
-practice (200K limit is rarely approached); for `internal`/`gemma-4-e4b` it prevents
-oversized requests from reaching the 110,024-token slot limit.
-
 ---
 
 ## 2. Claude Code — Anthropic Messages API path
@@ -129,79 +80,296 @@ oversized requests from reaching the 110,024-token slot limit.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/v1/messages` | Native Anthropic Messages API format; enables `ANTHROPIC_BASE_URL` |
+| POST | `/v1/messages` | Anthropic Messages API with model-aware routing |
 
-Implements the Anthropic Messages API wire format: accepts `POST /v1/messages` with
-`anthropic-version` headers and `system` / `messages` / `max_tokens` / `stream` fields.
-Converts to OpenAI format internally, calls `SmartRouter.complete()`, converts response
-back to Anthropic format (including proper SSE streaming: `message_start` →
-`content_block_start` → `content_block_delta` → `content_block_stop` → `message_delta`
-→ `message_stop`).
-
-The same `_PROXY_EXPOSED_MODELS` mapping applies. Anthropic-prefixed model names
-(`anthropic/claude-opus-4-7`) are accepted and stripped before lookup.
-
-### Claude Code configuration
+### Configuration
 
 Set in `~/.claude/settings.json`:
 
 ```json
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://192.168.1.93:8000"
+    "ANTHROPIC_BASE_URL": "http://192.168.1.93:8000",
+    "ANTHROPIC_API_KEY": "<your-real-anthropic-api-key>"
   }
 }
 ```
 
-Claude Code will call `POST http://192.168.1.93:8000/v1/messages` for all model
-requests. The proxy routes each model through the appropriate backend:
+Claude Code sends the real API key in the `x-api-key` header on every request. The
+proxy extracts it and forwards it to `api.anthropic.com` on the transparent path.
 
-| Model | Routed via | Notes |
+### Model-aware routing
+
+The proxy inspects the `model` field and branches on two paths:
+
+```
+REQUEST arrives at POST /v1/messages
+  │
+  ├─ model resolves to "internal" (gemma-4-e4b)
+  │     → _anthropic_messages_litellm()
+  │     → Anthropic→OpenAI format conversion (text blocks only)
+  │     → LiteLLM Router → llama-server (Server 2)
+  │     → LIMITATION: tools stripped (see §2.3 and docs/TODO.md)
+  │
+  └─ model resolves to anything else (claude-*, or unresolved)
+        → _anthropic_messages_forward()
+        → transparent HTTP forward to api.anthropic.com/v1/messages
+        → full fidelity: tools, history, caching, streaming all preserved
+```
+
+### §2.1 Transparent forward path (Anthropic models)
+
+`_anthropic_messages_forward()` in `main.py` acts as a pure HTTP relay:
+
+- Forwards the **exact request body bytes** — no parsing, no modification
+- Forwards **Anthropic-specific headers**: `x-api-key`, `anthropic-version`, `anthropic-beta`
+- Streams the **raw response bytes** back — no re-encoding of SSE events
+
+**What this preserves and why it matters:**
+
+| Preserved | Consequence |
+|---|---|
+| `tools` array | Model knows all Claude Code tools (Read, Write, Bash, Agent, etc.) on every turn |
+| `tool_use` blocks in assistant messages | Full multi-turn tool-call history reaches the model; it knows what it already requested |
+| `tool_result` blocks in user messages | File contents, bash outputs, and sub-agent results from past turns are visible to the model |
+| `cache_control: ephemeral` markers | Anthropic caches the system prompt + rolling message prefix; after turn 1 the ~100K token context costs ~10% per turn instead of 100% |
+| `anthropic-beta` headers | Features like `interleaved-thinking`, extended output, etc. work unchanged |
+| Native SSE event types | Claude Code's Ink UI receives `content_block_start {type:tool_use}` events and renders compact one-line tool-call status instead of scrolling file contents |
+
+**Without transparent forward** (the old single LiteLLM path): cache_control was
+stripped → no caching → every turn paid full input-token cost; tools were stripped →
+model could not call Read/Write/Bash → Claude Code fell back to injecting file contents
+as inline text that scrolled on screen.
+
+### §2.2 LiteLLM local path (gemma-4-e4b)
+
+`_anthropic_messages_litellm()` in `main.py` converts the Anthropic-format request to
+OpenAI format and routes through LiteLLM Router to llama-server on Server 2.
+
+**Current limitation — tool use is not supported on this path.**
+
+The conversion loop:
+```python
+if isinstance(content, list):
+    content = "".join(
+        b.get("text", "") for b in content
+        if isinstance(b, dict) and b.get("type") == "text"
+    )
+```
+extracts only `text` blocks and silently drops all other content block types.
+
+**What gets dropped and why it matters:**
+
+| Dropped | What the model loses | Practical consequence |
 |---|---|---|
-| `claude-opus-4-7` | Anthropic API (direct) | Brain / research tier |
-| `claude-sonnet-4-6` | Anthropic API via `external` | Planner/Reviewer; Gemma fallback if cloud down |
-| `claude-haiku-4-5` | Anthropic API (direct) | Actor tier, cheapest/fastest |
-| `gemma-4-e4b` | llama-server, Server 2 | Local-only, no cloud cost |
+| `tools` array | No knowledge of Read/Write/Bash tools | Model responds with text only; cannot request file reads |
+| `tool_use` blocks (assistant) | Loses its own prior tool-call requests | Cannot reason about what it already tried |
+| `tool_result` blocks (user) | Loses all file contents and command outputs | Cannot use information from previous tool calls |
+| `cache_control` markers | No prompt-cache benefit | Irrelevant for local inference (no API cost), but noted |
 
-### Claude Code sub-agent frontmatter (alternative to ANTHROPIC_BASE_URL)
+**Important**: this is a limitation of *our* conversion code, not of LiteLLM.
+LiteLLM fully supports OpenAI-format tool calls and correctly translates them to the
+provider's native format. If our conversion preserved tools (Anthropic→OpenAI format
+translation, ~70 lines), tool use would work — subject to Gemma 4's reliability.
+See `docs/TODO.md` for the full implementation plan and format-conversion spec.
 
-If you only want specific sub-agents to route through SoHoAI (rather than all Claude
-Code traffic), use `api_base_url` in the agent frontmatter instead:
+**Appropriate use cases for the local path:**
+- Simple text generation where tool use is not needed
+- Summarization tasks (already used by SoHoAI's `maybe_summarize()`)
+- Offline/background drafting when Anthropic is unreachable
+- Cost-zero tasks where quality is secondary to API cost
 
-```yaml
-# In agent definition file
-model: claude-opus-4-7
-api_base_url: http://192.168.1.93:8000/proxy
-api_key: sohoai-local
-```
-
-This uses the OpenAI-compatible `/proxy/v1/chat/completions` path, not `/v1/messages`.
-Choose this when you want per-agent control; use `ANTHROPIC_BASE_URL` when you want
-all Claude Code traffic to go through SoHoAI.
-
-### Smoke-test
-
-```bash
-# Non-streaming
-curl -s -X POST http://192.168.1.93:8000/v1/messages \
-  -H 'Content-Type: application/json' \
-  -H 'x-api-key: sohoai-local' \
-  -H 'anthropic-version: 2023-06-01' \
-  -d '{"model":"claude-haiku-4-5","max_tokens":32,"messages":[{"role":"user","content":"say hi"}]}' \
-  | python3 -m json.tool
-
-# Streaming
-curl -s -X POST http://192.168.1.93:8000/v1/messages \
-  -H 'Content-Type: application/json' \
-  -H 'x-api-key: sohoai-local' \
-  -H 'anthropic-version: 2023-06-01' \
-  -d '{"model":"claude-haiku-4-5","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"count to 3"}]}'
-```
+**Inappropriate use cases:**
+- Full Claude Code sessions (tools broken → files injected inline → expensive + slow)
+- Any sub-agent that needs to read files, write code, or run bash commands
+- Tasks requiring multi-turn tool call chains
 
 ---
 
-## Implementation notes
+## 3. Sub-agent mechanics and model-tier routing
 
-- **`main.py`**: `_PROXY_EXPOSED_MODELS`, `_resolve_proxy_model()`, `_build_proxy_model_entry()`, `proxy_model_info()`, `proxy_models()`, `proxy_chat_completions()`, `anthropic_messages()`, `_anthropic_stop_reason()`
-- **`router.py`**: `SmartRouter` — both paths use the same instance; `enable_pre_call_checks` and `context_window_fallbacks` wired from `config.yaml router_settings` / `litellm_settings`
-- **`config.yaml`**: `model_list` entries for `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5` (no `model_info` — LiteLLM registry covers these); `router_settings.enable_pre_call_checks: true`; `litellm_settings.context_window_fallbacks`
+### How Claude Code dispatches sub-agents
+
+Claude Code dispatches sub-agents via its built-in `Agent` tool (used by `/duo`,
+`/brain`, and other pipelines). Each sub-agent is defined in a markdown file under
+`~/.claude/agents/` or the project's `.claude/agents/`. The relevant frontmatter fields:
+
+```yaml
+model: claude-haiku-4-5          # which model to use for this agent
+description: "Actor — implementation"
+tools: [Read, Write, Bash, Glob, Grep]
+```
+
+When a sub-agent runs:
+1. Claude Code spawns a new Claude Code process (headless, non-interactive)
+2. That process reads the `model` field from the agent's frontmatter
+3. It calls `POST /v1/messages` with `"model": "claude-haiku-4-5"` to whatever
+   `ANTHROPIC_BASE_URL` is configured (inherited from `~/.claude/settings.json`)
+4. SoHoAI proxy receives the request, sees `claude-haiku-4-5` → transparent forward → Anthropic Haiku
+
+**Note**: `api_base_url` is NOT a documented Claude Code agent frontmatter field.
+All agents share the same `ANTHROPIC_BASE_URL`. The `model` field is the only
+supported mechanism for per-agent model selection. Routing is determined by whatever
+model name the sub-agent sends in its request body.
+
+### /duo pipeline model tiers
+
+```
+Parent session (Brain + Planner) — Sonnet 4.6
+  source: settings.json "model": "sonnet[1m]"
+  request: POST /v1/messages {"model": "claude-sonnet-4-6", ...}
+  routing: transparent forward → Anthropic Sonnet 4.6
+  tools: ✅ full (Read, Write, Bash, Agent, Glob, Grep, ...)
+  caching: ✅ full (system prompt + rolling prefix cached after turn 1)
+
+Actor subagent — Haiku 4.5
+  source: agent frontmatter "model: claude-haiku-4-5"
+  request: POST /v1/messages {"model": "claude-haiku-4-5", ...}
+  routing: transparent forward → Anthropic Haiku 4.5
+  tools: ✅ full (same tool loop as parent)
+  caching: ✅ full (independent cache slot from parent)
+```
+
+Both are independent Anthropic API calls with independent prompt-cache slots.
+
+### /brain pipeline model tiers
+
+```
+Brain    — claude-opus-4-7   → transparent forward → Anthropic Opus 4.7   (tools ✅, cache ✅)
+Planner  — claude-sonnet-4-6 → transparent forward → Anthropic Sonnet 4.6 (tools ✅, cache ✅)
+Actor    — claude-haiku-4-5  → transparent forward → Anthropic Haiku 4.5  (tools ✅, cache ✅)
+Reviewer — claude-sonnet-4-6 → transparent forward → Anthropic Sonnet 4.6 (tools ✅, cache ✅)
+```
+
+Each tier has its own Anthropic API call, its own context window, and its own
+independent prompt-cache slot. The Brain's long research context does not inflate
+the Actor's costs.
+
+### Local sub-agent (gemma-4-e4b) — current limitations
+
+A sub-agent with `model: gemma-4-e4b` routes via the LiteLLM local path.
+**Tool use is not currently supported on this path** (see §2.2 and `docs/TODO.md`).
+
+Such an agent can:
+- Generate text responses
+- Perform summarization
+- Draft content without needing to read/write files
+
+Such an agent CANNOT:
+- Read files (Read tool stripped)
+- Write or edit files (Write/Edit tools stripped)
+- Run bash commands (Bash tool stripped)
+- Use sub-agents (Agent tool stripped)
+
+Until tool support is implemented, use `claude-haiku-4-5` for Actor-tier tasks that
+require file access. Cost is ~$0.01/session — negligible.
+
+---
+
+## 4. Prompt caching and cost implications
+
+### How Anthropic prompt caching works (transparent path only)
+
+Claude Code injects `cache_control: {type: ephemeral}` markers on:
+1. The system prompt (CLAUDE.md + project context — typically 20K–100K tokens)
+2. `messages[-2]` — the penultimate message (rolling prefix breakpoint)
+
+On the transparent forward path these markers reach Anthropic unchanged.
+After turn 1, Anthropic reports `cache_read_input_tokens` instead of `input_tokens`
+for the cached portion — the cached tokens cost ~10% of uncached input price.
+
+On the LiteLLM local path, cache_control markers are stripped by the conversion.
+This is irrelevant because local inference has no per-token API cost.
+
+### Approximate cost per tier (Anthropic API pricing, May 2026)
+
+| Model | Input (uncached) | Input (cached read) | Output |
+|---|---|---|---|
+| Opus 4.7 | $15/MTok | $1.50/MTok | $75/MTok |
+| Sonnet 4.6 | $3/MTok | $0.30/MTok | $15/MTok |
+| Haiku 4.5 | $0.80/MTok | $0.08/MTok | $4/MTok |
+| Gemma 4 (local) | $0 | $0 | $0 |
+
+### /duo session cost breakdown (typical task, 5 parent turns + 1 actor execution)
+
+**Parent (Sonnet 4.6) — transparent forward, prompt caching active**
+
+| Turn | Input (system+history) | Cache hit? | Effective input cost |
+|---|---|---|---|
+| 1 (cold) | ~30K tokens | ❌ | 30K × $3/MTok = $0.090 |
+| 2 | ~32K (30K cached + 2K new) | ✅ 30K cached | 2K×$3 + 30K×$0.30 = $0.015 |
+| 3–5 | ~34K (growing) | ✅ rolling cache | ~$0.015/turn |
+| Output | ~500 tok/turn × 5 | — | 2.5K × $15/MTok = $0.038 |
+| **Parent total** | | | **~$0.18** |
+
+**Actor (Haiku 4.5) — transparent forward, narrower context**
+
+| Turn | Input | Cache hit? | Cost |
+|---|---|---|---|
+| 1 (cold) | ~5K tokens | ❌ | 5K × $0.80/MTok = $0.004 |
+| 2–3 | cached | ✅ | ~$0.001/turn |
+| Output | ~1K tok × 2 | — | 2K × $4/MTok = $0.008 |
+| **Actor total** | | | **~$0.015** |
+
+**Session total (approx)**: **~$0.20**
+
+**Without transparent forward (broken LiteLLM path, pre-fix)**:
+- cache_control stripped → every turn cold → 30K × $3/MTok × 5 = $0.45 input alone
+- Tools broken → task fails or Claude Code injects files inline (even larger context)
+- Effective cost 3–5× higher and task likely incomplete
+
+### /brain session cost (Opus 4.7 Brain tier)
+
+| Tier | Model | Turns | Est. cost |
+|---|---|---|---|
+| Brain | Opus 4.7 | 3–5 research turns | $0.50–$1.20 |
+| Planner | Sonnet 4.6 | 1–2 planning turns | $0.05–$0.10 |
+| Actor | Haiku 4.5 | implementation | $0.01–$0.03 |
+| Reviewer | Sonnet 4.6 | 1 review turn | $0.03–$0.05 |
+| **Total** | | | **$0.60–$1.40** |
+
+Prompt caching cuts the Opus Brain cost by ~70% after the first turn (large research
+context is re-read cached). Without caching (broken path), costs would be 3–4× higher.
+
+---
+
+## 5. LiteLLM `model_info` parameter semantics
+
+These fields in `config.yaml model_info` are **not** forwarded to the provider API.
+
+| Field | Controls | Needed in config? |
+|---|---|---|
+| `max_tokens` | Output cap metadata | Only to enforce a lower cap than the model's native output limit |
+| `max_input_tokens` | Input size guard (pre-call check) | Only for models not in LiteLLM's registry (e.g. `internal`/llama-server) |
+| `context_window` | Router metadata for routing/cost | Only for models not in LiteLLM's registry |
+
+For `anthropic/claude-*` models: LiteLLM auto-resolves all three from its internal
+`model_prices_and_context_window.json` registry. No `model_info` block needed.
+
+For `internal` (Gemma / llama-server): explicit `model_info` is required because
+llama-server is not in LiteLLM's registry. Cline reads `max_input_tokens` from
+`/proxy/v1/model/info` to set its context-window display.
+
+`enable_pre_call_checks: true` (set in `router_settings` in `config.yaml`) activates
+input-size enforcement using these values.
+
+---
+
+## 6. Future work
+
+Tool-use support for the local-model path (gemma-4-e4b and any future local LLMs)
+is tracked with full implementation detail in **`docs/TODO.md`**.
+
+---
+
+## 7. Implementation reference
+
+- **`main.py`**: `_ANTHROPIC_API_BASE`, `_PROXY_EXPOSED_MODELS`, `_resolve_proxy_model()`,
+  `_build_proxy_model_entry()`, `proxy_model_info()`, `proxy_models()`,
+  `proxy_chat_completions()`, `anthropic_messages()`, `_anthropic_messages_forward()`,
+  `_anthropic_messages_litellm()`, `_anthropic_stop_reason()`
+- **`router.py`**: `SmartRouter` — used by Cline path and LiteLLM local path;
+  `enable_pre_call_checks` and `context_window_fallbacks` wired from `config.yaml`
+- **`config.yaml`**: `model_list` entries; `router_settings.enable_pre_call_checks: true`;
+  `litellm_settings.context_window_fallbacks`
+- **`docs/TODO.md`**: deferred work — local-model tool-use implementation plan

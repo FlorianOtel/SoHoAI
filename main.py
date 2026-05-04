@@ -25,6 +25,8 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
+
 import yaml
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -63,6 +65,8 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("SoHoAI")
+
+_ANTHROPIC_API_BASE = "https://api.anthropic.com"
 
 # -- Load config ---------------------------------------------------------------
 with open("config.yaml") as f:
@@ -931,21 +935,100 @@ def _anthropic_stop_reason(openai_finish_reason: str | None) -> str | None:
 
 @app.post("/v1/messages")
 async def anthropic_messages(req: Request):
-    """Anthropic Messages API passthrough.
+    """Anthropic Messages API — model-aware routing.
 
-    Accepts Anthropic-format requests, routes through SmartRouter, and returns
-    Anthropic-format responses. Supports streaming (SSE). Enables Claude Code to
-    route through SoHoAI via ANTHROPIC_BASE_URL=http://192.168.1.93:8000.
+    Local model (gemma-4-e4b → internal alias): routes via LiteLLM with
+    Anthropic→OpenAI format conversion. Current limitation: the conversion
+    strips tools, tool_use, tool_result, and cache_control — see docs/TODO.md
+    for the planned fix (~70 lines of format-conversion code).
+
+    Anthropic models (claude-*) or unresolved models: transparent HTTP forward
+    to api.anthropic.com. Preserves tools, tool_use/tool_result history,
+    cache_control, anthropic-beta headers, and native SSE streaming exactly.
+    Full Claude Code tool loop and prompt caching work correctly on this path.
     """
-    body = await req.json()
+    body_bytes = await req.body()
+    body = json.loads(body_bytes)
 
-    public_model = body.pop("model", None)
-    stream = bool(body.pop("stream", False))
-    system_raw = body.pop("system", None)
-    max_tokens = body.pop("max_tokens", 1024)
-    ant_messages = body.pop("messages", [])
+    public_model = body.get("model")
+    resolved = _resolve_proxy_model(public_model)
 
-    # Flatten system field (string or array of content blocks)
+    if resolved == "internal":
+        logger.info("anthropic_messages: %r → LiteLLM local path", public_model)
+        return await _anthropic_messages_litellm(body)
+
+    logger.info("anthropic_messages: %r → transparent forward", public_model)
+    return await _anthropic_messages_forward(req, body_bytes, body)
+
+
+async def _anthropic_messages_forward(
+    req: Request, body_bytes: bytes, body: dict
+) -> StreamingResponse | JSONResponse:
+    """Transparent HTTP forward to api.anthropic.com/v1/messages.
+
+    Forwards the exact request body and Anthropic-specific headers.
+    x-api-key is taken from the incoming request first, then ANTHROPIC_API_KEY env.
+    """
+    api_key = req.headers.get("x-api-key") or os.environ.get("ANTHROPIC_API_KEY", "")
+    forward_headers: dict[str, str] = {
+        "content-type": "application/json",
+        "x-api-key": api_key,
+    }
+    for h in ("anthropic-version", "anthropic-beta"):
+        if req.headers.get(h):
+            forward_headers[h] = req.headers[h]
+
+    stream = bool(body.get("stream", False))
+
+    if stream:
+        async def _forward_stream():
+            async with httpx.AsyncClient(timeout=300) as client:
+                async with client.stream(
+                    "POST",
+                    f"{_ANTHROPIC_API_BASE}/v1/messages",
+                    content=body_bytes,
+                    headers=forward_headers,
+                ) as r:
+                    async for chunk in r.aiter_bytes():
+                        yield chunk
+
+        return StreamingResponse(
+            _forward_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(
+            f"{_ANTHROPIC_API_BASE}/v1/messages",
+            content=body_bytes,
+            headers=forward_headers,
+        )
+    return JSONResponse(r.json(), status_code=r.status_code)
+
+
+async def _anthropic_messages_litellm(body: dict) -> StreamingResponse | JSONResponse:
+    """LiteLLM conversion path for local models (gemma-4-e4b → internal).
+
+    CURRENT LIMITATION — tools are stripped by our Anthropic→OpenAI conversion:
+    - `tools` array: dropped (never forwarded to LiteLLM or the model)
+    - `tool_use` blocks in assistant messages: dropped (model loses call history)
+    - `tool_result` blocks in user messages: dropped (model loses file-read results)
+    - `cache_control` markers: dropped (no Anthropic prompt caching on local path)
+
+    Note: LiteLLM itself fully supports tool use. The stripping is in *our*
+    conversion code, not in LiteLLM. Fix is ~70 lines — see docs/TODO.md.
+
+    Use this path only for simple text generation (summarization, offline drafts).
+    Do NOT use for Claude Code sessions that require Read/Write/Bash tool calls.
+    """
+    public_model = body.get("model")
+    internal_model = _resolve_proxy_model(public_model)
+    stream = bool(body.get("stream", False))
+    system_raw = body.get("system")
+    max_tokens = body.get("max_tokens", 1024)
+    ant_messages = body.get("messages", [])
+
     system_text: str | None = None
     if isinstance(system_raw, list):
         system_text = " ".join(
@@ -955,7 +1038,6 @@ async def anthropic_messages(req: Request):
     elif isinstance(system_raw, str):
         system_text = system_raw
 
-    # Convert Anthropic messages + system → OpenAI messages
     oai_messages: list[dict] = []
     if system_text:
         oai_messages.append({"role": "system", "content": system_text})
@@ -969,19 +1051,7 @@ async def anthropic_messages(req: Request):
             )
         oai_messages.append({"role": role, "content": content})
 
-    internal_model = _resolve_proxy_model(public_model)
-    if internal_model is None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Model '{public_model}' not exposed by this proxy. "
-                f"Accepted: {sorted(_PROXY_EXPOSED_MODELS)} (with or without provider prefix)."
-            ),
-        )
-
-    # Pass through standard sampling params only
     extra = {k: body[k] for k in ("temperature", "top_p", "top_k") if k in body}
-
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
     router: SmartRouter = app.state.router
 
@@ -997,7 +1067,6 @@ async def anthropic_messages(req: Request):
                     f"data: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
                 )
                 yield f"event: ping\ndata: {json.dumps({'type': 'ping'})}\n\n"
-
                 response_gen = await router.complete(
                     messages=oai_messages,
                     model=internal_model,
@@ -1019,16 +1088,14 @@ async def anthropic_messages(req: Request):
                             )
                         if choice.get("finish_reason"):
                             finish_reason = choice["finish_reason"]
-
                 yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
                 yield (
                     f"event: message_delta\n"
                     f"data: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': _anthropic_stop_reason(finish_reason), 'stop_sequence': None}, 'usage': {'output_tokens': output_tokens}})}\n\n"
                 )
                 yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
-
             except Exception as e:
-                logger.error("Anthropic messages stream failed: %s", e)
+                logger.error("Anthropic messages LiteLLM stream failed: %s", e)
                 yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': str(e)}})}\n\n"
 
         return StreamingResponse(
@@ -1037,7 +1104,6 @@ async def anthropic_messages(req: Request):
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
-    # Non-streaming
     response = await router.complete(
         messages=oai_messages,
         model=internal_model,
