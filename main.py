@@ -660,6 +660,34 @@ async def rag_ingest_status(user: str | None = Query(None)):
     }
 
 
+@app.get("/v1/rag/search")
+async def rag_search(
+    q: str,
+    user: str | None = Query(None),
+    top_k: int = Query(5, ge=1, le=20),
+    file_types: list[str] | None = Query(None),
+):
+    """Retrieve RAG document hits without invoking any LLM.
+
+    Intended for external LLM clients (Claude Code, Cline) that manage their own
+    reasoning loop.  The caller decides when to search and how to use the results.
+    """
+    if app.state.qdrant_client is None:
+        raise HTTPException(status_code=503, detail="Qdrant client not available")
+
+    results = await search_rag(
+        query=q,
+        user_id=user,
+        limit=top_k,
+        qdrant_client=app.state.qdrant_client,
+        rag_cfg=app.state.rag_cfg,
+        file_types=file_types,
+    )
+
+    logger.info("RAG search: q=%r user=%s top_k=%d → %d result(s)", q, user, top_k, len(results))
+    return {"query": q, "user": user, "results": results}
+
+
 # =============================================================================
 #  SYSTEM ENDPOINTS
 # =============================================================================

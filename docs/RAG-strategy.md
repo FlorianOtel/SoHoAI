@@ -2,8 +2,8 @@
 title: "SoHoAI — RAG Strategy"
 created_at: 20260330-000000
 created_by: Florian Otel
-updated_by: Claude Code (Claude Opus 4.7)
-updated_at: 20260501-032433
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 20260504-114819
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -18,6 +18,49 @@ context: >
 ---
 
 # RAG Strategy — SoHoAI
+
+---
+
+## RAG client modes — server-managed vs. external LLM
+
+Two distinct integration patterns exist for RAG in SoHoAI, serving different callers.
+
+### Server-managed RAG (`POST /v1/chat/completions` with `rag_mode`)
+
+Designed for clients like `cli_chat.py` and Open WebUI where SoHoAI's orchestrator
+manages the full conversation loop. The server's two-iteration tool-use loop
+(`rag_engine/tool_use.py`) injects a `<tool_call>search_documents</tool_call>` sentinel
+into the system prompt; the LLM decides at inference time whether retrieval is needed.
+
+The bge-m3 cosine score distribution for this corpus shows a narrow margin between
+signal (0.51–0.55) and noise (0.48–0.51). This margin justified the LLM-decides approach
+over always-inject: unconditional top-k injection floods the context with marginally
+relevant results on factual queries where no retrieval is needed at all. With tool-use,
+the LLM skips the search step entirely when the question can be answered from conversation
+history, and fires a targeted query only when genuinely needed. `rag_mode` values:
+- `off` — no retrieval, no tool spec in system prompt (default)
+- `on` — tool spec injected; LLM decides whether to call `search_documents`
+- `only` — tool spec injected; system prompt instructs LLM to answer only from retrieved docs
+
+### External LLM client RAG (`GET /v1/rag/search`)
+
+For Claude Code and similar agents that manage their own context and reasoning loop.
+Claude Code IS the LLM deciding when to search; running SoHoAI's server-side tool-use
+loop would be redundant — it would fire a second LLM inference (Gemma 4 or Sonnet 4.6)
+purely to emit a `<tool_call>` sentinel and then execute the same `search_rag()` call the
+client could have made directly.
+
+`GET /v1/rag/search` returns raw document hits as JSON with no LLM invocation on the
+server side. Query parameters: `q` (required), `user` (owner filter), `top_k` (1–20,
+default 5), `file_types` (list, e.g. `["pdf","md"]`). Each result includes `content`
+(parent chunk text), `source_path`, `score`, `file_name`, `file_type`, and `session_title`
+(for claude_chat results).
+
+Invoked interactively via the `/user:rag` slash command (`~/.claude/commands/rag.md`):
+- `/user:rag search <query>` — one-shot retrieval, displays ranked hits
+- `/user:rag on` — automatic pre-search before each Claude Code answer
+- `/user:rag only` — answer exclusively from retrieved documents
+- `/user:rag off` — disable automatic search
 
 ---
 
