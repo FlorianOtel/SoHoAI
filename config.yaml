@@ -1,4 +1,4 @@
-1# =============================================================================
+# =============================================================================
 # SoHoAI Configuration
 # =============================================================================
 
@@ -69,28 +69,16 @@ model_list:
     litellm_params:
       model: anthropic/claude-opus-4-7
       api_key: os.environ/ANTHROPIC_API_KEY
-    model_info:
-      max_tokens: 32000
-      max_input_tokens: 200000
-      context_window: 200000
 
   - model_name: claude-sonnet-4-6        # Planner/Reviewer — direct Anthropic (Claude Code sub-agent tier)
     litellm_params:
       model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
-    model_info:
-      max_tokens: 64000
-      max_input_tokens: 200000
-      context_window: 200000
 
   - model_name: claude-haiku-4-5         # Actor — direct Anthropic (Claude Code sub-agent tier)
     litellm_params:
       model: anthropic/claude-haiku-4-5
       api_key: os.environ/ANTHROPIC_API_KEY
-    model_info:
-      max_tokens: 64000
-      max_input_tokens: 200000
-      context_window: 200000
 
 
 # -- Routing Policy ------------------------------------------------------------

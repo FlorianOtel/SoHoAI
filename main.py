@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -902,6 +903,169 @@ async def proxy_chat_completions(req: Request):
         resp_dict = dict(response)
     resp_dict["model"] = reported_model
     return JSONResponse(resp_dict)
+
+
+# =============================================================================
+#  Anthropic Messages API passthrough  (enables ANTHROPIC_BASE_URL)
+# =============================================================================
+#
+#  Claude Code sets ANTHROPIC_BASE_URL and calls POST /v1/messages in native
+#  Anthropic format. This endpoint translates that to an internal router call
+#  and returns the response in Anthropic format.
+#
+#  Set in ~/.claude/settings.json:
+#    { "env": { "ANTHROPIC_BASE_URL": "http://192.168.1.93:8000" } }
+# =============================================================================
+
+def _anthropic_stop_reason(openai_finish_reason: str | None) -> str | None:
+    """Map OpenAI finish_reason to Anthropic stop_reason."""
+    if not openai_finish_reason:
+        return None
+    return {
+        "stop": "end_turn",
+        "length": "max_tokens",
+        "tool_calls": "tool_use",
+        "content_filter": "end_turn",
+    }.get(openai_finish_reason, "end_turn")
+
+
+@app.post("/v1/messages")
+async def anthropic_messages(req: Request):
+    """Anthropic Messages API passthrough.
+
+    Accepts Anthropic-format requests, routes through SmartRouter, and returns
+    Anthropic-format responses. Supports streaming (SSE). Enables Claude Code to
+    route through SoHoAI via ANTHROPIC_BASE_URL=http://192.168.1.93:8000.
+    """
+    body = await req.json()
+
+    public_model = body.pop("model", None)
+    stream = bool(body.pop("stream", False))
+    system_raw = body.pop("system", None)
+    max_tokens = body.pop("max_tokens", 1024)
+    ant_messages = body.pop("messages", [])
+
+    # Flatten system field (string or array of content blocks)
+    system_text: str | None = None
+    if isinstance(system_raw, list):
+        system_text = " ".join(
+            b.get("text", "") for b in system_raw
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    elif isinstance(system_raw, str):
+        system_text = system_raw
+
+    # Convert Anthropic messages + system → OpenAI messages
+    oai_messages: list[dict] = []
+    if system_text:
+        oai_messages.append({"role": "system", "content": system_text})
+    for msg in ant_messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = "".join(
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        oai_messages.append({"role": role, "content": content})
+
+    internal_model = _resolve_proxy_model(public_model)
+    if internal_model is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{public_model}' not exposed by this proxy. "
+                f"Accepted: {sorted(_PROXY_EXPOSED_MODELS)} (with or without provider prefix)."
+            ),
+        )
+
+    # Pass through standard sampling params only
+    extra = {k: body[k] for k in ("temperature", "top_p", "top_k") if k in body}
+
+    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+    router: SmartRouter = app.state.router
+
+    if stream:
+        async def anthropic_event_stream():
+            try:
+                yield (
+                    f"event: message_start\n"
+                    f"data: {json.dumps({'type': 'message_start', 'message': {'id': msg_id, 'type': 'message', 'role': 'assistant', 'content': [], 'model': public_model, 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': 0, 'output_tokens': 0}}})}\n\n"
+                )
+                yield (
+                    f"event: content_block_start\n"
+                    f"data: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                )
+                yield f"event: ping\ndata: {json.dumps({'type': 'ping'})}\n\n"
+
+                response_gen = await router.complete(
+                    messages=oai_messages,
+                    model=internal_model,
+                    stream=True,
+                    max_tokens=max_tokens,
+                    **extra,
+                )
+                finish_reason = None
+                output_tokens = 0
+                async for chunk in response_gen:
+                    c = chunk.model_dump() if hasattr(chunk, "model_dump") else (chunk.dict() if hasattr(chunk, "dict") else dict(chunk))
+                    for choice in (c.get("choices") or []):
+                        text = (choice.get("delta") or {}).get("content") or ""
+                        if text:
+                            output_tokens += max(1, len(text) // 4)
+                            yield (
+                                f"event: content_block_delta\n"
+                                f"data: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': text}})}\n\n"
+                            )
+                        if choice.get("finish_reason"):
+                            finish_reason = choice["finish_reason"]
+
+                yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+                yield (
+                    f"event: message_delta\n"
+                    f"data: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': _anthropic_stop_reason(finish_reason), 'stop_sequence': None}, 'usage': {'output_tokens': output_tokens}})}\n\n"
+                )
+                yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+
+            except Exception as e:
+                logger.error("Anthropic messages stream failed: %s", e)
+                yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': str(e)}})}\n\n"
+
+        return StreamingResponse(
+            anthropic_event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
+    # Non-streaming
+    response = await router.complete(
+        messages=oai_messages,
+        model=internal_model,
+        stream=False,
+        max_tokens=max_tokens,
+        **extra,
+    )
+    r = response.model_dump() if hasattr(response, "model_dump") else (response.dict() if hasattr(response, "dict") else dict(response))
+    choices = r.get("choices") or []
+    text = ""
+    finish_reason = None
+    if choices:
+        text = (choices[0].get("message") or {}).get("content") or ""
+        finish_reason = choices[0].get("finish_reason")
+    usage = r.get("usage") or {}
+    return JSONResponse({
+        "id": msg_id,
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+        "model": public_model,
+        "stop_reason": _anthropic_stop_reason(finish_reason),
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+        },
+    })
 
 
 # =============================================================================

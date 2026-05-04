@@ -1,9 +1,9 @@
 ---
 title: "SoHoAI — RAG Strategy"
-created_at: 20260330-000000
+created_at: 2026-03-30--00-00
 created_by: Florian Otel
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 20260504-114819
+updated_at: 2026-05-04--11-48
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -171,6 +171,15 @@ suffix, not a path pattern.
 To add or remove an exclusion, edit `config.yaml` and re-run `rag_sync_nfs.py`.
 No code change is required. When a directory is newly excluded, `rag_sync_nfs.py`
 purges its files from the queue and Qdrant automatically (via `handle_deleted`).
+
+**Claude Code sessions — `.claude/` exclusion + `claude_chats` two-path design (updated 2026-05-04)**
+
+The `.claude/` directory is excluded from the generic NFS scanner to prevent ingestion of Claude Code's internal state (settings, caches, IDE configs, tool metadata) and the `chats/` symlink tree. However, the `.jsonl` session transcripts in `~/.claude/projects/` have high RAG value and must be ingested. A **dedicated scanner function** `scan_claude_chats()` (in `rag_engine/scanner.py`) re-enters the specific subdirectory `~/.claude/projects/` via a separate code path that:
+1. Bypasses all generic exclusion rules
+2. Scans *only* for `.jsonl` files
+3. Uses a dedicated parser `_parse_claude_chat()` (in `rag_engine/ingest.py`) that extracts structured user/assistant text turns from the JSONL format
+
+A raw UTF-8 read of `.jsonl` produces unreadable JSON blobs; the dedicated parser is mandatory for RAG-quality content. Additionally, `_build_title_map()` reads `~/.claude/chats/` as a read-only side channel to derive human-readable session titles — it is never ingested, only consulted during ingest time for metadata enrichment. This two-path architecture solves three constraints: (1) avoid duplicate ingestion via `.chats/` symlinks, (2) ingest high-value sessions at all, (3) process them correctly with structured parsing. Full rationale and code locations documented in `docs/design-history.md` (2026-05-04--12-46).
 
 ### 1.3 Symlink handling (updated 2026-04-21)
 
