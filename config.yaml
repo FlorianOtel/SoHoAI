@@ -1,4 +1,4 @@
-# =============================================================================
+1# =============================================================================
 # SoHoAI Configuration
 # =============================================================================
 
@@ -24,23 +24,20 @@ redis:
   dir: "/mnt/nfs/__Backups/SoHoAI--databases/redis"
   default_ttl_seconds: 86400  # 24 hours
 
-# -- LiteLLM Model Routing ----------------------------------------------------
-# Default: external (Sonnet 4.6). Fallback: internal (local Gemma) if cloud unreachable.
-model_list:
-  # --- Primary (interactive chat): Cloud inference ---
-  - model_name: external
-    litellm_params:
-      model: anthropic/claude-sonnet-4-5
-      api_key: os.environ/ANTHROPIC_API_KEY
-    model_info:
-      id: "external-claude"
-      description: "Claude Sonnet 4.6 (primary) — interactive chat default"
-      # Advertised context window for any LiteLLM-style proxy consumer.
-      max_tokens: 200000
-      max_input_tokens: 200000
-      context_window: 200000
+#### --- LiteLLM  configuration --- 
+router_settings:
+  enable_pre_call_checks: true
 
-  # --- Fallback: GPU inference on Server 2 ---
+litellm_settings:
+  context_window_fallbacks:
+    - "claude-opus-4-7": ["claude-opus-4-7-1m"]  # fall to 1M context if needed
+
+# LiteLLM Model Routing ----------------------------------------------------
+# Default: internal (local Gemma) if cloud unreachable. Fallback: external (Sonnet 4.6) 
+model_list:
+  ### First use-case: interactive chat
+
+  # --- Primary LLM: GPU inference on Server 2 ---
   - model_name: internal
     litellm_params:
       model: openai/gemma4
@@ -50,16 +47,56 @@ model_list:
       id: "internal-llama-server"
       description: "Gemma 4 E4B Q8_0 — summarization, offline fallback, background"
       # Advertised context window: per-slot capacity with `-c 220048 --parallel 2`.
-      # 220048 / 2 = 110024. This is what external clients (Cline) read via
+      # 220048 / 2 = 110024. This is what external clients (Cline, Claude Code) read via
       # /proxy/v1/model/info for their contextWindow setting.
       max_tokens: 110024
       max_input_tokens: 110024
       context_window: 110024
 
+  - model_name: external
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      id: "external-claude"
+      description: "Claude Sonnet 4.6 (primary) — interactive chat default"
+      # Advertised context window for any LiteLLM-style proxy consumer.
+      max_tokens: 200000
+      max_input_tokens: 200000
+      context_window: 200000
+
+  - model_name: claude-opus-4-7          # Brain — direct Anthropic (Claude Code sub-agent tier)
+    litellm_params:
+      model: anthropic/claude-opus-4-7
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      max_tokens: 32000
+      max_input_tokens: 200000
+      context_window: 200000
+
+  - model_name: claude-sonnet-4-6        # Planner/Reviewer — direct Anthropic (Claude Code sub-agent tier)
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      max_tokens: 64000
+      max_input_tokens: 200000
+      context_window: 200000
+
+  - model_name: claude-haiku-4-5         # Actor — direct Anthropic (Claude Code sub-agent tier)
+    litellm_params:
+      model: anthropic/claude-haiku-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      max_tokens: 64000
+      max_input_tokens: 200000
+      context_window: 200000
+
+
 # -- Routing Policy ------------------------------------------------------------
 routing:
   default_model: "external"
-  fallback_chain: ["external", "internal"]
+  fallback_chain: ["internal", "external"]
   # Route to cloud when context exceeds threshold.
   # Hard limit: -c 220048 / 2 = 110024 tokens per slot. At 100K we route to cloud,
   # leaving ~10K headroom for output (default max_tokens=1024 + safety margin).
@@ -67,7 +104,8 @@ routing:
   cloud_model: "external"
   summarization_model: "internal"
 
-# -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
+
+#### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
 rag:
   embedding_model: "bge-m3"                      # 1024-dim, 8192-tok context, served by Ollama on Server 1
   # ollama_url: "http://192.168.1.93:11434/api/embeddings"   # Ollama on Server 1 (explicit IP — not localhost)
@@ -123,7 +161,7 @@ rag:
       - "__pycache__/"
       - ".git/"
       - "node_modules/"
-      - ".claude/"
+      - ".claude/" 
       - ".vscode/"
       - ".venv/"
       - "Library/"              # macOS stuff

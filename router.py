@@ -44,6 +44,10 @@ class SmartRouter:
                 if "${server2_ip}" in api_base:
                     model["litellm_params"]["api_base"] = api_base.replace("${server2_ip}", server2_ip)
 
+        router_settings = self.config.get("router_settings", {})
+        litellm_settings = self.config.get("litellm_settings", {})
+        context_window_fallbacks = litellm_settings.get("context_window_fallbacks")
+
         self.litellm_router = Router(
             model_list=self.config["model_list"],
             routing_strategy="simple-shuffle",
@@ -56,6 +60,9 @@ class SmartRouter:
             # Retry config
             num_retries=2,
             timeout=60,
+            # From config.yaml router_settings / litellm_settings
+            enable_pre_call_checks=router_settings.get("enable_pre_call_checks", False),
+            **({"context_window_fallbacks": context_window_fallbacks} if context_window_fallbacks else {}),
         )
 
         self.routing_config = self.config.get("routing", {})

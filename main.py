@@ -716,27 +716,29 @@ async def model_health():
 
 
 # =============================================================================
-#  Cline-facing LiteLLM-compatible pass-through (Option 2, 2026-04-22)
+#  Proxy pass-through — LiteLLM-compatible stateless endpoints (2026-04-22)
 #
-#  These endpoints let external clients (Cline VSCode plugin, and any other
+#  These endpoints let external clients (Cline VSCode plugin, Claude Code sub-agents, and any
 #  OpenAI-compatible client) hit SoHoAI's LiteLLM Router directly,
 #  bypassing the orchestrator's stateful machinery (Redis, SQLite, KV cache,
-#  RAG tool-use loop, rolling summarization). Cline manages its own history.
+#  RAG tool-use loop, rolling summarization). Callers manage their own history.
 #
-#  Mimics the LiteLLM proxy response shapes so Cline's LiteLLM provider reads
+#  Mimics the LiteLLM proxy response shapes so LiteLLM-compatible clients read
 #  `model_info.max_input_tokens` correctly (v3.79.0 bug: defaults to 8K/128K
-#  if the endpoint returns nothing or an empty API-key is set in Cline).
+#  if the endpoint returns nothing or an empty API-key is set in the client).
 #
-#  Cline base URL: http://192.168.1.93:8000/proxy
+#  Proxy base URL (Cline, Claude Code, etc.): http://192.168.1.93:8000/proxy
 #  See CLAUDE.md §Design decisions and memory/project_shared_llama_server.md.
 # =============================================================================
 
-# Public Cline-facing model name → internal router alias.
+# Public-facing model name → internal router alias.
 # Both paths reach the same LiteLLM Router, so prompt caching on external
 # applies here too; Gemma routing still lands on the shared llama-server.
-_CLINE_EXPOSED_MODELS: dict[str, str] = {
+_PROXY_EXPOSED_MODELS: dict[str, str] = {
     "gemma-4-e4b": "internal",
-    "claude-sonnet-4-6": "external",
+    "claude-haiku-4-5": "claude-haiku-4-5",
+    "claude-sonnet-4-6": "external",            # keeps fallback-to-internal for Cline
+    "claude-opus-4-7": "claude-opus-4-7",
 }
 
 
@@ -766,8 +768,8 @@ def _build_proxy_model_entry(config: dict, public_name: str, internal_name: str)
     }
 
 
-def _resolve_cline_model(name: str | None) -> str | None:
-    """Resolve a Cline-submitted model name to the internal router alias.
+def _resolve_proxy_model(name: str | None) -> str | None:
+    """Resolve a proxy client's model name to the internal router alias.
 
     Accepts any of:
       - bare public name:   "gemma-4-e4b", "claude-sonnet-4-6"
@@ -778,24 +780,24 @@ def _resolve_cline_model(name: str | None) -> str | None:
     if not name:
         return None
     # Direct match on public name
-    if name in _CLINE_EXPOSED_MODELS:
-        return _CLINE_EXPOSED_MODELS[name]
+    if name in _PROXY_EXPOSED_MODELS:
+        return _PROXY_EXPOSED_MODELS[name]
     # Strip a provider prefix like "openai/..." or "anthropic/..."
     bare = name.split("/", 1)[-1] if "/" in name else name
-    if bare in _CLINE_EXPOSED_MODELS:
-        return _CLINE_EXPOSED_MODELS[bare]
+    if bare in _PROXY_EXPOSED_MODELS:
+        return _PROXY_EXPOSED_MODELS[bare]
     # Allow the raw internal alias to pass through
-    if name in set(_CLINE_EXPOSED_MODELS.values()):
+    if name in set(_PROXY_EXPOSED_MODELS.values()):
         return name
     return None
 
 
 @app.get("/proxy/v1/model/info")
 async def proxy_model_info():
-    """LiteLLM-compatible model info for Cline."""
+    """LiteLLM-compatible model info for proxy clients."""
     config = app.state.router.config
     data = []
-    for public_name, internal_name in _CLINE_EXPOSED_MODELS.items():
+    for public_name, internal_name in _PROXY_EXPOSED_MODELS.items():
         entry = _build_proxy_model_entry(config, public_name, internal_name)
         if entry is not None:
             data.append(entry)
@@ -804,13 +806,13 @@ async def proxy_model_info():
 
 @app.get("/proxy/v1/models")
 async def proxy_models():
-    """OpenAI-compatible /v1/models list for Cline."""
+    """OpenAI-compatible /v1/models list for proxy clients."""
     created = int(time.time())
     return {
         "object": "list",
         "data": [
             {"id": name, "object": "model", "created": created, "owned_by": "sohoai"}
-            for name in _CLINE_EXPOSED_MODELS
+            for name in _PROXY_EXPOSED_MODELS
         ],
     }
 
@@ -828,20 +830,20 @@ async def proxy_chat_completions(req: Request):
     public_model = body.pop("model", None)
     stream = bool(body.pop("stream", False))
 
-    internal_model = _resolve_cline_model(public_model)
+    internal_model = _resolve_proxy_model(public_model)
     if internal_model is None:
         logger.warning(
             "Proxy rejected unknown model %r (accepted: %s or prefixed forms)",
-            public_model, sorted(_CLINE_EXPOSED_MODELS),
+            public_model, sorted(_PROXY_EXPOSED_MODELS),
         )
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Model '{public_model}' not exposed by this proxy. "
-                f"Accepted: {sorted(_CLINE_EXPOSED_MODELS)} (with or without provider prefix)."
+                f"Accepted: {sorted(_PROXY_EXPOSED_MODELS)} (with or without provider prefix)."
             ),
         )
-    # Public name to report back to client (preserves whatever form Cline sent).
+    # Report public name as received (preserves provider-prefixed form if sent).
     reported_model = public_model
 
     # force_cloud/max_tokens and any other OpenAI-standard params flow through
@@ -869,7 +871,7 @@ async def proxy_chat_completions(req: Request):
                         chunk_dict = chunk.dict()
                     else:
                         chunk_dict = dict(chunk)
-                    # Overwrite model so Cline sees the public name it requested
+                    # Overwrite model field with public name the caller sent
                     chunk_dict["model"] = reported_model
                     yield f"data: {json.dumps(chunk_dict)}\n\n"
                 yield "data: [DONE]\n\n"
