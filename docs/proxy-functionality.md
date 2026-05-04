@@ -281,6 +281,14 @@ for the cached portion — the cached tokens cost ~10% of uncached input price.
 On the LiteLLM local path, cache_control markers are stripped by the conversion.
 This is irrelevant because local inference has no per-token API cost.
 
+**Note — account-tier / region dependency (verified 2026-05-04):** Prompt caching
+requires Anthropic to serve the request from a caching-enabled inference region.
+Smoke testing showed `cache_creation_input_tokens: 0` and `inference_geo: not_available`
+on both proxy and direct Anthropic calls with the current API key — indicating caching
+is not active for this account tier or routing configuration. The proxy forwards
+`cache_control` markers correctly; the limitation is on Anthropic's side. If caching
+becomes available (account upgrade, region change), no proxy changes are needed.
+
 ### Approximate cost per tier (Anthropic API pricing, May 2026)
 
 | Model | Input (uncached) | Input (cached read) | Output |
