@@ -3,7 +3,7 @@ title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-04--11-48
+updated_at: 2026-05-05--13-58
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -14,6 +14,8 @@ context: >
   generation patterns (rag_mode, system-prompt tool-use, multi-query + MMR,
   contextual retrieval). Updated 2026-04-22: §8.3 multi-query+MMR evaluated
   — no-go verdict, permanently disabled; §8.4 contextual retrieval still frozen.
+  Updated 2026-05-05: §10 RAG Ingestion Service — systemd timer + NFS lock +
+  multi-user sync wrapper.
 ---
 ---
 
@@ -1220,17 +1222,17 @@ Remedy: lower `--batch` (e.g. `--batch 2`) and re-queue via `rag_sync_nfs.py`. B
 ```bash
 # Force-reset ignored files to pending (run before rag_sync_nfs.py)
 
-### A softer approach that takes into account reasop 
+# Soft: only re-queue ignored files with no skip_reason (timeout failures — blank error_msg)
 # sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
-#  "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL WHERE status='ignored' AND (skip_reason IS NULL OR skip_reason='')"
+#   "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL \
+#    WHERE status='ignored' AND (skip_reason IS NULL OR skip_reason='')"
 
-# More brute-force -- ignoring status
+# Brute-force: re-queue ALL ignored files regardless of skip_reason
 sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
   "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL WHERE status='ignored'"
 
-python utils/rag_sync_nfs.py
-python utils/rag_ingest_daemon.py --batch 2
-
+python utils/rag_sync_nfs.py --user florian
+python utils/rag_ingest_daemon.py --workers 3 --batch 2
 ```
 
 #### Qdrant HTTP 400 — oversized upsert payload
@@ -2402,6 +2404,143 @@ Prompt caching and rolling summarization are mildly antagonistic:
 ### Future: premium/high-stakes mode
 
 A future enhancement (not implemented): optional per-request flag `"model": "opus-4.7"` to route critical or review-heavy tasks to Opus 4.7 (most expensive). This would be explicitly opt-in by the user, logged, and clearly documented as a cost-incurring choice. Useful for Phase 4 RL review, sensitive document synthesis, or user-triggered "generate my best answer" mode.
+
+---
+
+## 10. RAG Ingestion Service (2026-05-05)
+
+Automated replacement for manual `rag_sync_nfs.py && rag_ingest_daemon.py` invocations.
+Implemented as a **systemd timer + oneshot service** with an NFS-backed distributed lock
+preventing concurrent daemon instances across both servers.
+
+### 10.1 Service architecture
+
+| File | Role |
+|------|------|
+| `scripts/rag-ingest.timer` | Fires at 01:00, 07:00, 13:00, 19:00 local time; `Persistent=true` catches missed slots after reboot |
+| `scripts/rag-ingest.service` | `Type=oneshot`; `Wants=network-online.target` (NFS safety at boot); `Environment=HOME=/home/florian` (reliable venv path) |
+| `scripts/rag-ingest-run.sh` | Shell wrapper: multi-user sync loop → daemon |
+| `scripts/rag-ingest-logrotate` | Daily rotation, 7 days, `copytruncate` |
+
+The service is installed on one server only. Installing on both servers works (both timers
+fire, one daemon wins the lock, the other skips) but doubles chatter in the log.
+
+**systemd oneshot semantics**: the timer does not fire a second slot while the service is
+still running from a previous slot. This prevents buildup of concurrent instances for free,
+even before the lock is checked.
+
+### 10.2 Shell wrapper — `scripts/rag-ingest-run.sh`
+
+The wrapper is the sole entry point — invoked by the service and by operators for manual runs.
+
+Key design choices:
+- **No wrapper-level lock**: only the daemon holds the NFS lock. If two wrapper invocations
+  race to the sync step, both syncs run (safe — idempotent). The second daemon then exits
+  immediately on lock detection. Keeping one lock avoids the deadlock that would occur if the
+  wrapper held a lock and the daemon (a subprocess) tried to acquire the same lock.
+- **`RAG_SYNC_USERS` array**: one `rag_sync_nfs.py --user <u>` invocation per entry, run
+  sequentially before the daemon. To add a second user, add one array entry.
+- **Log path**: `/mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log` (NAS, alongside
+  other SoHoAI databases). `mkdir -p` on startup creates the `logs/` subdirectory on first run.
+- **Env overrides**: `RAG_WORKERS`, `RAG_BATCH`, `RAG_LOGFILE` — useful for one-off manual
+  runs with different concurrency (e.g. `RAG_WORKERS=1 RAG_BATCH=5` for CPU-embed mode).
+
+### 10.3 NFS distributed lock — `rag.ingest_lock`
+
+**Config** (`config.yaml`): `rag.ingest_lock: "/mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock"`
+
+The daemon (`utils/rag_ingest_daemon.py`) acquires an exclusive lock on this NFS file at
+startup, before any ingestion work begins. The lock prevents two daemon instances from
+processing the same pending files simultaneously — which would otherwise produce **duplicate
+Qdrant vectors** (see race condition analysis below).
+
+**Why `fcntl.lockf()` not `fcntl.flock()`**:
+Both use different kernel lock types on Linux. On this Synology NAS (NFSv4.1,
+`local_lock=none`), `flock(LOCK_EX | LOCK_NB)` does not return `EAGAIN` immediately when
+the lock is held — it blocks indefinitely (uninterruptible sleep, unkillable by SIGTERM).
+`fcntl.lockf()` uses `F_SETLK` (POSIX record locks), which the NFS server honors correctly
+as a non-blocking request, returning `BlockingIOError` in ~0–17s. The ~17s latency is the
+NFS lockd response time and is acceptable for this use case (ingestion is a background job).
+
+**Why NFS locking is safe here**: The NAS is mounted as NFSv4.1 with `local_lock=none`
+(verified via `mount | grep nfs`). This routes flock/lockf calls to the NFS server's lock
+manager rather than handling them locally — giving genuine cross-machine advisory locking.
+This is distinct from the Qdrant/RocksDB NFS incompatibility (which involves RocksDB's
+internal WAL lock patterns, not simple advisory file locks).
+
+**Fallback path**: if `rag.ingest_lock` is absent from config, the daemon falls back to
+`/tmp/rag-ingest.lock` (local, not cross-machine).
+
+### 10.4 Race condition analysis
+
+The critical race is two concurrent daemon instances processing the same files:
+
+`fetch_pending_full()` (SELECT) is **not atomic** with `mark_processing()` (UPDATE).
+Between these two calls, a second daemon can pick up the same rows. Both then:
+1. Delete existing Qdrant points for the file (step 0 — idempotent)
+2. Parse, chunk, embed, and upsert
+
+Result: **duplicate Qdrant vectors** for every contested file, degrading cosine similarity
+scores and search quality. The NFS lock prevents this entirely.
+
+Other concurrency scenarios:
+
+| Scenario | Risk | Outcome |
+|----------|------|---------|
+| Two `rag_sync_nfs.py` in parallel | Low | SQLite WAL + PRIMARY KEY serialize writes; idempotent |
+| Sync while daemon processes a file | Low | If file mtime changed mid-processing: sync resets to `pending`; daemon calls `mark_completed()` overwriting; next sync re-queues | 
+| Two daemons in parallel | **Critical** | Duplicate Qdrant vectors — prevented by NFS lockf |
+| Manual daemon invocation while service active | Medium | Daemon sees lock held, prints "already running", exits |
+| Cross-server conflict | Medium | NFS lockf blocks the second daemon on any machine |
+
+### 10.5 Installation and operations
+
+**Install (run once on target server):**
+```bash
+sudo cp scripts/rag-ingest.service /etc/systemd/system/
+sudo cp scripts/rag-ingest.timer   /etc/systemd/system/
+sudo cp scripts/rag-ingest-logrotate /etc/logrotate.d/rag-ingest
+sudo systemctl daemon-reload
+sudo systemctl enable --now rag-ingest.timer
+```
+
+**Check status:**
+```bash
+systemctl status rag-ingest.timer
+systemctl list-timers rag-ingest.timer
+journalctl -u rag-ingest.service -f          # live output from last/current run
+```
+
+**Manual trigger (same code path as timer):**
+```bash
+bash scripts/rag-ingest-run.sh
+tail -f /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
+python utils/rag_status.py --watch /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
+```
+
+**Debug (stop timer, run scripts individually):**
+```bash
+sudo systemctl stop rag-ingest.timer         # prevent auto-start during debug session
+sudo systemctl stop rag-ingest.service       # stop any active run (SIGTERM; daemon finishes current file)
+
+source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
+python utils/rag_sync_nfs.py --user florian  # safe to run standalone, idempotent
+python utils/rag_ingest_daemon.py --workers 1 --batch 5 \
+    --log-file /tmp/rag-debug.log            # daemon acquires lock; second invocation exits cleanly
+
+sudo systemctl start rag-ingest.timer        # re-enable when done
+```
+
+**Add a second user:**  
+Edit `scripts/rag-ingest-run.sh`, line `RAG_SYNC_USERS=("florian")` → `RAG_SYNC_USERS=("florian" "eva")`.
+No other changes needed — the wrapper loops over the array sequentially.
+
+**CPU-embed mode** (if Ollama GPU on Server 2 is unavailable):
+```bash
+RAG_WORKERS=1 RAG_BATCH=5 bash scripts/rag-ingest-run.sh
+```
+Or set `Environment=RAG_WORKERS=1` / `Environment=RAG_BATCH=5` in the service unit and
+`sudo systemctl daemon-reload`.
 
 ---
 
