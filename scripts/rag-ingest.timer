@@ -1,0 +1,12 @@
+[Unit]
+Description=SoHoAI RAG ingestion — every 6 hours
+
+[Timer]
+# Fire at 01:00, 07:00, 13:00, 19:00 local time (off-peak; avoids the busy :00 mark)
+OnCalendar=*-*-* 01,07,13,19:00:00
+AccuracySec=10min
+# Run once at next boot if a scheduled slot was missed (e.g. server was down)
+Persistent=true
+
+[Install]
+WantedBy=timers.target

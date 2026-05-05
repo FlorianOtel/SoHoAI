@@ -1,0 +1,8 @@
+/mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log {
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+    copytruncate
+}

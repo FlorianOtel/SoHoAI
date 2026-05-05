@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import logging
 import sys
 from pathlib import Path
@@ -149,10 +150,28 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Acquire exclusive NFS lock — prevents concurrent daemons on any machine.
+    # Lock path comes from config.yaml rag.ingest_lock (NFSv4.1, local_lock=none).
+    _config_path = Path(__file__).resolve().parent.parent / "config.yaml"
+    with open(_config_path) as _f:
+        _lock_cfg = yaml.safe_load(_f)
+    _lock_path = _lock_cfg.get("rag", {}).get("ingest_lock", "/tmp/rag-ingest.lock")
+    _lock_fd = open(_lock_path, "w")  # noqa: SIM115 — intentionally kept open for lock lifetime
+    try:
+        # lockf (F_SETLK) not flock() — flock(LOCK_NB) blocks on Synology NFSv4.1
+        fcntl.lockf(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(
+            f"Another rag_ingest_daemon is already running "
+            f"(lock held: {_lock_path}). Exiting."
+        )
+        _lock_fd.close()
+        return
+
     if args.log_file:
         _add_file_handler(args.log_file)
 
-    with open(Path(__file__).resolve().parent.parent / "config.yaml") as f:
+    with open(_config_path) as f:
         config = yaml.safe_load(f)
 
     rag_cfg = config.get("rag", {})

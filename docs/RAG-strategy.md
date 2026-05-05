@@ -1219,10 +1219,18 @@ Remedy: lower `--batch` (e.g. `--batch 2`) and re-queue via `rag_sync_nfs.py`. B
 
 ```bash
 # Force-reset ignored files to pending (run before rag_sync_nfs.py)
+
+### A softer approach that takes into account reasop 
+# sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
+#  "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL WHERE status='ignored' AND (skip_reason IS NULL OR skip_reason='')"
+
+# More brute-force -- ignoring status
 sqlite3 /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db \
-  "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL WHERE status='ignored' AND (skip_reason IS NULL OR skip_reason='')"
+  "UPDATE ingestion_queue SET status='pending', retry_count=0, skip_reason=NULL WHERE status='ignored'"
+
 python utils/rag_sync_nfs.py
 python utils/rag_ingest_daemon.py --batch 2
+
 ```
 
 #### Qdrant HTTP 400 — oversized upsert payload

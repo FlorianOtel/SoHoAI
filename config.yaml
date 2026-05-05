@@ -108,6 +108,11 @@ rag:
   # Snapshots (DR):        /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/
   default_mode: "off"                            # off | on | only — server default for rag_mode (opt-in)
 
+  # -- Ingestion lock (shared across servers via NFS) ---------------------------
+  # NFSv4.1 + local_lock=none forwards flock() to the NAS lock manager, making
+  # this cross-machine. Both rag_ingest_daemon.py and rag-ingest-run.sh read this.
+  ingest_lock: "/mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock"
+
   # -- Tool-use loop (§8.2) ---------------------------------------------------
   tool_use:
     max_iterations: 2       # hard cap on tool-call round trips per user turn

@@ -1,0 +1,18 @@
+[Unit]
+Description=SoHoAI RAG ingestion (sync + ingest)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=florian
+Environment=HOME=/home/florian
+ExecStart=/mnt/nfs/Florian/Gin-AI/projects/SoHoAI/scripts/rag-ingest-run.sh
+StandardOutput=journal
+StandardError=journal
+# 2-hour hard cap — kills a stuck ingestion so the next timer slot fires cleanly.
+# crash_recovery() in StateDB resets any stuck 'processing' rows on next daemon start.
+TimeoutStartSec=7200
+
+[Install]
+WantedBy=multi-user.target
