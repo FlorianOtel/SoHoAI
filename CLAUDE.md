@@ -205,6 +205,10 @@ SoHoAI/
 │   ├── notebooklm_session.json # Saved Google session cookies (not committed)
 │   └── codebase_snapshot.md    # Generated snapshot (not committed)
 ├── scripts/
+│   ├── rag-ingest-run.sh           # RAG ingestion wrapper: per-user sync loop + daemon; used by systemd service
+│   ├── rag-ingest.service          # systemd oneshot service (install to /etc/systemd/system/)
+│   ├── rag-ingest.timer            # fires 01/07/13/19:00 local; Persistent=true for missed slots
+│   ├── rag-ingest-logrotate        # logrotate config (daily, 7 days, copytruncate)
 │   └── qdrant/
 │       ├── qdrant-config.yaml      # Qdrant server config (storage paths, ports)
 │       ├── qdrant.service          # systemd unit file (copy to /etc/systemd/system/)
@@ -595,13 +599,19 @@ bash NFS-files--MCP-server/nfs_files_mcp_server.sh
 python utils/cli_chat.py --server http://192.168.1.93:8000 --user florian
 #   in-session: /rag on | /rag only | /rag status | /rag search <query> | /user <id>
 
-# RAG ingestion (see RAG-strategy.md §5 for full walkthrough)
-python utils/rag_sync_nfs.py                   # scan NFS roots + claude chat dirs → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files
+# RAG ingestion — automated service (live since 2026-05-05; see RAG-strategy.md §10)
+# Fires at 01:00, 07:00, 13:00, 19:00 CEST via systemd timer; log: /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
+systemctl status rag-ingest.timer              # check timer status and next trigger
+python utils/rag_status.py --watch /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log  # live monitor for service runs
+
+# RAG ingestion — manual / debug (see RAG-strategy.md §5 for full walkthrough)
+bash scripts/rag-ingest-run.sh                 # run the full service wrapper manually (multi-user sync + daemon)
+python utils/rag_sync_nfs.py --user florian    # scan only; use --user to avoid path-dedup ambiguity (see RAG-strategy.md §10.5)
 python utils/rag_ingest_daemon.py --workers 1 --batch 5 --log-file /tmp/rag-ingestion.log    # CPU embed (Server 1); --log-file required for --watch
 python utils/rag_ingest_daemon.py --workers 3 --batch 20 --log-file /tmp/rag-ingestion.log   # GPU embed (Server 2, RTX 5070); see RAG-strategy.md §5.4
 python utils/rag_status.py                     # one-shot queue counts + Qdrant stats (ignored count always shown)
 python utils/rag_status.py --ignored           # detail listing of ignored files + rationale
-python utils/rag_status.py --watch /tmp/rag-ingestion.log   # live monitor: chunk progress bar + ETA (requires --log-file on daemon)
+python utils/rag_status.py --watch /tmp/rag-ingestion.log   # live monitor for manual daemon runs
 python utils/rag_status.py --list-pending              # print every pending file path (pipeable; combine with --user)
 
 # RAG testing
