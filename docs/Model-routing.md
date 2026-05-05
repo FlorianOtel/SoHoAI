@@ -1,9 +1,9 @@
 ---
-title: "SoHoAI Proxy — Cline and Claude Code integration"
+title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Florian (manual)
-updated_at: 2026-05-05--12-10
+updated_by: Claude Code (Claude Haiku 4.5)
+updated_at: 2026-05-05--16-38
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -13,10 +13,26 @@ context: >
   Future tool-use work for local models is tracked in docs/TODO.md.
 ---
 
-# SoHoAI proxy — Cline and Claude Code integration
+# SoHoAI model routing — Cline and Claude Code integration
 
 Both proxy paths are **stateless**: no Redis, no SQLite, no RAG, no KV cache, no rolling
 summarization. The caller manages its own conversation history.
+
+---
+
+## 0. LLM routing overview
+
+SoHoAI routes conversation inference across two model tiers: **external** (Claude Sonnet 4.6 via Anthropic API, primary cloud default) and **internal** (Gemma 4 E4B 7.52B Q8_0 on Server 2, fallback/summarization). Routing logic is implemented in `router.py`. The default is external (Sonnet 4.6); if Anthropic becomes unreachable, the router automatically falls back to local Gemma. Rolling summarization at ~100K tokens uses internal (Gemma 4) to keep per-token costs predictable and persists summaries to SQLite for cold-resume recovery.
+
+**External (Sonnet 4.6) path** goes through LiteLLM with prompt caching enabled — cache_control markers are injected on the system message (long-lived anchor) and on `messages[-2]` (rolling prefix anchor), reducing input cost by ~90% on cache hits. Prompt caching is active only on the Anthropic-compatible path; the local path uses Anthropic prompt caching instead.
+
+**Specialist (Gemma 4) path** bypasses LiteLLM and calls llama-server's native `/completion` endpoint directly, which is mandatory to pass `slot_id` for KV cache targeting. This path is used only on fallback (Anthropic down), for rolling summarization operations, and for background/offline tasks. Rolling summarization erases the KV slot before calling Gemma, and both summarization and the subsequent main inference start cold sequentially on the same slot. Prompt caching is irrelevant for local inference (no API cost).
+
+**Design rationale**: Sonnet 4.6 is now the interactive default (2026-04-22 flip). At ~50–100 turns/day for a 4-user family, Sonnet with prompt caching costs ~$30–60/mo — tolerable — while delivering substantially better reasoning and tool-use fidelity than a 4B local model. Gemma's role shifted from "default inferencer" to "specialized worker" without removing the infrastructure.
+
+**LiteLLM stays as the routing + fallback layer**, handling OpenAI/Anthropic API differences and executing the fallback chain `external → internal` (reversed direction from pre-flip implementation). **Internal bypasses LiteLLM** — native `/completion` is required to pass `slot_id` for KV cache targeting. The branch point is at `main.py:333-347`.
+
+**Tool-use on both paths** uses an XML sentinel: `<tool_call>{"name":"search_documents","args":{"query":"…"}}</tool_call>`. Both external and internal paths emit and parse this sentinel. Sonnet handles it reliably. Native Anthropic `tools=[...]` + `tool_use` content blocks remain a deferred follow-up; unifying the two paths isn't blocking current quality.
 
 ---
 

@@ -2,6 +2,8 @@
 title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
+updated_by: Claude Code (Claude Haiku 4.5)
+updated_at: 2026-05-05--16-38
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -10,6 +12,138 @@ context: >
 ---
 
 # SoHoAI Design History
+
+---
+
+## 2026-04-16 — Phase 1 core loop complete
+
+### What was implemented
+
+The foundational orchestrator loop for SoHoAI: FastAPI server on Server 1, LiteLLM routing with fallback, Anthropic prompt caching, llama-server on Server 2 GPU, per-conversation KV cache persistence, rolling summarization, and full conversation memory (Redis short-term + SQLite long-term + KV cache).
+
+**All Phase 1 deliverables**:
+- FastAPI orchestrator on Server 1
+- LiteLLM routing with fallback chain: external (Sonnet 4.6, cloud) → internal (Gemma 4, local)
+- Anthropic prompt caching on the external path (`SmartRouter._apply_cache_control()`) — ephemeral breakpoints on system + `messages[-2]` rolling prefix
+- llama-server on Server 2 GPU: Gemma 4 E4B 7.52B Q8_0, 2 slots × 110024 ctx
+- Per-conversation KV cache persisted to NAS via llama-server slot API (internal path only)
+- Rolling summarization at ~100K token threshold; summary + boundary `message_id` persisted to SQLite
+- Redis conversation cache with NAS AOF persistence
+- SQLite chat store with full CRUD + `summary_text`/`summary_covers_through_message_id` columns
+- Markdown and JSONL export
+- CLI chat client (`utils/cli_chat.py`)
+- Feedback collection for RL
+- MCP server for Gin-AI filesystem (`NFS-files--MCP-server/`)
+
+### Per-request flow (tool-use loop)
+
+Both external (primary, Sonnet 4.6) and internal (fallback, Gemma 4) share the same loop structure. The only branch is the inference step at `main.py:333-347`:
+
+```
+resume(chat_id)           → assign slot + restore KV from NAS (no-op on external)
+append(user_msg)          → Redis + SQLite
+maybe_summarize(store=…)  → if >400K chars (~100K tokens): summarize old turns via
+                            internal (Gemma), rebuild Redis, erase stale KV,
+                            persist summary + boundary id to SQLite
+get_context()             → condensed history from Redis
+build_system_prompt()     → off/on/only mode → tool spec injected into system message
+loop (max 2 iterations):
+  # Branch on selected model:
+  if target == internal (fallback):
+    apply_gemma_template()   → <|turn>role\n… format; stop=["<|turn>"]
+    inference(slot_id)       → POST /completion to llama-server GPU slot
+  else (primary = external):
+    router.complete()        → LiteLLM → Anthropic with cache_control markers
+                               (cache_read grows each turn as prefix rolls forward)
+  parse_tool_call()       → detect <tool_call>…</tool_call> in output
+  if tool_call:
+    _retrieve()           → search_rag() (multi-query permanently disabled)
+    append tool result    → re-enter loop
+  else: final answer → break
+append(assistant)         → Redis + SQLite
+park(chat_id)             → save KV slot to NAS + refresh Redis TTL
+```
+
+---
+
+## 2026-04-21 — Phase 2 RAG + Advanced features complete
+
+### What was implemented
+
+Initial ingestion run produced **2891 files completed, 0 pending, 0 ignored**, yielding **98,737 Qdrant points** in the `documents` collection (avg ~34 chunks/file). End-to-end retrieval + chat injection verified via `utils/rag_smoke_test.py`.
+
+**Multi-tenancy** — per-user document isolation via Google OAuth2:
+- Each family member has a private NFS root (`/mnt/nfs/{Florian,Eva,Annika,Laura}`)
+- Shared content under `/mnt/nfs/La-Familia` visible to all authenticated users
+- `owner` field in every Qdrant point; search filtered by `MatchAny(any=[user_owner, "la-familia"])`
+- `user_id` field added to `ChatRequest`, `SearchRequest`, and SQLite `chats` table
+- User→NFS root mapping in `config.yaml` (`users:` + `shared:` sections)
+
+**Document ingestion**: `docling` (PDF, PPTX, DOCX) + dedicated ipynb cell extractor + `python-pptx` PPTX fallback + direct UTF-8 read (TXT, MD, YAML, CSV):
+- **ipynb NOT handled by docling** — Fix: `_parse_ipynb()` in `ingest.py` parses JSON directly, extracts markdown cells as prose and code cells as fenced blocks, skips outputs and empty cells.
+- **PPTX docling format detection failure** — Fix: `_parse_pptx()` in `ingest.py` uses `python-pptx` as secondary fallback; iterates slides/shapes, extracts all text frame content with `Slide N` headers. Raw UTF-8 read is last resort only if `python-pptx` also fails. 29 affected files force-re-queued (2026-04-19).
+
+**Chunking — parent-child strategy**:
+- Child chunks (~250 tokens, 20 overlap) → embedded, stored in Qdrant as search index
+- Parent chunks (~800–1200 tokens, 100 overlap) → raw text only, stored in Qdrant payload (`parent_text` field)
+- Flat 512-token chunks used only for PPTX slides and short TXT/YAML/config files
+
+**Embeddings via bge-m3 served by Ollama** — 1024 dimensions, 570M params, ~1.2GB, top MTEB scores:
+- Two modes: CPU (Server 1) ~650ms/chunk; GPU (Server 2, RTX 5070) ~10–20ms/chunk
+- `embed_batch()` runs up to N concurrent requests via asyncio semaphore; N = `--batch` in daemon
+- `embed_batch()` accepts optional `progress_cb(done, total)` — called every 50 chunks; used by `ingest.py` to log lines read by `rag_status.py --watch`
+- HTTP timeout in `embed_text()`: **120s** — must survive concurrent embedding load
+
+**Package**: `rag_engine/` — fully implemented (schema, collection, embeddings, state, scanner, ingest, search, multi_query, tool_use)
+
+**Advanced RAG features (§8.1–§8.3)**:
+- **`rag_mode` enum** (`off` / `on` / `only`) — legacy boolean toggle removed
+- **Tool-use via system prompt** — LLM decides when to retrieve; no unconditional top-k injection
+- **Multi-query + MMR** — `rag_engine/multi_query.py`; **permanently disabled** (`rag.multi_query.enabled: false`). Evaluated 2026-04-22: no-go verdict. Standard single-query retrieval is sufficient for this corpus.
+
+**Phase 2 implementation checklist** — all 14 items completed and strikethrough:
+~~1. Replace `unstructured` with `docling`~~ ~~2. Replace `sentence-transformers` with Ollama in `rag.py`~~ ~~3. Fix `config.yaml` RAG section (bge-m3, ollama_url)~~ ~~4. Add `owner` to Qdrant payload schema; `user_id` to `ChatRequest`/`SearchRequest`~~ ~~5. Add multi-user config (`users:` + `shared:` sections) to `config.yaml`~~ ~~6. Implement `rag_engine/` package (schema, collection, embeddings, state, scanner, ingest, search)~~ ~~7. Wire `rag_engine` into `main.py`; delete `rag.py`~~ ~~8. Implement standalone CLI utils (`utils/rag_*.py`)~~ ~~9. Add `POST /v1/rag/ingest/*` FastAPI endpoints~~ ~~10. Add `db_base_path` global config variable~~ ~~11. Configure `users:` section in `config.yaml` with real Google emails~~ ~~12. Run initial NFS scan and ingestion~~ ~~13. Implement `rag_mode` (off/on/only), system-prompt tool-use loop, `prompts/` module~~ ~~14. Implement multi-query + MMR reranking (`rag_engine/multi_query.py`)~~
+
+**→ NOW**: Phase 3 — Google OAuth2 middleware + OpenAI-compatible response format for Open WebUI (not blocking; RAG works end-to-end today via `--user florian`).
+
+Full design details and worker loop spec: `RAG-strategy.md`.
+
+---
+
+## 2026-04-20 — Quantization benchmark: Q6_K → Q8_0
+
+### Benchmark methodology
+
+Tool: `~/Gin-AI/tools/llama-performance-test/llama_perf_test.py`
+
+3 runs averaged per scenario, `/completion` native endpoint, `cache_prompt: false` (cold prefill every run), `ignore_eos: true`, `n_predict: 200`, `temperature: 0` (greedy).
+
+Results: `~/Gin-AI/tools/llama-performance-test/results_q6k.json` (Q6_K baseline), `results_q8_0.json` (Q8_0 current)
+
+### Q6_K → Q8_0 comparison
+
+Measured 2026-04-20, RTX 5070 12 GB, 2 slots × 131072 ctx at time of measurement
+
+| Scenario | Q6_K tok/s | Q8_0 tok/s | Δ |
+|---|---|---|---|
+| **Decode serial** | 109.4 | 96.2 | **−12%** |
+| Decode parallel/slot0 | 101.1 | 89.4 | −12% |
+| Decode parallel/slot1 | 101.5 | 89.8 | −12% |
+| Decode parallel combined | 202.6 | 179.2 | −12% |
+| Prefill short (13 tok) | 440 | 399 | −9% (noisy) |
+| **Prefill long (4126 tok)** | 5420 | 6270 | **+16%** |
+| Wall clock short serial | 1.86s | 2.12s | +14% |
+| Wall clock long serial | 2.68s | 2.82s | +5% |
+| Parallel wall clock | 2.03s | 2.29s | +13% |
+| Parallel speedup ratio | 0.92× | 0.92× | identical |
+
+### Key findings
+
+- **Decode is ~12% slower** — Q8_0 weights are 27% larger (5.9 → 7.5 GB); decode is memory-bandwidth-bound so larger weights cost proportionally more per step.
+- **Long-context prefill is +16% faster** — Q8_0's uniform INT8 maps cleanly to tensor core INT8 ops; Q6_K's mixed-precision K-quant requires a dequantize step that costs more at high token counts.
+- **Real-world impact at 200 output tokens**: ~260ms extra latency per turn. At 100 tokens: ~130ms. Imperceptible in streaming mode.
+- **Continuous batching unchanged**: 0.92× parallel speedup ratio is identical across both quantizations.
+- **Conclusion**: ~12% decode regression is the cost of near-f16 weight quality. Acceptable for interactive use at 96 tok/s serial decode.
 
 ---
 

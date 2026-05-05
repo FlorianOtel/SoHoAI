@@ -2,6 +2,8 @@
 title: "SoHoAI — Future work and deferred tasks"
 created_at: 2026-05-04--17-30
 created_by: Claude Code (Claude Sonnet 4.6)
+updated_by: Claude Code (Claude Haiku 4.5)
+updated_at: 2026-05-05--16-38
 context: >
   Tracks deferred implementation work that is understood, scoped, and intentionally
   left for a future session. Each entry includes the motivation, the known approach,
@@ -9,6 +11,33 @@ context: >
 ---
 
 # SoHoAI — Future work
+
+---
+
+## Phase 3 — MCP integration + Web UI + Auth (in progress)
+
+**Google OAuth2 (OIDC) authentication middleware** — family members authenticate with separate Google accounts within the same Google Family Group. User identity from JWT is mapped to `owner` via `config.yaml` `users:` section; Qdrant search filtered by ownership.
+
+**MCP gateway in orchestrator** — `mcp_gateway.py` stub ready. Plan: delegate tool calls to specialized MCP servers (filesystem, web search, calendar, weather).
+
+**Initial MCP tool servers**:
+- Filesystem (done): `nfs_files_mcp_server.py` exposes Gin-AI filesystem
+- Web search (planned)
+- Calendar (planned)
+
+**Web frontend**: custom FastAPI + HTMX/React with server-managed history (chat_id, Redis, KV cache). Supports multi-user concurrent sessions without state collision (each user's Redis key is independent).
+
+**OpenAI-compatible response format** for Open WebUI integration. Currently using custom `ChatResponse` model with `chat_id`, `model_used`, `message`, `rag_sources`, `rag_mode_used` fields.
+
+**Offline resilience**: locally cached session tokens with multi-hour TTL; CLI local API key fallback for when Anthropic API is unreachable.
+
+---
+
+## Phase 4 — Image search + RL (future)
+
+**CLIP model** (openai/clip-vit-base-patch32) on Server 2 GPU. Family photo ingestion → CLIP embeddings → separate Qdrant `images` collection (same Qdrant instance as `documents`). Text-to-image similarity search for family photo library.
+
+**RL training data pipeline**: export conversations with feedback signals (thumbs up/down on turns) as DPO-format JSONL for training with TRL framework. Goal: fine-tune a smaller local model (e.g. Gemma 4 E4B) on real family conversations to reduce API cost over time.
 
 ---
 
