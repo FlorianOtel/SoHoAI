@@ -89,7 +89,7 @@ Server 1 (192.168.1.93)             │          Server 2 (192.168.1.95)
 | [docs/Model-routing.md](docs/Model-routing.md) | LLM routing tiers, proxy paths (Cline + Claude Code), sub-agent mechanics, cost tables |
 | [docs/Memory-tiers.md](docs/Memory-tiers.md) | Redis / SQLite / KV cache tiers, ConversationCache API, rolling summarization design |
 | [docs/MCP-functionality.md](docs/MCP-functionality.md) | NFS-files MCP server tools, transport, path safety |
-| [docs/RAG-strategy.md](docs/RAG-strategy.md) | RAG pipeline design, chunking, embeddings, Qdrant schema, ingestion service |
+| [docs/RAG-strategy.md](docs/RAG-strategy.md) | RAG pipeline design, chunking, embeddings, Qdrant schema, ingestion service, recovery/rollback (§11) |
 | [docs/design-history.md](docs/design-history.md) | Implementation milestones, benchmark results, architectural decisions |
 | [docs/TODO.md](docs/TODO.md) | Deferred work: Phase 3, Phase 4, local-model tool-use |
 | [docs/RAG-troubleshoot.md](docs/RAG-troubleshoot.md) | Qdrant troubleshooting, recovery procedures |

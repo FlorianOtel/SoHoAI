@@ -45,4 +45,12 @@ log "--- rag_ingest_daemon.py ---"
 python utils/rag_ingest_daemon.py \
     --workers "$WORKERS" --batch "$BATCH" --log-file "$LOGFILE"
 
+log "--- SQLite WAL checkpoint ---"
+DB_PATH="/mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db"
+sqlite3 "$DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1 | tee -a "$LOGFILE" || \
+  log "WARN: WAL checkpoint failed (non-fatal)"
+
+log "--- qdrant-snapshot.sh (keep 12) ---"
+bash scripts/qdrant/qdrant-snapshot.sh --keep 12 2>&1 | tee -a "$LOGFILE"
+
 log "=== RAG ingestion complete ==="

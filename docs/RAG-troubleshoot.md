@@ -2,8 +2,8 @@
 title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-04--18-12
+updated_by: Claude Code (Claude Haiku 4.5)
+updated_at: 2026-05-05--18-00
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -14,6 +14,86 @@ context: >
 ---
 
 # SoHoAI RAG Pipeline — Troubleshooting
+
+---
+
+## Consistent Rollback Procedure
+
+### How consistency is guaranteed
+
+After each ingestion run, `rag-ingest-run.sh` (Server 2):
+1. Checkpoints the SQLite WAL with `PRAGMA wal_checkpoint(TRUNCATE)` — the main
+   `rag_state.db` file becomes fully self-contained (no WAL file needed to restore).
+2. Creates a Qdrant snapshot via API — written directly to NFS at
+   `/mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/`.
+
+Any NFS hourly snapshot taken AFTER an ingest run completes captures both files at
+the same ingestion state and is a valid rollback point. 12 Qdrant snapshots are
+retained (3 days × 4 runs/day); a 03:00 cron on Server 2 provides a safety-net.
+
+### Rollback to a past NFS snapshot (Qdrant NVMe corrupted or lost)
+
+Qdrant's active storage is local NVMe on Server 1 (`/var/lib/qdrant/storage`).
+`rag_state.db` and Qdrant `.snapshot` files are both on NFS.
+
+1. Stop services:
+   ```bash
+   # On Server 2:
+   sudo systemctl stop rag-ingest.timer rag-ingest.service
+   # On Server 1:
+   sudo systemctl stop qdrant
+   ```
+
+2. From the Synology snapshot browser (or NFS snapshot mount), identify the target
+   snapshot at time T. Find the Qdrant `.snapshot` file created closest before T:
+   ```bash
+   ls -lt /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/*.snapshot
+   ```
+   The filename encodes the creation timestamp (e.g. `documents-...-2026-05-05-01-32-10.snapshot`).
+
+3. Restore Qdrant on Server 1:
+   ```bash
+   # Clear local NVMe storage
+   sudo rm -rf /var/lib/qdrant/storage
+   sudo systemctl start qdrant
+   # Recover from NFS snapshot
+   curl -X PUT "http://192.168.1.93:6333/collections/documents/snapshots/recover" \
+     -H "Content-Type: application/json" \
+     -d '{"location": "file:///mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/<snapshot-name>.snapshot"}'
+   ```
+
+4. Restore `rag_state.db` from the same NFS snapshot point.
+   (Synology: access the snapshot volume, copy `rag_state.db` to
+   `/mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db`.
+   Only the main db file is needed — the WAL is empty after each ingest run.)
+
+5. Verify:
+   ```bash
+   source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
+   python utils/rag_status.py
+   curl -s http://192.168.1.93:6333/collections/documents | python3 -m json.tool
+   ```
+
+6. Re-ingest files added after the rollback point (on Server 2):
+   ```bash
+   python utils/rag_sync_nfs.py --user florian
+   python utils/rag_ingest_daemon.py --workers 3 --batch 20 \
+     --log-file /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
+   ```
+
+7. Restart ingestion timer (Server 2):
+   ```bash
+   sudo systemctl start rag-ingest.timer
+   ```
+
+### Rollback SQLite only (Qdrant healthy, rag_state.db corrupted)
+
+1. Stop the ingestion timer on Server 2.
+2. Restore `rag_state.db` from the NFS snapshot point (main file only; WAL is empty).
+3. Run `rag_sync_nfs.py` to reconcile — files marked `completed` in SQLite but
+   absent from Qdrant will be re-queued automatically.
+4. Run `rag_ingest_daemon.py` to fill any gaps.
+5. Restart ingestion timer.
 
 ---
 
