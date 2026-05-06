@@ -3,7 +3,7 @@ title: "SoHoAI — Project Context & Design Reference"
 created_at: 20260407-000000
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-06--17-05
+updated_at: 2026-05-06--17-37
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   Project instructions and design decisions for Claude Code;

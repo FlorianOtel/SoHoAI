@@ -2,6 +2,8 @@
 title: "SoHoAI Usage and Billing Telemetry Pipeline"
 created_at: 2026-05-06--00-00
 created_by: Claude Code (Claude Sonnet 4.6)
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-06--17-37
 context: >
   Cross-project design document for SoHoAI Stage 1 telemetry implementation.
   Goal: Add a complete usage and billing telemetry pipeline to SoHoAI so that
@@ -27,10 +29,19 @@ inbound API traffic:
 - Use LiteLLM's built-in cost calculator as single source of truth (provider-agnostic, self-updating)
 
 Phases:
-- **Phase 0** (complete): Design document (this file)
-- **Phase 1**: Add usage_events table to chats.db; wire LiteLLM success_callback
-- **Phase 2**: Source attribution via endpoint + X-Orchestra-Session-ID header
-- **Phase 3**: GET /v1/usage/stats endpoint
+- **Phase 0** ✅: Design document (this file)
+- **Phase 1** ✅: Add usage_events table to chats.db; wire LiteLLM success_callback
+- **Phase 2** ✅: Source attribution via endpoint + X-Orchestra-Session-ID header
+- **Phase 3** ✅: GET /v1/usage/stats endpoint
+
+**Post-review fix (2026-05-06):** `_anthropic_messages_forward()` (raw httpx path, bypasses
+LiteLLM) initially omitted cache token costs. Fixed in commit `1a15abe`:
+versioned model IDs have the date suffix stripped before `get_model_info()` lookup
+(e.g. `claude-sonnet-4-6-20250219` → `claude-sonnet-4-6`), then
+`cache_creation_input_token_cost` and `cache_read_input_token_cost` rates are fetched
+and applied to the extracted cache token counts. Without this, heavy-caching orchestra
+sessions (typical: ~1.5M cache_read tokens) would undercount cost by ~$0.45/session
+on the forward path.
 
 ### Stage 2 (claude-orchestra — future session, out of scope here)
 
