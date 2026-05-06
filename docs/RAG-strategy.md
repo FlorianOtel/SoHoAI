@@ -3,7 +3,7 @@ title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-05--18-00
+updated_at: 2026-05-06--12-40
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -472,12 +472,18 @@ Once bulk ingestion is complete, new documents enter only via incremental re-sca
 
 ```
 1. POST /collections/documents/snapshots  → Qdrant creates archive on NFS
-2. GET  /collections/documents/snapshots  → list all snapshots, sorted by creation_time
+2. GET  /collections/documents/snapshots  → list all snapshots, sort by creation_time
 3. DELETE oldest snapshots beyond KEEP=3  → via DELETE /collections/.../snapshots/{name}
 ```
 
 All API calls use plain `curl` + `python3` (stdlib only, no extra dependencies).
 Run manually: `bash scripts/qdrant/qdrant-snapshot.sh [--keep N]`
+
+> **`creation_time: null` quirk (2026-05-06):** Qdrant v1.17.1 returns `"creation_time": null`
+> for all snapshots. The sort key uses `s.get("creation_time") or ""` (not `.get(..., "")`)
+> so that a present-but-null value is coerced to `""` rather than passed through as `None`.
+> Sorting an all-`""` list is a stable no-op; snapshot names contain a `YYYY-MM-DD-HH-MM-SS`
+> suffix so filesystem `ls -lt` ordering is always authoritative for human inspection.
 
 #### Recovery procedure
 

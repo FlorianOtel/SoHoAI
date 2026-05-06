@@ -34,7 +34,7 @@ with urllib.request.urlopen(f"{url}/collections/{col}/snapshots") as r:
     snaps = json.load(r)["result"]
 
 # Sort oldest-first by creation_time
-snaps.sort(key=lambda s: s.get("creation_time", ""))
+snaps.sort(key=lambda s: s.get("creation_time") or "")
 to_delete = snaps[:-keep] if len(snaps) > keep else []
 
 for s in to_delete:
