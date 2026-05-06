@@ -89,7 +89,8 @@
       "Bash(lspci)",
       "Bash(boltctl list *)",
       "Bash(git *)",
-      "Bash(journalctl *)"
+      "Bash(journalctl *)",
+      "Bash(systemctl status *)"
     ],
     "additionalDirectories": [
       "/home/florian/Gin-AI",
