@@ -14,6 +14,19 @@ context: >
 
 ---
 
+## Usage telemetry — Stage 2 (future claude-orchestra session)
+
+SoHoAI Stage 1 telemetry pipeline is live (`usage_events` table, `GET /v1/usage/stats`).
+See `~/Gin-AI/projects/docs/Telemetry.md` for the full Stage 2 spec.
+
+Required work in a future claude-orchestra branch:
+- Inject `X-Orchestra-Session-ID` header on every `/v1/messages` call during `/brain`/`/duo` sessions
+- Migrate T2 cost calculation from `pricing.yaml` to `litellm.completion_cost()`
+- After 4+ weeks of SoHoAI data: query `GET /v1/usage/stats?session_id=` as primary cost source (fall back to JSONL parsing)
+- Update `telemetry-report.sh` to annotate SoHoAI-sourced vs JSONL-parsed sessions
+
+---
+
 ## Phase 3 — MCP integration + Web UI + Auth (in progress)
 
 **Google OAuth2 (OIDC) authentication middleware** — family members authenticate with separate Google accounts within the same Google Family Group. User identity from JWT is mapped to `owner` via `config.yaml` `users:` section; Qdrant search filtered by ownership.

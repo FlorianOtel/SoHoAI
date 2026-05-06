@@ -2,8 +2,8 @@
 title: "SoHoAI — Project Context & Design Reference"
 created_at: 20260407-000000
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Haiku 4.5)
-updated_at: 2026-05-05--16-38
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-06--17-05
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   Project instructions and design decisions for Claude Code;
@@ -104,6 +104,7 @@ SoHoAI/
 ├── .mcp.json                   # Claude Code auto-discovers this
 ├── schemas.py                  # Pydantic models (ChatRequest, ChatResponse, etc.)
 ├── router.py                   # SmartRouter — LiteLLM wrapper with routing logic
+├── usage_tracker.py            # UsageTracker — LiteLLM CustomLogger callback; records usage_events to chats.db
 ├── conversation.py             # ConversationCache — Redis + KV cache coordinator
 ├── kv_cache.py                 # KVCacheManager — llama-server slot save/restore + inference; apply_gemma_template() (Gemma 4 <|turn> format)
 ├── chat_store.py               # ChatStore — SQLite long-term persistence
@@ -169,6 +170,7 @@ SoHoAI/
 | GET | `/health` | Health check (Redis, models) |
 | GET | `/v1/models` | List models — OpenAI-compatible format |
 | GET | `/v1/models/health` | Check each model endpoint |
+| GET | `/v1/usage/stats` | Token usage + cost reporting (filter by user, model, source, session_id, time window) |
 | GET | `/proxy/v1/model/info` | LiteLLM-compatible model info for proxy clients (Cline, Claude Code) — max_input_tokens, context_window |
 | GET | `/proxy/v1/models` | OpenAI model list for proxy clients (Cline, Claude Code) |
 | POST | `/proxy/v1/chat/completions` | Stateless OpenAI-compatible pass-through for proxy clients (Cline, Claude Code) — no Redis/RAG/summarization |

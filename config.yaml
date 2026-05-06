@@ -219,3 +219,12 @@ chat:
   # 100K input + 1024 output = ~101K, leaving ~9K safety margin.
   summarize_threshold_chars: 400000
   summarize_keep_turns: 20
+
+# -- Local model shadow pricing (informational only; NOT read by any code) ------
+# litellm.completion_cost() returns 0.0 for local models (correct — no API cost).
+# This block is a placeholder for future electricity-cost estimates if needed.
+local_model_pricing:
+  gemma-4-e4b:
+    cost_per_million_input_tokens: 0.0    # no API cost
+    cost_per_million_output_tokens: 0.0
+    notes: "Gemma 4 E4B 7.52B Q8_0 on RTX 5070; electricity cost not tracked"

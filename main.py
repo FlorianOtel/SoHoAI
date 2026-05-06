@@ -16,6 +16,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
+import litellm
 
 import yaml
 from dotenv import load_dotenv
@@ -119,7 +121,7 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Chat store (SQLite) ✓")
 
-    app.state.router = SmartRouter(config_path="config.yaml")
+    app.state.router = SmartRouter(config_path="config.yaml", store=app.state.store)
     logger.info(f"Router: {app.state.router.available_models}")
 
     async def summarize_fn(text: str) -> str:
@@ -350,6 +352,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
                     model=req.model,
                     force_cloud=req.force_cloud,
                     stream=False,
+                    metadata={"source": "cli_chat", "user_id": req.user_id, "chat_id": chat_id, "orchestra_session_id": None},
                 )
                 raw_text = response.choices[0].message.content
                 model_used = response.get("model", req.model or "unknown")
@@ -414,10 +417,14 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
 
     # -- 7. Persist assistant message ----------------------------------------
     await cache.append(chat_id, "assistant", assistant_content)
+    # Calculate token_count from response usage when using cloud model
+    token_count = 0
+    if not used_internal and 'response' in locals() and hasattr(response, 'usage') and response.usage:
+        token_count = (response.usage.prompt_tokens or 0) + (response.usage.completion_tokens or 0)
     store.save_message(
         chat_id, "assistant", assistant_content,
         model_used=model_used,
-        token_count=0,
+        token_count=token_count,
     )
 
     # -- 8. Return ------------------------------------------------------------
@@ -720,6 +727,94 @@ async def model_health():
     return await app.state.router.health_check()
 
 
+@app.get("/v1/usage/stats")
+async def usage_stats(
+    user: str | None = Query(None),
+    since: str | None = Query(None),
+    until: str | None = Query(None),
+    model: str | None = Query(None),
+    source: str | None = Query(None),
+    session_id: str | None = Query(None),
+    group_by: str | None = Query(None),
+) -> JSONResponse:
+    """Query usage statistics across completions.
+
+    Supported query parameters:
+      - user: filter by user_id
+      - since: ISO-8601 start time (default: 7 days ago UTC)
+      - until: ISO-8601 end time (default: now UTC)
+      - model: filter by model name
+      - source: filter by source (orchestra, claude_code_native, cline, cli_chat)
+      - session_id: filter by orchestra_session_id
+      - group_by: aggregate by day, model, or source (default: no grouping)
+
+    Returns:
+      - window: {since, until}
+      - totals: {requests, input_tokens, output_tokens, cache_tokens, cost_usd, cache_hit_rate}
+      - by_model: model → totals (if not grouped by model)
+      - by_source: source → totals (if not grouped by source)
+      - by_day: date → totals (if grouped by day)
+    """
+    # Validate source
+    valid_sources = {"orchestra", "claude_code_native", "cline", "cli_chat"}
+    if source and source not in valid_sources:
+        return JSONResponse(
+            {"error": "invalid source", "valid": sorted(valid_sources)},
+            status_code=400
+        )
+
+    # Validate group_by
+    valid_group_by = {None, "day", "model", "source"}
+    if group_by and group_by not in valid_group_by:
+        return JSONResponse(
+            {"error": "invalid group_by", "valid": sorted(g for g in valid_group_by if g)},
+            status_code=400
+        )
+
+    # Default time window: 7 days ago to now (UTC)
+    since_dt = None
+    until_dt = None
+
+    if since:
+        try:
+            since_dt = datetime.datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError:
+            return JSONResponse(
+                {"error": "invalid since format", "expected": "ISO-8601"},
+                status_code=400
+            )
+    else:
+        since_dt = datetime.datetime.utcnow() - datetime.timedelta(days=7)
+
+    if until:
+        try:
+            until_dt = datetime.datetime.fromisoformat(until.replace("Z", "+00:00"))
+        except ValueError:
+            return JSONResponse(
+                {"error": "invalid until format", "expected": "ISO-8601"},
+                status_code=400
+            )
+    else:
+        until_dt = datetime.datetime.utcnow()
+
+    # Convert back to ISO-8601 strings
+    since_str = since_dt.isoformat() + "Z" if since_dt and not since_dt.isoformat().endswith("Z") else (since_dt.isoformat() if since_dt else None)
+    until_str = until_dt.isoformat() + "Z" if until_dt and not until_dt.isoformat().endswith("Z") else (until_dt.isoformat() if until_dt else None)
+
+    # Query usage stats
+    result = app.state.store.query_usage_stats(
+        since=since_str,
+        until=until_str,
+        user=user,
+        model=model,
+        source=source,
+        session_id=session_id,
+        group_by=group_by,
+    )
+
+    return JSONResponse(result)
+
+
 # =============================================================================
 #  Proxy pass-through — LiteLLM-compatible stateless endpoints (2026-04-22)
 #
@@ -863,10 +958,17 @@ async def proxy_chat_completions(req: Request):
     if stream:
         async def event_stream():
             try:
+                # Determine source from X-Orchestra-Session-ID header
+                orchestra_session_id = req.headers.get("x-orchestra-session-id")
+                source = "orchestra" if orchestra_session_id else "cline"
+                # Extract user_id from body if present
+                user_id = body.get("user")
+
                 response_gen = await router.complete(
                     messages=messages,
                     model=internal_model,
                     stream=True,
+                    metadata={"source": source, "user_id": user_id, "chat_id": None, "orchestra_session_id": orchestra_session_id},
                     **body,
                 )
                 async for chunk in response_gen:
@@ -893,10 +995,17 @@ async def proxy_chat_completions(req: Request):
         )
 
     # Non-streaming
+    # Determine source from X-Orchestra-Session-ID header
+    orchestra_session_id = req.headers.get("x-orchestra-session-id")
+    source = "orchestra" if orchestra_session_id else "cline"
+    # Extract user_id from body if present
+    user_id = body.get("user")
+
     response = await router.complete(
         messages=messages,
         model=internal_model,
         stream=False,
+        metadata={"source": source, "user_id": user_id, "chat_id": None, "orchestra_session_id": orchestra_session_id},
         **body,
     )
     if hasattr(response, "model_dump"):
@@ -955,7 +1064,7 @@ async def anthropic_messages(req: Request):
 
     if resolved == "internal":
         logger.info("anthropic_messages: %r → LiteLLM local path", public_model)
-        return await _anthropic_messages_litellm(body)
+        return await _anthropic_messages_litellm(body, req)
 
     logger.info("anthropic_messages: %r → transparent forward", public_model)
     return await _anthropic_messages_forward(req, body_bytes, body)
@@ -1004,10 +1113,55 @@ async def _anthropic_messages_forward(
             content=body_bytes,
             headers=forward_headers,
         )
+
+    # Manually record usage event for the transparent forward path (bypasses LiteLLM)
+    try:
+        resp_body = r.json()
+        model = body.get("model", "unknown")
+        usage = resp_body.get("usage", {})
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
+        cache_read_tokens = usage.get("cache_read_input_tokens", 0)
+
+        # Determine source and orchestra_session_id
+        orchestra_session_id = req.headers.get("x-orchestra-session-id")
+        source = "orchestra" if orchestra_session_id else "claude_code_native"
+
+        # Calculate cost
+        cost = litellm.completion_cost(
+            model=model,
+            prompt_tokens=input_tokens,
+            completion_tokens=output_tokens,
+        )
+
+        # Record usage event
+        request_id = str(uuid.uuid4())
+        created_at = datetime.datetime.utcnow().isoformat() + "Z"
+
+        app.state.store.record_usage_event(
+            request_id=request_id,
+            created_at=created_at,
+            source=source,
+            user_id=None,
+            chat_id=None,
+            orchestra_session_id=orchestra_session_id,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cost_usd=cost,
+            provider="anthropic",
+        )
+    except Exception as e:
+        # Log error but do not raise — we don't want usage tracking to break the passthrough
+        logger.error(f"Error recording usage for forward path: {e}", exc_info=True)
+
     return JSONResponse(r.json(), status_code=r.status_code)
 
 
-async def _anthropic_messages_litellm(body: dict) -> StreamingResponse | JSONResponse:
+async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResponse | JSONResponse:
     """LiteLLM conversion path for local models (gemma-4-e4b → internal).
 
     CURRENT LIMITATION — tools are stripped by our Anthropic→OpenAI conversion:
@@ -1055,6 +1209,10 @@ async def _anthropic_messages_litellm(body: dict) -> StreamingResponse | JSONRes
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
     router: SmartRouter = app.state.router
 
+    # Determine source and session_id from request headers
+    orchestra_session_id = req.headers.get("x-orchestra-session-id")
+    source = "orchestra" if orchestra_session_id else "claude_code_native"
+
     if stream:
         async def anthropic_event_stream():
             try:
@@ -1072,6 +1230,7 @@ async def _anthropic_messages_litellm(body: dict) -> StreamingResponse | JSONRes
                     model=internal_model,
                     stream=True,
                     max_tokens=max_tokens,
+                    metadata={"source": source, "user_id": None, "chat_id": None, "orchestra_session_id": orchestra_session_id},
                     **extra,
                 )
                 finish_reason = None
@@ -1109,6 +1268,7 @@ async def _anthropic_messages_litellm(body: dict) -> StreamingResponse | JSONRes
         model=internal_model,
         stream=False,
         max_tokens=max_tokens,
+        metadata={"source": source, "user_id": None, "chat_id": None, "orchestra_session_id": orchestra_session_id},
         **extra,
     )
     r = response.model_dump() if hasattr(response, "model_dump") else (response.dict() if hasattr(response, "dict") else dict(response))

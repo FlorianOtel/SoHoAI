@@ -76,6 +76,41 @@ class ChatStore:
                 except sqlite3.OperationalError as e:
                     if "duplicate column name" not in str(e).lower():
                         raise
+
+            # Idempotent migration: add usage_events table for cost tracking & analytics
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS usage_events (
+                    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id            TEXT NOT NULL UNIQUE,
+                    created_at            TEXT NOT NULL,
+                    source                TEXT NOT NULL,
+                    user_id               TEXT,
+                    chat_id               TEXT,
+                    orchestra_session_id  TEXT,
+                    model                 TEXT NOT NULL,
+                    input_tokens          INTEGER NOT NULL DEFAULT 0,
+                    output_tokens         INTEGER NOT NULL DEFAULT 0,
+                    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                    cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+                    cost_usd              REAL NOT NULL DEFAULT 0.0,
+                    provider              TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_usage_events_created_at
+                    ON usage_events (created_at);
+
+                CREATE INDEX IF NOT EXISTS idx_usage_events_user_created_at
+                    ON usage_events (user_id, created_at);
+
+                CREATE INDEX IF NOT EXISTS idx_usage_events_source_created_at
+                    ON usage_events (source, created_at);
+
+                CREATE INDEX IF NOT EXISTS idx_usage_events_orchestra_session_id
+                    ON usage_events (orchestra_session_id);
+
+                CREATE INDEX IF NOT EXISTS idx_usage_events_model_created_at
+                    ON usage_events (model, created_at);
+            """)
             conn.commit()
 
     @contextmanager
@@ -150,6 +185,48 @@ class ChatStore:
                 if len(row["content"]) > 80:
                     title += "..."
                 conn.execute("UPDATE chats SET title = ? WHERE chat_id = ?", (title, chat_id))
+
+    def record_usage_event(
+        self,
+        *,
+        request_id: str,
+        created_at: str,
+        source: str,
+        user_id: Optional[str],
+        chat_id: Optional[str],
+        orchestra_session_id: Optional[str],
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_creation_tokens: int,
+        cache_read_tokens: int,
+        cost_usd: float,
+        provider: Optional[str],
+    ) -> None:
+        """Record a usage event for cost tracking and analytics."""
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO usage_events
+                   (request_id, created_at, source, user_id, chat_id, orchestra_session_id,
+                    model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                    cost_usd, provider)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    request_id,
+                    created_at,
+                    source,
+                    user_id,
+                    chat_id,
+                    orchestra_session_id,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    cache_creation_tokens,
+                    cache_read_tokens,
+                    cost_usd,
+                    provider,
+                ),
+            )
 
     # -- Read ------------------------------------------------------------------
 
@@ -253,10 +330,10 @@ class ChatStore:
     def get_summary_boundary_id(self, chat_id: str, summarize_keep_turns: int) -> Optional[int]:
         """
         Find the message id that marks the boundary for summarization.
-        
+
         Returns the id of the message at position (total - keep_turns - 1),
         i.e., the last message that will be included in the summary.
-        
+
         Returns None if there aren't enough messages to summarize.
         """
         with self._conn() as conn:
@@ -266,10 +343,10 @@ class ChatStore:
                 (chat_id,),
             ).fetchone()
             total = count_row["cnt"] if count_row else 0
-            
+
             if total <= summarize_keep_turns:
                 return None  # Not enough old messages to summarize
-            
+
             # Get the id at offset (total - keep_turns - 1) when ordered by id
             # This means: skip (total - keep_turns - 1) rows and get the next one
             row = conn.execute(
@@ -277,8 +354,147 @@ class ChatStore:
                    ORDER BY id ASC LIMIT 1 OFFSET ?""",
                 (chat_id, total - summarize_keep_turns - 1),
             ).fetchone()
-            
+
             return row["id"] if row else None
+
+    def query_usage_stats(
+        self,
+        *,
+        since: str,
+        until: str,
+        user: Optional[str] = None,
+        model: Optional[str] = None,
+        source: Optional[str] = None,
+        session_id: Optional[str] = None,
+        group_by: Optional[str] = None,
+    ) -> dict:
+        """
+        Query usage statistics for a time window.
+
+        Returns a dict with:
+        - window: {since, until}
+        - totals: {requests, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_usd, cache_hit_rate}
+        - by_model: [{model, requests, input_tokens, output_tokens, cost_usd}, ...]
+        - by_source: [{source, requests, input_tokens, output_tokens, cost_usd}, ...]
+        - by_day: (optional, if group_by="day") [{date, requests, input_tokens, output_tokens, cost_usd}, ...]
+        """
+        with self._conn() as conn:
+            # Build dynamic WHERE clause
+            conditions = ["created_at BETWEEN ? AND ?"]
+            params = [since, until]
+
+            if user is not None:
+                conditions.append("user_id = ?")
+                params.append(user)
+            if model is not None:
+                conditions.append("model = ?")
+                params.append(model)
+            if source is not None:
+                conditions.append("source = ?")
+                params.append(source)
+            if session_id is not None:
+                conditions.append("orchestra_session_id = ?")
+                params.append(session_id)
+
+            where_clause = " AND ".join(conditions)
+
+            # Query totals
+            totals_query = f"""
+                SELECT
+                    COUNT(*) as requests,
+                    COALESCE(SUM(input_tokens), 0) as input_tokens,
+                    COALESCE(SUM(output_tokens), 0) as output_tokens,
+                    COALESCE(SUM(cache_creation_tokens), 0) as cache_creation_tokens,
+                    COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens,
+                    COALESCE(SUM(cost_usd), 0.0) as cost_usd
+                FROM usage_events
+                WHERE {where_clause}
+            """
+            totals_row = conn.execute(totals_query, params).fetchone()
+
+            # Calculate cache_hit_rate (handle division by zero)
+            total_cache_tokens = (
+                totals_row["cache_creation_tokens"] + totals_row["cache_read_tokens"]
+            )
+            cache_hit_rate = (
+                totals_row["cache_read_tokens"] / total_cache_tokens
+                if total_cache_tokens > 0
+                else 0.0
+            )
+
+            totals = {
+                "requests": totals_row["requests"],
+                "input_tokens": totals_row["input_tokens"],
+                "output_tokens": totals_row["output_tokens"],
+                "cache_creation_tokens": totals_row["cache_creation_tokens"],
+                "cache_read_tokens": totals_row["cache_read_tokens"],
+                "cost_usd": totals_row["cost_usd"],
+                "cache_hit_rate": cache_hit_rate,
+            }
+
+            # Query by_model
+            by_model_query = f"""
+                SELECT
+                    model,
+                    COUNT(*) as requests,
+                    COALESCE(SUM(input_tokens), 0) as input_tokens,
+                    COALESCE(SUM(output_tokens), 0) as output_tokens,
+                    COALESCE(SUM(cost_usd), 0.0) as cost_usd
+                FROM usage_events
+                WHERE {where_clause}
+                GROUP BY model
+            """
+            by_model_rows = conn.execute(by_model_query, params).fetchall()
+            by_model = [dict(row) for row in by_model_rows]
+
+            # Sort by cost_usd DESC if group_by="model"
+            if group_by == "model":
+                by_model.sort(key=lambda x: x["cost_usd"], reverse=True)
+
+            # Query by_source
+            by_source_query = f"""
+                SELECT
+                    source,
+                    COUNT(*) as requests,
+                    COALESCE(SUM(input_tokens), 0) as input_tokens,
+                    COALESCE(SUM(output_tokens), 0) as output_tokens,
+                    COALESCE(SUM(cost_usd), 0.0) as cost_usd
+                FROM usage_events
+                WHERE {where_clause}
+                GROUP BY source
+            """
+            by_source_rows = conn.execute(by_source_query, params).fetchall()
+            by_source = [dict(row) for row in by_source_rows]
+
+            # Sort by cost_usd DESC if group_by="source"
+            if group_by == "source":
+                by_source.sort(key=lambda x: x["cost_usd"], reverse=True)
+
+            result = {
+                "window": {"since": since, "until": until},
+                "totals": totals,
+                "by_model": by_model,
+                "by_source": by_source,
+            }
+
+            # Query by_day if group_by="day"
+            if group_by == "day":
+                by_day_query = f"""
+                    SELECT
+                        strftime('%Y-%m-%d', created_at) as date,
+                        COUNT(*) as requests,
+                        COALESCE(SUM(input_tokens), 0) as input_tokens,
+                        COALESCE(SUM(output_tokens), 0) as output_tokens,
+                        COALESCE(SUM(cost_usd), 0.0) as cost_usd
+                    FROM usage_events
+                    WHERE {where_clause}
+                    GROUP BY date
+                    ORDER BY date ASC
+                """
+                by_day_rows = conn.execute(by_day_query, params).fetchall()
+                result["by_day"] = [dict(row) for row in by_day_rows]
+
+            return result
 
     # -- Export ----------------------------------------------------------------
 
