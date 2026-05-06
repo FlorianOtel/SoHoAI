@@ -3,7 +3,7 @@ title: "SoHoAI Usage and Billing Telemetry Pipeline"
 created_at: 2026-05-06--00-00
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-06--17-37
+updated_at: 2026-05-06--19-38
 context: >
   Cross-project design document for SoHoAI Stage 1 telemetry implementation.
   Goal: Add a complete usage and billing telemetry pipeline to SoHoAI so that
@@ -34,7 +34,7 @@ Phases:
 - **Phase 2** ✅: Source attribution via endpoint + X-Orchestra-Session-ID header
 - **Phase 3** ✅: GET /v1/usage/stats endpoint
 
-**Post-review fix (2026-05-06):** `_anthropic_messages_forward()` (raw httpx path, bypasses
+**Post-review fix 1 (2026-05-06):** `_anthropic_messages_forward()` (raw httpx path, bypasses
 LiteLLM) initially omitted cache token costs. Fixed in commit `1a15abe`:
 versioned model IDs have the date suffix stripped before `get_model_info()` lookup
 (e.g. `claude-sonnet-4-6-20250219` → `claude-sonnet-4-6`), then
@@ -42,6 +42,23 @@ versioned model IDs have the date suffix stripped before `get_model_info()` look
 and applied to the extracted cache token counts. Without this, heavy-caching orchestra
 sessions (typical: ~1.5M cache_read tokens) would undercount cost by ~$0.45/session
 on the forward path.
+
+**Post-review fix 2 (2026-05-06):** `litellm.completion_cost()` was called with
+`prompt_tokens=` and `completion_tokens=` kwargs that were removed in litellm 1.82.6.
+The call threw `TypeError` at runtime; the `except` block silently swallowed it,
+dropping all usage events on the forward path. Fixed by replacing the broken two-step
+pattern (broken `completion_cost()` for base tokens + separate `get_model_info()` for
+cache tokens) with a single `get_model_info()` call covering all four token types:
+
+```python
+_info = litellm.get_model_info(_normalized_model)
+cost = (
+    input_tokens  * (_info.get("input_cost_per_token") or 0.0)
+    + output_tokens * (_info.get("output_cost_per_token") or 0.0)
+    + cache_creation_tokens * (_info.get("cache_creation_input_token_cost") or 0.0)
+    + cache_read_tokens     * (_info.get("cache_read_input_token_cost") or 0.0)
+)
+```
 
 ### Stage 2 (claude-orchestra — future session, out of scope here)
 

@@ -1128,26 +1128,21 @@ async def _anthropic_messages_forward(
         orchestra_session_id = req.headers.get("x-orchestra-session-id")
         source = "orchestra" if orchestra_session_id else "claude_code_native"
 
-        # Calculate cost — base tokens + cache tokens separately.
-        # litellm.completion_cost() has no cache token params; use get_model_info()
-        # for cache rates. Versioned model IDs (e.g. claude-sonnet-4-6-20250219)
-        # are not in litellm's model map, so strip the trailing date suffix first.
+        # Calculate cost via get_model_info() — covers base + cache token rates.
+        # Versioned model IDs (e.g. claude-sonnet-4-6-20250219) are not in
+        # litellm's model map, so strip the trailing date suffix first.
         import re as _re
         _normalized_model = _re.sub(r"-\d{8}$", "", model)
-        cost = litellm.completion_cost(
-            model=_normalized_model,
-            prompt_tokens=input_tokens,
-            completion_tokens=output_tokens,
-        )
-        if cache_creation_tokens or cache_read_tokens:
-            try:
-                _info = litellm.get_model_info(_normalized_model)
-                cost += (
-                    cache_creation_tokens * (_info.get("cache_creation_input_token_cost") or 0.0)
-                    + cache_read_tokens * (_info.get("cache_read_input_token_cost") or 0.0)
-                )
-            except Exception:
-                pass  # model not in litellm map; cache cost omitted, WARNING logged below
+        try:
+            _info = litellm.get_model_info(_normalized_model)
+            cost = (
+                input_tokens * (_info.get("input_cost_per_token") or 0.0)
+                + output_tokens * (_info.get("output_cost_per_token") or 0.0)
+                + cache_creation_tokens * (_info.get("cache_creation_input_token_cost") or 0.0)
+                + cache_read_tokens * (_info.get("cache_read_input_token_cost") or 0.0)
+            )
+        except Exception:
+            cost = 0.0  # model not in litellm map; WARNING logged below
         if cost == 0.0 and source != "local":
             logger.warning(
                 "completion_cost returned 0 for model=%s (forward path) — pricing gap", model
