@@ -17,7 +17,7 @@ context: >
 ## Usage telemetry — Stage 2 (future claude-orchestra session)
 
 SoHoAI Stage 1 telemetry pipeline is live (`usage_events` table, `GET /v1/usage/stats`).
-See `~/Gin-AI/projects/docs/Telemetry.md` for the full Stage 2 spec.
+See `docs/Telemetry.md` for the full Stage 2 spec.
 
 Required work in a future claude-orchestra branch:
 - Inject `X-Orchestra-Session-ID` header on every `/v1/messages` call during `/brain`/`/duo` sessions

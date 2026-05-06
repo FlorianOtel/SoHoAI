@@ -93,6 +93,7 @@ Server 1 (192.168.1.93)             │          Server 2 (192.168.1.95)
 | [docs/design-history.md](docs/design-history.md) | Implementation milestones, benchmark results, architectural decisions |
 | [docs/TODO.md](docs/TODO.md) | Deferred work: Phase 3, Phase 4, local-model tool-use |
 | [docs/RAG-troubleshoot.md](docs/RAG-troubleshoot.md) | Qdrant troubleshooting, recovery procedures |
+| [docs/Telemetry.md](docs/Telemetry.md) | Usage telemetry design: Stage 1 schema + Stage 2 claude-orchestra migration checklist |
 
 ## Project structure
 
