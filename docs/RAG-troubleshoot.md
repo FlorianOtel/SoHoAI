@@ -2,8 +2,8 @@
 title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Haiku 4.5)
-updated_at: 2026-05-05--18-00
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-08--11-53
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -94,6 +94,59 @@ Qdrant's active storage is local NVMe on Server 1 (`/var/lib/qdrant/storage`).
    absent from Qdrant will be re-queued automatically.
 4. Run `rag_ingest_daemon.py` to fill any gaps.
 5. Restart ingestion timer.
+
+---
+
+## Session — 2026-05-08
+
+### Lock file mtime appears frozen (Synology NFS empty-truncate no-op)
+
+#### Symptom
+
+`/mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock` showed mtime `2026-05-06 10:53` despite
+the ingestion service running successfully every six hours.  The lock appeared stale.
+
+#### Root cause
+
+The lock is **not stale** — no process holds it.  The frozen mtime is a Synology NFS quirk.
+
+`rag_ingest_daemon.py` acquires the lock by opening the file in `"w"` mode (`O_WRONLY|O_CREAT|O_TRUNC`)
+then calling `fcntl.lockf(fd, LOCK_EX|LOCK_NB)`.  The file is intentionally never written to —
+it stays 0 bytes.  On this Synology NFS (NFSv4.1), the Linux NFS client omits the SETATTR RPC
+when `O_TRUNC` would not change the file size (already 0), so the NAS receives no mtime-update.
+
+The lock file was created on May 6 at 10:53 during a manual daemon run before the timer was set
+up.  Every subsequent run re-opened the empty file, acquired the advisory lock, and exited —
+leaving the mtime frozen at the initial creation date.
+
+Confirming the lock is free:
+```bash
+flock --nonblock /mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock echo "lock-free" \
+  || echo "lock-held"
+# → lock-free
+```
+
+A genuinely stale lock would print `lock-held` and `lsof` + `ps aux | grep rag` would show a
+live process.
+
+#### Fix
+
+Added `os.utime(_lock_path)` in `utils/rag_ingest_daemon.py` immediately after `fcntl.lockf`
+succeeds.  `utime` issues an explicit `utimes` syscall → NFS SETATTR, advancing mtime on every
+daemon invocation regardless of pending-file count.
+
+```python
+# utils/rag_ingest_daemon.py — after lock acquisition (~line 169)
+os.utime(_lock_path)   # force SETATTR so mtime advances on NFS (empty-truncate is a no-op)
+```
+
+#### Related note — May 8 run left no "Starting ingest:" log line
+
+On May 8, `rag_sync_nfs.py` found 0 pending files.  The daemon connected to Qdrant (for
+`ensure_collection`), checked the queue, hit the early-exit at line 185–188, and returned.
+The early-exit uses `print()`, not `logger`, so the message goes to stdout → journald — it
+does **not** appear in `rag-ingest.log`.  The file-handler for `--log-file` is only set up
+after the lock is acquired; the early-exit path bypasses it.  This is expected behaviour.
 
 ---
 

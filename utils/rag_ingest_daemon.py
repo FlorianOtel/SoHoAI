@@ -32,6 +32,7 @@ import argparse
 import asyncio
 import fcntl
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -167,6 +168,12 @@ def main() -> None:
         )
         _lock_fd.close()
         return
+
+    # Touch the lock file so mtime advances on every run.
+    # open("w") on an already-empty file is a VFS no-op on Synology NFS
+    # (O_TRUNC with size already 0 skips SETATTR), so mtime would otherwise
+    # stay frozen at the day the file was first created.
+    os.utime(_lock_path)
 
     if args.log_file:
         _add_file_handler(args.log_file)
