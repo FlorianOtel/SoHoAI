@@ -2,8 +2,8 @@
 title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Haiku 4.5)
-updated_at: 2026-05-05--16-38
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-09--11-26
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -354,3 +354,32 @@ Added clarification to `docs/RAG-strategy.md` §1.2 ("Exclusion filters") with a
 
 - Allow `claude_chats.roots` to point to directories other than `.claude/projects/` (e.g. other users' sessions on the NAS)
 - Support additional session formats (not just Claude Code `.jsonl`)
+
+---
+
+## 2026-05-09 — Dynamic file discovery in `utils/snapshot_codebase.py`
+
+### Problem
+
+`snapshot_codebase.py` maintained a hardcoded `SNAPSHOT_FILES` list that had drifted
+from the actual repo contents. Twelve committed files were absent:
+`usage_tracker.py`, `prompts/rag_system_prompts.py`, `rag_engine/multi_query.py`,
+`rag_engine/tool_use.py`, `rag_engine/main.py`, `utils/rag_smoke_test.py`,
+`utils/rag_mmr_bench.py`, `scripts/rag-ingest-run.sh`,
+`scripts/qdrant/{qdrant-config.yaml,qdrant-snapshot.sh}`, and
+`NFS-files--MCP-server/{nfs_files_mcp_server,setup_mcp}.sh`.
+
+### Solution
+
+Replaced the static list with `discover_files()`, which calls
+`git ls-files --cached --others --exclude-standard` filtered by
+`INCLUDE_EXTENSIONS = {".py", ".yaml", ".yml", ".toml", ".sh"}`.
+
+- `.gitignore` already excludes `.venv/`, `__pycache__/`, `.claude/`, and the generated
+  `utils/codebase_snapshot.md` — no separate exclude list is needed.
+- `_SNAPSHOT_FILES_FALLBACK` (the old static list) is retained for environments where
+  `git` is unavailable.
+- Added `.sh → bash` syntax highlighting to `_lang()`.
+- Added `--extensions` CLI arg for runtime override.
+
+**Result:** 39 files included automatically (up from 27), zero maintenance required.

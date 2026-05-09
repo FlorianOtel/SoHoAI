@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import logging
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -27,8 +28,9 @@ log = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path("/mnt/nfs/Florian/Gin-AI/projects/SoHoAI")
 DEFAULT_OUTPUT = PROJECT_ROOT / "utils" / "codebase_snapshot.md"
+INCLUDE_EXTENSIONS: set[str] = {".py", ".yaml", ".yml", ".toml", ".sh"}
 
-SNAPSHOT_FILES: list[str] = [
+_SNAPSHOT_FILES_FALLBACK: list[str] = [
     "pyproject.toml",
     "config.yaml",
     "schemas.py",
@@ -58,13 +60,56 @@ SNAPSHOT_FILES: list[str] = [
     "utils/sync_to_notebook.py",
     "utils/snapshot_codebase.py",
     "NFS-files--MCP-server/nfs_files_mcp_server.py",
-]
+]  # used only when git is unavailable
 
 
 def _lang(path: Path) -> str:
-    return {".py": "python", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml", ".md": ""}.get(
+    return {".py": "python", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml", ".sh": "bash", ".md": ""}.get(
         path.suffix.lower(), ""
     )
+
+
+def discover_files(extensions: set[str] | None = None) -> list[Path]:
+    """
+    Discover project files via git, filtered by extension.
+
+    Falls back to _SNAPSHOT_FILES_FALLBACK if git is unavailable.
+
+    Args:
+        extensions: Set of file extensions to include (e.g., {".py", ".yaml"}).
+                   If None, uses INCLUDE_EXTENSIONS.
+
+    Returns:
+        Sorted list of absolute paths.
+    """
+    if extensions is None:
+        extensions = INCLUDE_EXTENSIONS
+
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            log.warning("git ls-files failed (returncode %d); falling back to hardcoded list", result.returncode)
+            return [PROJECT_ROOT / f for f in _SNAPSHOT_FILES_FALLBACK]
+
+        files: list[Path] = []
+        for line in result.stdout.strip().split("\n"):
+            if not line:
+                continue
+            path = PROJECT_ROOT / line
+            if path.suffix.lower() in extensions:
+                files.append(path)
+
+        return sorted(files)
+
+    except FileNotFoundError:
+        log.warning("git not found; falling back to hardcoded list")
+        return [PROJECT_ROOT / f for f in _SNAPSHOT_FILES_FALLBACK]
 
 
 def _sanitize_for_markdown(content: str) -> str:
@@ -97,9 +142,10 @@ def _sanitize_for_markdown(content: str) -> str:
 def generate_snapshot(
     output: Path = DEFAULT_OUTPUT,
     files: list[str] | None = None,
+    extensions: set[str] | None = None,
 ) -> Path:
     """Write the snapshot Markdown to `output` and return the path."""
-    targets = [PROJECT_ROOT / f for f in (files or SNAPSHOT_FILES)]
+    targets = discover_files(extensions=extensions) if files is None else [PROJECT_ROOT / f for f in files]
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
     sections: list[str] = [
@@ -145,8 +191,13 @@ def main() -> None:
         "--output", default=str(DEFAULT_OUTPUT),
         help=f"Output file path (default: {DEFAULT_OUTPUT})",
     )
+    parser.add_argument(
+        "--extensions", nargs="+", default=None,
+        help="File extensions to include (e.g., .py .yaml .sh); default: .py .yaml .yml .toml .sh",
+    )
     args = parser.parse_args()
-    generate_snapshot(output=Path(args.output))
+    extensions = set(args.extensions) if args.extensions else None
+    generate_snapshot(output=Path(args.output), extensions=extensions)
 
 
 if __name__ == "__main__":
