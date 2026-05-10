@@ -286,6 +286,12 @@ python utils/rag_status.py --list-pending              # print every pending fil
 python utils/rag_search_cli.py --query "certifications" --user florian        # retrieval only
 python utils/rag_smoke_test.py --query "AWS certifications" --user florian --expect "AWS-Certification"  # end-to-end retrieval + chat; pass/fail exit
 
+# Tool-use smoke test — validates LiteLLM path for ollama-cloud/* and internal/gemma-4-e4b
+# Run against worktree port 8001 (or 8000 after merge)
+python utils/tool_use_smoke_test.py --server http://192.168.1.93:8001
+python utils/tool_use_smoke_test.py --server http://192.168.1.93:8001 --no-stream
+python utils/tool_use_smoke_test.py --server http://192.168.1.93:8001 --model ollama-cloud/qwen3-coder-next
+
 # NotebookLM — first-time login (requires X display)
 DISPLAY=:1 python utils/notebooklm_auth.py --login
 # NotebookLM — verify saved session

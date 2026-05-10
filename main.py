@@ -1084,14 +1084,17 @@ async def anthropic_messages(req: Request):
 
     Local model (gemma-4-e4b → internal alias) and Ollama cloud models:
     routes via LiteLLM with Anthropic→OpenAI format conversion.
-    Current limitation: the conversion strips tools, tool_use, tool_result,
-    and cache_control — see docs/TODO.md for the planned fix (~70 lines of
-    format-conversion code).
+    Tool use is now forwarded on the LiteLLM path (implemented 2026-05-10).
+    cache_control markers are also forwarded but have no effect on non-Anthropic
+    providers. See docs/TODO.md §[2026-05-04] for implementation notes and
+    outstanding items (Gemma reliability, image-block live validation, etc.).
 
     Anthropic models (claude-*) or unresolved models: transparent HTTP forward
     to api.anthropic.com. Preserves tools, tool_use/tool_result history,
     cache_control, anthropic-beta headers, and native SSE streaming exactly.
     Full Claude Code tool loop and prompt caching work correctly on this path.
+    For ollama-cloud models, tool use now also works on the LiteLLM path, but
+    internal/gemma-4-e4b tool reliability remains unvalidated.
     """
     body_bytes = await req.body()
     body = json.loads(body_bytes)
@@ -1224,20 +1227,213 @@ async def _anthropic_messages_forward(
     return JSONResponse(r.json(), status_code=r.status_code)
 
 
+# =============================================================================
+#  Anthropic ↔ OpenAI format conversion helpers (for LiteLLM path)
+# =============================================================================
+
+def _convert_tools(ant_tools: list[dict]) -> list[dict]:
+    """Convert Anthropic tool definitions to OpenAI format.
+
+    Anthropic tools have `input_schema` (JSON Schema); OpenAI tools have
+    `parameters` (JSON Schema). Wrap each tool in OpenAI's standard function-call
+    envelope: `{"type":"function","function":{...}}`.
+    """
+    if not ant_tools:
+        return []
+    oai_tools = []
+    for tool in ant_tools:
+        oai_tool = {
+            "type": "function",
+            "function": {
+                "name": tool.get("name", ""),
+                "description": tool.get("description", ""),
+                "parameters": tool.get("input_schema", {}),
+            }
+        }
+        oai_tools.append(oai_tool)
+    return oai_tools
+
+
+def _convert_tool_choice(ant_tc: dict | str | None) -> dict | str | None:
+    """Convert Anthropic tool_choice to OpenAI format.
+
+    Mappings:
+    - {"type":"auto"} → "auto"
+    - {"type":"any"} → "required"
+    - {"type":"tool","name":"X"} → {"type":"function","function":{"name":"X"}}
+    - None / absent → None
+    """
+    if ant_tc is None:
+        return None
+    if isinstance(ant_tc, str):
+        return ant_tc
+    if not isinstance(ant_tc, dict):
+        return None
+
+    tc_type = ant_tc.get("type")
+    if tc_type == "auto":
+        return "auto"
+    elif tc_type == "any":
+        return "required"
+    elif tc_type == "tool":
+        tool_name = ant_tc.get("name")
+        return {
+            "type": "function",
+            "function": {"name": tool_name}
+        }
+    return None
+
+
+def _convert_assistant_message(msg: dict) -> dict:
+    """Convert Anthropic assistant message to OpenAI format.
+
+    Anthropic: mixed `content` list with text, tool_use blocks.
+    OpenAI: single message with `content` (text parts joined) and `tool_calls` (function-call list).
+    """
+    content_blocks = msg.get("content") or []
+    text_parts = []
+    tool_calls = []
+
+    for block in content_blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "text":
+            text_parts.append(block.get("text", ""))
+        elif block_type == "tool_use":
+            tool_calls.append({
+                "id": block.get("id", ""),
+                "type": "function",
+                "function": {
+                    "name": block.get("name", ""),
+                    "arguments": json.dumps(block.get("input", {}))
+                }
+            })
+
+    return {
+        "role": "assistant",
+        "content": "".join(text_parts) if text_parts else None,
+        "tool_calls": tool_calls if tool_calls else None,
+    }
+
+
+def _convert_user_message(msg: dict) -> list[dict]:
+    """Convert Anthropic user message to OpenAI format (may emit multiple messages).
+
+    Anthropic user messages can contain text, image, and tool_result blocks.
+    OpenAI distinguishes:
+    - role: "user" for text/image
+    - role: "tool" for tool results (with tool_call_id)
+
+    Text + image blocks → single user message with multi-part content.
+    Text adjacent to tool_result blocks → emitted as separate user message before tool results.
+    Tool results → emitted as role:"tool" messages.
+
+    Returns a list of messages to emit.
+    """
+    content_blocks = msg.get("content") or []
+    if isinstance(content_blocks, str):
+        # Simple text message
+        return [{"role": "user", "content": content_blocks}]
+
+    text_parts = []
+    image_parts = []
+    tool_results = []
+    result_messages = []
+
+    for block in content_blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+
+        if block_type == "text":
+            text_parts.append(block.get("text", ""))
+        elif block_type == "image":
+            # Convert Anthropic image format to OpenAI image_url format
+            source = block.get("source", {})
+            source_type = source.get("type")
+            if source_type == "base64":
+                media_type = source.get("media_type", "image/png")
+                data = source.get("data", "")
+                image_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{media_type};base64,{data}"}
+                })
+            elif source_type == "url":
+                url = source.get("url", "")
+                image_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": url}
+                })
+        elif block_type == "tool_result":
+            # Emit any accumulated text/image blocks as a user message first
+            if text_parts or image_parts:
+                text_content = "".join(text_parts)
+                if len(image_parts) == 0 and text_content:
+                    result_messages.append({"role": "user", "content": text_content})
+                elif image_parts:
+                    content_list = []
+                    if text_content:
+                        content_list.append({"type": "text", "text": text_content})
+                    content_list.extend(image_parts)
+                    result_messages.append({"role": "user", "content": content_list})
+                text_parts = []
+                image_parts = []
+
+            # Emit tool result message
+            tool_result_content = block.get("content")
+            if isinstance(tool_result_content, list):
+                # Join text blocks
+                tool_result_text = "".join(
+                    b.get("text", "") for b in tool_result_content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+            else:
+                tool_result_text = str(tool_result_content) if tool_result_content else ""
+
+            if block.get("is_error"):
+                tool_result_text = "[ERROR] " + tool_result_text
+
+            result_messages.append({
+                "role": "tool",
+                "tool_call_id": block.get("tool_use_id", ""),
+                "content": tool_result_text,
+            })
+
+    # Emit any remaining text/image blocks
+    if text_parts or image_parts:
+        text_content = "".join(text_parts)
+        if len(image_parts) == 0 and text_content:
+            result_messages.append({"role": "user", "content": text_content})
+        elif image_parts:
+            content_list = []
+            if text_content:
+                content_list.append({"type": "text", "text": text_content})
+            content_list.extend(image_parts)
+            result_messages.append({"role": "user", "content": content_list})
+
+    return result_messages if result_messages else [{"role": "user", "content": ""}]
+
+
 async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResponse | JSONResponse:
-    """LiteLLM conversion path for local models (gemma-4-e4b → internal) and Ollama cloud.
+    """LiteLLM conversion path for non-Anthropic models (`internal/*` and `ollama-cloud/*`).
 
-    CURRENT LIMITATION — tools are stripped by our Anthropic→OpenAI conversion:
-    - `tools` array: dropped (never forwarded to LiteLLM or the model)
-    - `tool_use` blocks in assistant messages: dropped (model loses call history)
-    - `tool_result` blocks in user messages: dropped (model loses file-read results)
-    - `cache_control` markers: dropped (no Anthropic prompt caching on local path)
+    Converts Anthropic-format requests to OpenAI format and routes through LiteLLM.
+    As of 2026-05-10 the conversion forwards: `tools` array, `tool_use` blocks in
+    assistant messages, `tool_result` blocks in user messages, and `image` content
+    blocks (Anthropic base64/URL → OpenAI image_url data URL/URL). Streaming
+    responses emit Anthropic SSE `content_block_start/delta/stop` events for tool
+    calls (input_json_delta deltas). `cache_control` markers are forwarded but
+    have no effect on non-Anthropic providers (no API cost on local inference).
 
-    Note: LiteLLM itself fully supports tool use. The stripping is in *our*
-    conversion code, not in LiteLLM. Fix is ~70 lines — see docs/TODO.md.
+    Reliability per provider:
+    - `ollama-cloud/qwen3-coder-next` and `ollama-cloud/deepseek-v4-pro`: native
+      OpenAI function calling, expected reliable.
+    - `ollama-cloud/kimi-k2.6` and `ollama-cloud/glm-5.1`: untested.
+    - `internal/gemma-4-e4b`: tool-call JSON reliability at Q8_0 is unvalidated;
+      may need grammar-constrained generation as a fallback. See docs/TODO.md.
 
-    Use this path only for simple text generation (summarization, offline drafts).
-    Do NOT use for Claude Code sessions that require Read/Write/Bash tool calls.
+    Validation harness: `utils/tool_use_smoke_test.py`.
     """
     internal_model = body.get("model")
     public_model = body.get("_public_model", internal_model)  # fallback to internal if not provided
@@ -1260,13 +1456,23 @@ async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResp
         oai_messages.append({"role": "system", "content": system_text})
     for msg in ant_messages:
         role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            content = "".join(
-                b.get("text", "") for b in content
-                if isinstance(b, dict) and b.get("type") == "text"
-            )
-        oai_messages.append({"role": role, "content": content})
+        if role == "assistant":
+            oai_messages.append(_convert_assistant_message(msg))
+        else:
+            oai_messages.extend(_convert_user_message(msg))
+
+    # Build tool_kwargs for router calls
+    oai_tools = _convert_tools(body["tools"]) if body.get("tools") else None
+    oai_tool_choice = _convert_tool_choice(body.get("tool_choice"))
+    disable_parallel = body.get("disable_parallel_tool_use", False)
+
+    tool_kwargs: dict = {}
+    if oai_tools:
+        tool_kwargs["tools"] = oai_tools
+    if oai_tool_choice is not None:
+        tool_kwargs["tool_choice"] = oai_tool_choice
+    if disable_parallel:
+        tool_kwargs["parallel_tool_calls"] = False
 
     extra = {k: body[k] for k in ("temperature", "top_p", "top_k") if k in body}
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
@@ -1294,23 +1500,67 @@ async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResp
                     stream=True,
                     max_tokens=max_tokens,
                     metadata={"source": source, "user_id": None, "chat_id": None, "orchestra_session_id": orchestra_session_id},
+                    **tool_kwargs,
                     **extra,
                 )
                 finish_reason = None
                 output_tokens = 0
+                text_block_open = True
+                tool_call_state: dict[int, dict] = {}
+
                 async for chunk in response_gen:
                     c = chunk.model_dump() if hasattr(chunk, "model_dump") else (chunk.dict() if hasattr(chunk, "dict") else dict(chunk))
                     for choice in (c.get("choices") or []):
-                        text = (choice.get("delta") or {}).get("content") or ""
+                        delta = choice.get("delta") or {}
+
+                        # Handle text deltas
+                        text = delta.get("content") or ""
                         if text:
                             output_tokens += max(1, len(text) // 4)
                             yield (
                                 f"event: content_block_delta\n"
                                 f"data: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': text}})}\n\n"
                             )
+
+                        # Handle tool_calls deltas
+                        tool_calls = delta.get("tool_calls") or []
+                        for tc in tool_calls:
+                            tc_index = tc.get("index")
+                            if tc_index not in tool_call_state:
+                                # New tool call — close text block if still open
+                                if text_block_open:
+                                    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+                                    text_block_open = False
+
+                                # Open new tool_use block
+                                tc_id = tc.get("id", f"toolu_{uuid.uuid4().hex[:16]}")
+                                tc_name = (tc.get("function") or {}).get("name", "")
+                                tool_call_state[tc_index] = {"id": tc_id, "name": tc_name}
+                                sse_index = 1 + tc_index
+                                yield (
+                                    f"event: content_block_start\n"
+                                    f"data: {json.dumps({'type': 'content_block_start', 'index': sse_index, 'content_block': {'type': 'tool_use', 'id': tc_id, 'name': tc_name, 'input': {}}})}\n\n"
+                                )
+
+                            # Emit input_json_delta if function.arguments present
+                            func_args = (tc.get("function") or {}).get("arguments") or ""
+                            if func_args:
+                                sse_index = 1 + tc_index
+                                yield (
+                                    f"event: content_block_delta\n"
+                                    f"data: {json.dumps({'type': 'content_block_delta', 'index': sse_index, 'delta': {'type': 'input_json_delta', 'partial_json': func_args}})}\n\n"
+                                )
+
                         if choice.get("finish_reason"):
                             finish_reason = choice["finish_reason"]
-                yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+
+                # Close any open blocks
+                if text_block_open:
+                    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+                for tc_idx in tool_call_state:
+                    sse_index = 1 + tc_idx
+                    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': sse_index})}\n\n"
+
                 yield (
                     f"event: message_delta\n"
                     f"data: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': _anthropic_stop_reason(finish_reason), 'stop_sequence': None}, 'usage': {'output_tokens': output_tokens}})}\n\n"
@@ -1332,21 +1582,43 @@ async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResp
         stream=False,
         max_tokens=max_tokens,
         metadata={"source": source, "user_id": None, "chat_id": None, "orchestra_session_id": orchestra_session_id},
+        **tool_kwargs,
         **extra,
     )
     r = response.model_dump() if hasattr(response, "model_dump") else (response.dict() if hasattr(response, "dict") else dict(response))
+
+    # Build content_blocks from text and tool_calls
     choices = r.get("choices") or []
-    text = ""
+    content_blocks: list[dict] = []
     finish_reason = None
     if choices:
-        text = (choices[0].get("message") or {}).get("content") or ""
+        message = choices[0].get("message") or {}
+        text = message.get("content") or ""
         finish_reason = choices[0].get("finish_reason")
+        if text:
+            content_blocks.append({"type": "text", "text": text})
+        for tc in (message.get("tool_calls") or []):
+            fn = tc.get("function") or {}
+            raw_args = fn.get("arguments", "{}")
+            try:
+                parsed_input = json.loads(raw_args)
+            except json.JSONDecodeError:
+                parsed_input = {"_raw": raw_args}
+            content_blocks.append({
+                "type": "tool_use",
+                "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:16]}"),
+                "name": fn.get("name", ""),
+                "input": parsed_input,
+            })
+    if not content_blocks:
+        content_blocks = [{"type": "text", "text": ""}]
+
     usage = r.get("usage") or {}
     return JSONResponse({
         "id": msg_id,
         "type": "message",
         "role": "assistant",
-        "content": [{"type": "text", "text": text}],
+        "content": content_blocks,
         "model": public_model,
         "stop_reason": _anthropic_stop_reason(finish_reason),
         "stop_sequence": None,

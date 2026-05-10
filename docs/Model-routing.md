@@ -2,15 +2,18 @@
 title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-10--10-00
+updated_by: Claude Code (Claude Opus 4.7)
+updated_at: 2026-05-10--12-30
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
   for Claude Code (ANTHROPIC_BASE_URL), with model-aware routing: Anthropic models use
   a transparent HTTP forward (full fidelity including tools and caching); local models
-  (gemma-4-e4b) use the LiteLLM conversion path (text-only, no tool use currently).
-  Future tool-use work for local models is tracked in docs/TODO.md.
+  (gemma-4-e4b) and Ollama cloud models use the LiteLLM conversion path with tool-use
+  support (implementation complete 2026-05-10). Synthetic smoke harness
+  (utils/tool_use_smoke_test.py) passed end-to-end for all 3 target models including
+  Gemma 4 E4B on both streaming and non-streaming. Broader Claude Code subagent
+  workload validation is the remaining open item — see docs/TODO.md.
 ---
 
 # SoHoAI model routing — Cline and Claude Code integration
@@ -134,15 +137,15 @@ REQUEST arrives at POST /v1/messages
   │
   ├─ model starts with "internal/" (internal/gemma-4-e4b, future internal/*)
   │     → _anthropic_messages_litellm()
-  │     → Anthropic→OpenAI format conversion (text blocks only)
+  │     → Anthropic→OpenAI format conversion (tools, tool_use, tool_result forwarded)
   │     → LiteLLM Router → llama-server (Server 2)
-  │     → LIMITATION: tools stripped (see §2.3 and docs/TODO.md)
+  │     → tools forwarded; Gemma synthetic-smoke PASS, broader workload validation pending
   │
   ├─ model starts with "ollama-cloud/" (all 4 Ollama cloud models)
   │     → _anthropic_messages_litellm() [same conversion path]
-  │     → Anthropic→OpenAI format conversion (text blocks only)
+  │     → Anthropic→OpenAI format conversion (tools, tool_use, tool_result forwarded)
   │     → LiteLLM Router → https://ollama.com/v1 (OLLAMA_API_KEY from .env)
-  │     → LIMITATION: tools stripped (same — see docs/TODO.md)
+  │     → tools forwarded
   │     → NOTE: reasoning models — use max_tokens ≥ 500
   │     → NOTE: Claude Code system prompt causes model to identify as Claude
   │
@@ -180,46 +183,44 @@ as inline text that scrolled on screen.
 ### §2.2 LiteLLM path (internal/* and ollama-cloud/*)
 
 `_anthropic_messages_litellm()` in `main.py` converts the Anthropic-format request to
-OpenAI format and routes through LiteLLM Router to llama-server on Server 2.
+OpenAI format and routes through LiteLLM Router to the target provider.
 
-**Current limitation — tool use is not supported on this path.**
+**Tool use is now supported on this path** (implemented 2026-05-10).
 
-The conversion loop:
-```python
-if isinstance(content, list):
-    content = "".join(
-        b.get("text", "") for b in content
-        if isinstance(b, dict) and b.get("type") == "text"
-    )
-```
-extracts only `text` blocks and silently drops all other content block types.
+The conversion now handles full Anthropic→OpenAI transformation:
+- `tools` array: wrapped in OpenAI `{"type":"function","function":{...}}` format
+- `tool_use` blocks (assistant): converted to OpenAI `tool_calls` with serialized `arguments`
+- `tool_result` blocks (user): converted to OpenAI `role:"tool"` messages
+- Streaming responses: emit proper Anthropic SSE `content_block_start/delta/stop` events for tool calls
+- Image blocks (user): converted to OpenAI `image_url` format for vision-capable models
+- `cache_control` markers: forwarded (irrelevant for local inference, but preserved)
 
-**What gets dropped and why it matters:**
+**What is now forwarded and how the model can use it:**
 
-| Dropped | What the model loses | Practical consequence |
+| Forwarded | What the model receives | Use case |
 |---|---|---|
-| `tools` array | No knowledge of Read/Write/Bash tools | Model responds with text only; cannot request file reads |
-| `tool_use` blocks (assistant) | Loses its own prior tool-call requests | Cannot reason about what it already tried |
-| `tool_result` blocks (user) | Loses all file contents and command outputs | Cannot use information from previous tool calls |
-| `cache_control` markers | No prompt-cache benefit | Irrelevant for local inference (no API cost), but noted |
+| `tools` array | Full knowledge of Read/Write/Bash tools | Model can request file reads, code writes, bash execution |
+| `tool_use` blocks (assistant) | Complete prior tool-call requests from history | Model reasons about previous attempts and iterations |
+| `tool_result` blocks (user) | File contents and command outputs from past turns | Model uses retrieved data to refine answers |
+| `cache_control` markers | Forwarded to provider (has no effect on llama-server) | Prepared for future local models with caching support |
 
-**Important**: this is a limitation of *our* conversion code, not of LiteLLM.
-LiteLLM fully supports OpenAI-format tool calls and correctly translates them to the
-provider's native format. If our conversion preserved tools (Anthropic→OpenAI format
-translation, ~70 lines), tool use would work — subject to Gemma 4's reliability.
-See `docs/TODO.md` for the full implementation plan and format-conversion spec.
+**Gemma reliability — current state**: `internal/gemma-4-e4b` **passed the synthetic two-turn smoke harness** (single tool, one string argument) on both streaming and non-streaming legs (2026-05-10). Broader claude-orchestra workload validation (full Claude Code tool catalogue, multi-turn, parallel calls) is the remaining open item — see `docs/TODO.md`. Grammar-constrained generation (deferred Step c) is therefore likely unnecessary; revisit only if broader validation surfaces malformed `arguments` JSON.
+
+For `ollama-cloud/deepseek-v4-pro` and `ollama-cloud/qwen3-coder-next`: both support OpenAI
+function calling natively and are expected to be reliable for tool use.
 
 **Appropriate use cases for the LiteLLM path:**
-- Simple text generation where tool use is not needed
+- Full Claude Code sessions with ollama-cloud models (deepseek-v4-pro, qwen3-coder-next) requiring Read/Write/Bash tools
+- Sub-agents using ollama-cloud models that need to read files, write code, or run bash commands
+- Multi-turn tool call chains with cloud models (zero API cost vs Anthropic)
 - Summarization tasks (`internal/gemma-4-e4b` already used by `maybe_summarize()`)
 - Offline/background drafting when Anthropic is unreachable (`internal/gemma-4-e4b`)
-- Exploratory prompting with Ollama cloud models (deepseek, kimi, glm, qwen3-coder)
-- Cost-zero tasks where quality is secondary to API cost
+- Exploratory prompting with Ollama cloud models
+- Cost-sensitive deployments where cloud model cost is critical (Ollama cloud ≈ $0 vs Anthropic)
 
-**Inappropriate use cases (until TODO.md tool-use is implemented):**
-- Full Claude Code sessions requiring Read/Write/Bash tools
-- Any sub-agent that needs to read files, write code, or run bash commands
-- Tasks requiring multi-turn tool call chains
+**Inappropriate use cases:**
+- `internal/gemma-4-e4b` for tool-requiring workloads (until reliability is validated)
+- Tasks where tool-call reliability is mission-critical and cannot tolerate failures
 
 **Claude Code identity note:** When using `ollama-cloud/*` models via `claude --model`,
 Claude Code injects its own system prompt ("You are Claude Code..."). Ollama cloud models
@@ -287,24 +288,24 @@ Each tier has its own Anthropic API call, its own context window, and its own
 independent prompt-cache slot. The Brain's long research context does not inflate
 the Actor's costs.
 
-### Local sub-agent (gemma-4-e4b) — current limitations
+### Local sub-agent (gemma-4-e4b) — tool-use status
 
-A sub-agent with `model: gemma-4-e4b` routes via the LiteLLM local path.
-**Tool use is not currently supported on this path** (see §2.2 and `docs/TODO.md`).
+A sub-agent with `model: internal/gemma-4-e4b` or `model: ollama-cloud/*` routes via the LiteLLM local path.
+**Tool use is now supported on this path** (implemented 2026-05-10). All three target models — `ollama-cloud/qwen3-coder-next`, `ollama-cloud/deepseek-v4-pro`, and `internal/gemma-4-e4b` — passed the synthetic two-turn smoke (`utils/tool_use_smoke_test.py`) on both streaming and non-streaming.
 
-Such an agent can:
-- Generate text responses
-- Perform summarization
-- Draft content without needing to read/write files
+For `ollama-cloud/*` models (deepseek-v4-pro, qwen3-coder-next), such an agent can:
+- Read files (Read tool supported, smoke-validated)
+- Write or edit files (Write/Edit tools supported)
+- Run bash commands (Bash tool supported)
+- Use sub-agents (Agent tool supported)
+- Perform complex multi-turn tool call chains
 
-Such an agent CANNOT:
-- Read files (Read tool stripped)
-- Write or edit files (Write/Edit tools stripped)
-- Run bash commands (Bash tool stripped)
-- Use sub-agents (Agent tool stripped)
+For `internal/gemma-4-e4b`, such an agent passed the simple-tool smoke. Real-world claude-orchestra workloads (full Claude Code tool catalogue, parallel tool calls, deeply-nested arguments) are the remaining open question — see `docs/TODO.md` "Tool-use deferred: internal/gemma-4-e4b broader reliability verification".
 
-Until tool support is implemented, use `claude-haiku-4-5` for Actor-tier tasks that
-require file access. Cost is ~$0.01/session — negligible.
+Recommended Actor-tier model selection:
+- **Anthropic transparent forward** (`anthropic/claude-haiku-4-5`): the safest choice for production-grade Actor tasks that require reliable tools. Cost ≈ $0.01/session.
+- **Ollama cloud** (`ollama-cloud/qwen3-coder-next` for coding tasks, `ollama-cloud/deepseek-v4-pro` for reasoning): smoke-validated, cost ≈ $0/session. Reasoning models need `max_tokens ≥ 500`.
+- **Local Gemma** (`internal/gemma-4-e4b`): smoke-validated, cost = $0, but real-world reliability not yet measured. Recommended for cost-sensitive non-critical Actor work; not yet recommended for primary tool-using subagents until broader validation completes.
 
 ---
 
@@ -458,8 +459,17 @@ input-size enforcement using these values.
 
 ## 7. Future work
 
-Tool-use support for the local-model path (gemma-4-e4b and any future local LLMs)
-is tracked with full implementation detail in **`docs/TODO.md`**.
+Basic tool-use support for the local-model path (gemma-4-e4b and Ollama cloud models) is now implemented
+(see `docs/TODO.md` IMPLEMENTED banner). The following deferred items remain to be completed:
+
+- Gemma 4 E4B tool-call reliability verification (empirical smoke testing)
+- Image-block conversion live validation (waiting for vision-capable model)
+- Grammar-constrained generation fallback (conditional on Gemma reliability findings)
+- `disable_parallel_tool_use` semantic parity across providers
+- `is_error: true` semantic parity across providers
+- Helper extraction to a dedicated module (trigger: when a second consumer appears)
+
+See `docs/TODO.md` for full detail on each deferred item.
 
 ---
 
