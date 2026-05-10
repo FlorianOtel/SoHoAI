@@ -717,16 +717,62 @@ async def health():
 
 @app.get("/v1/models")
 async def list_models():
-    """List available models in Anthropic format."""
-    models = [
-        {
+    """List available models in Anthropic format.
+
+    Non-Anthropic models are returned with claude-code-* aliases.
+    Includes context_window and max_tokens for each model.
+    """
+    router: SmartRouter = app.state.router
+    models = []
+
+    for public_id in _PROXY_EXPOSED_MODELS:
+        # Determine the id to return: claude-code-* for non-Anthropic, bare for Anthropic
+        if public_id.startswith("anthropic/"):
+            model_id = public_id.split("/", 1)[1]
+        elif public_id.startswith("claude-"):
+            model_id = public_id
+        else:
+            model_id = _claude_code_alias_for(public_id)
+
+        # Get model info from router config
+        internal_alias = _PROXY_EXPOSED_MODELS[public_id]
+        model_info = None
+        for m in router.config.get("model_list", []):
+            if m.get("model_name") == internal_alias:
+                model_info = m.get("model_info", {})
+                break
+
+        if model_info is None:
+            model_info = {}
+
+        # Hardcoded fallbacks for models without model_info in config
+        if not model_info:
+            if public_id == "anthropic/claude-haiku-4-5":
+                model_info = {"context_window": 200000, "max_tokens": 8192}
+            elif public_id == "anthropic/claude-sonnet-4-6":
+                model_info = {"context_window": 200000, "max_tokens": 8192}
+            elif public_id == "anthropic/claude-opus-4-7":
+                model_info = {"context_window": 200000, "max_tokens": 32000}
+            elif public_id == "ollama-cloud/deepseek-v4-pro":
+                model_info = {"context_window": 1000000, "max_tokens": 32000}
+            elif public_id == "ollama-cloud/kimi-k2.6":
+                model_info = {"context_window": 256000, "max_tokens": 32000}
+            elif public_id == "ollama-cloud/glm-5.1":
+                model_info = {"context_window": 200000, "max_tokens": 32000}
+            elif public_id == "ollama-cloud/qwen3-coder-next":
+                model_info = {"context_window": 262000, "max_tokens": 32000}
+
+        display_name = _display_name_for(public_id, model_info)
+
+        models.append({
             "type": "model",
-            "id": public_id,
-            "display_name": public_id,
+            "id": model_id,
+            "display_name": display_name,
+            "context_window": model_info.get("context_window", 0),
+            "max_tokens": model_info.get("max_tokens", 0),
             "created_at": "2025-01-01T00:00:00Z",
-        }
-        for public_id in _PROXY_EXPOSED_MODELS
-    ]
+        })
+
     return {
         "data": models,
         "first_id": models[0]["id"] if models else None,
@@ -845,6 +891,73 @@ async def usage_stats(
 #  See CLAUDE.md §Design decisions and memory/project_shared_llama_server.md.
 # =============================================================================
 
+def _claude_code_alias_for(public_id: str) -> str:
+	"""Map a _PROXY_EXPOSED_MODELS key to its claude-code-{suffix} form.
+
+	Rule: Anthropic-native IDs (starting with "anthropic/") are stripped and
+	return bare (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6").
+	IDs already matching claude-* are returned as-is (e.g. "claude-haiku-4-5").
+	Non-Anthropic IDs get claude-code- prefix (e.g. "ollama-cloud/deepseek-v4-pro"
+	→ "claude-code-deepseek-v4-pro").
+	"""
+	if public_id.startswith("anthropic/"):
+		return public_id.split("/", 1)[1]
+	elif public_id.startswith("claude-"):
+		return public_id
+	else:
+		# Strip provider prefix and add claude-code- prefix
+		suffix = public_id.split("/", 1)[-1]
+		return f"claude-code-{suffix}"
+
+
+def _claude_code_alias_to_public(alias: str) -> str | None:
+	"""Inverse of _claude_code_alias_for.
+
+	Given a claude-code-* or claude-* alias, find the matching public ID
+	from _PROXY_EXPOSED_MODELS. Returns None if no match.
+	"""
+	for public_id in _PROXY_EXPOSED_MODELS:
+		if _claude_code_alias_for(public_id) == alias:
+			return public_id
+	return None
+
+
+def _display_name_for(public_id: str, info: dict) -> str:
+	"""Build a human-readable label encoding provider, suffix, and context window.
+
+	Format: "{Pretty} ({provider}, {ctx}k ctx)"
+	where {Pretty} is a human-friendly model name and {ctx} is context_window // 1000.
+	"""
+	context_window = info.get("context_window", 0)
+	ctx_k = context_window // 1000 if context_window else 0
+
+	if public_id.startswith("anthropic/"):
+		suffix = public_id.split("/", 1)[1]
+		# Handle versioned IDs (strip date suffix if present)
+		base = suffix.split("-")[:-1] if suffix and suffix[-8:].isdigit() else suffix.split("-")[:-1] if suffix else suffix
+		if base:
+			suffix = "-".join(base)
+		pretty = suffix.replace("-", " ").title()
+		return f"{pretty} (Anthropic, {ctx_k}k ctx)"
+	elif public_id.startswith("ollama-cloud/"):
+		suffix = public_id.split("/", 1)[1]
+		pretty = suffix.replace("-", " ").title()
+		return f"{pretty} (Ollama Cloud, {ctx_k}k ctx)"
+	elif public_id.startswith("internal/"):
+		suffix = public_id.split("/", 1)[1]
+		pretty = suffix.replace("-", " ").title()
+		return f"{pretty} (local, {ctx_k}k ctx)"
+	else:
+		pretty = public_id.replace("-", " ").title()
+		return f"{pretty} ({ctx_k}k ctx)"
+
+
+# Extract _LITELLM_ROUTED to module level to avoid drift
+_LITELLM_ROUTED = frozenset(
+	{"internal/gemma-4-e4b", "ollama-cloud/deepseek-v4-pro", "ollama-cloud/kimi-k2.6",
+	 "ollama-cloud/glm-5.1", "ollama-cloud/qwen3-coder-next"}
+)
+
 # Public-facing model name → internal router alias.
 # Both paths reach the same LiteLLM Router, so prompt caching on external
 # applies here too; Gemma routing still lands on the shared llama-server.
@@ -925,6 +1038,10 @@ def _resolve_proxy_model(name: str | None) -> str | None:
     all_aliases = set(_PROXY_EXPOSED_MODELS.values()) | set(_LEGACY_ALIASES.values())
     if name in all_aliases:
         return name
+    # claude-code-* aliases from gateway discovery
+    resolved_via_alias = _claude_code_alias_to_public(name)
+    if resolved_via_alias is not None:
+        return _PROXY_EXPOSED_MODELS[resolved_via_alias]
     return None
 
 
@@ -1101,11 +1218,6 @@ async def anthropic_messages(req: Request):
 
     public_model = body.get("model")
     resolved = _resolve_proxy_model(public_model)
-
-    _LITELLM_ROUTED = frozenset(
-        {v for v in _PROXY_EXPOSED_MODELS.values()
-         if v.startswith("internal/") or v.startswith("ollama-cloud/")}
-    )
 
     if resolved in _LITELLM_ROUTED:
         logger.info("anthropic_messages: %r → LiteLLM path (resolved: %s)", public_model, resolved)
@@ -1627,6 +1739,148 @@ async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResp
             "output_tokens": usage.get("completion_tokens", 0),
         },
     })
+
+
+def _extract_text_from_blocks(blocks: list | str | None) -> str:
+	"""Extract text content from Anthropic message blocks.
+
+	Handles both simple string content and complex block lists.
+	For tool_use and tool_result blocks, extracts text representation.
+	"""
+	if not blocks:
+		return ""
+
+	if isinstance(blocks, str):
+		return blocks
+
+	text_parts = []
+	for block in (blocks if isinstance(blocks, list) else []):
+		if not isinstance(block, dict):
+			continue
+
+		block_type = block.get("type")
+		if block_type == "text":
+			text_parts.append(block.get("text", ""))
+		elif block_type == "tool_use":
+			# Include tool name and args as text for token estimation
+			name = block.get("name", "")
+			input_dict = block.get("input", {})
+			text_parts.append(f"{name}({json.dumps(input_dict)})")
+		elif block_type == "tool_result":
+			# Include tool result text
+			content = block.get("content")
+			if isinstance(content, list):
+				for cb in content:
+					if isinstance(cb, dict) and cb.get("type") == "text":
+						text_parts.append(cb.get("text", ""))
+			elif isinstance(content, str):
+				text_parts.append(content)
+
+	return "".join(text_parts)
+
+
+@app.post("/v1/messages/count_tokens")
+async def count_tokens_endpoint(req: Request):
+	"""Count tokens for Anthropic Messages API requests.
+
+	Routes based on model type:
+	- Anthropic-native models: forward to api.anthropic.com/v1/messages/count_tokens
+	- LiteLLM-path models (internal/*, ollama-cloud/*): convert to OpenAI format
+	  and use litellm.token_counter()
+	- Unresolved models: return HTTP 400
+	"""
+	body_bytes = await req.body()
+	body = json.loads(body_bytes)
+
+	public_model = body.get("model")
+	resolved = _resolve_proxy_model(public_model)
+
+	if resolved is None:
+		logger.warning(
+			"count_tokens rejected unknown model %r (accepted: %s)",
+			public_model, sorted(_PROXY_EXPOSED_MODELS),
+		)
+		raise HTTPException(
+			status_code=400,
+			detail=(
+				f"Model '{public_model}' not exposed by this proxy. "
+				f"Accepted: {sorted(_PROXY_EXPOSED_MODELS)} (with or without provider prefix)."
+			),
+		)
+
+	# Anthropic-native models: forward to Anthropic API
+	if resolved not in _LITELLM_ROUTED:
+		# Strip provider prefix from model before forwarding to Anthropic
+		stripped_model = public_model.split("/", 1)[-1] if public_model and "/" in public_model else public_model
+		forward_body = {**body, "model": stripped_model}
+		forward_body_bytes = json.dumps(forward_body).encode()
+
+		api_key = req.headers.get("x-api-key") or os.environ.get("ANTHROPIC_API_KEY", "")
+		forward_headers: dict[str, str] = {
+			"content-type": "application/json",
+			"x-api-key": api_key,
+		}
+		for h in ("anthropic-version", "anthropic-beta"):
+			if req.headers.get(h):
+				forward_headers[h] = req.headers[h]
+
+		async with httpx.AsyncClient(timeout=120) as client:
+			r = await client.post(
+				f"{_ANTHROPIC_API_BASE}/v1/messages/count_tokens",
+				content=forward_body_bytes,
+				headers=forward_headers,
+			)
+		return JSONResponse(r.json(), status_code=r.status_code)
+
+	# LiteLLM-path models: convert to OpenAI format and use litellm.token_counter()
+	logger.info("count_tokens: %r → LiteLLM path (resolved: %s)", public_model, resolved)
+
+	# Extract system text
+	system_raw = body.get("system")
+	system_text: str | None = None
+	if isinstance(system_raw, list):
+		system_text = " ".join(
+			b.get("text", "") for b in system_raw
+			if isinstance(b, dict) and b.get("type") == "text"
+		)
+	elif isinstance(system_raw, str):
+		system_text = system_raw
+
+	# Convert Anthropic messages to OpenAI format
+	oai_messages: list[dict] = []
+	if system_text:
+		oai_messages.append({"role": "system", "content": system_text})
+
+	ant_messages = body.get("messages", [])
+	for msg in ant_messages:
+		role = msg.get("role", "user")
+		if role == "assistant":
+			oai_msg = _convert_assistant_message(msg)
+			oai_messages.append(oai_msg)
+		else:
+			oai_msgs = _convert_user_message(msg)
+			oai_messages.extend(oai_msgs)
+
+	# Count tokens using litellm
+	try:
+		token_count = litellm.token_counter(model=resolved, messages=oai_messages)
+		return JSONResponse({"input_tokens": token_count})
+	except Exception as e:
+		logger.warning(
+			"litellm.token_counter failed for model=%s: %s — falling back to text-based estimate",
+			resolved, e
+		)
+		# Fallback: rough estimate based on text length
+		total_text = system_text or ""
+		for msg in oai_messages:
+			if isinstance(msg.get("content"), str):
+				total_text += msg["content"]
+			elif isinstance(msg.get("content"), list):
+				for block in msg["content"]:
+					if isinstance(block, dict) and block.get("type") == "text":
+						total_text += block.get("text", "")
+		estimated_tokens = len(total_text) // 4
+		return JSONResponse({"input_tokens": estimated_tokens})
 
 
 # =============================================================================
