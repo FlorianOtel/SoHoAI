@@ -85,24 +85,48 @@ model_list:
       model: openai/deepseek-v4-pro:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      id: "ollama-cloud/deepseek-v4-pro"
+      description: "DeepSeek V4 Pro — Ollama Cloud"
+      max_tokens: 32000
+      max_input_tokens: 1000000
+      context_window: 1000000
 
   - model_name: "ollama-cloud/kimi-k2.6"
     litellm_params:
       model: openai/kimi-k2.6:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      id: "ollama-cloud/kimi-k2.6"
+      description: "Kimi K2.6 — Ollama Cloud"
+      max_tokens: 32000
+      max_input_tokens: 256000
+      context_window: 256000
 
   - model_name: "ollama-cloud/glm-5.1"
     litellm_params:
       model: openai/glm-5.1:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      id: "ollama-cloud/glm-5.1"
+      description: "GLM 5.1 — Ollama Cloud"
+      max_tokens: 32000
+      max_input_tokens: 200000
+      context_window: 200000
 
   - model_name: "ollama-cloud/qwen3-coder-next"
     litellm_params:
       model: openai/qwen3-coder-next:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      id: "ollama-cloud/qwen3-coder-next"
+      description: "Qwen3 Coder Next — Ollama Cloud"
+      max_tokens: 32000
+      max_input_tokens: 262000
+      context_window: 262000
 
 
 # -- Routing Policy ------------------------------------------------------------

@@ -3,7 +3,7 @@ title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-09--11-26
+updated_at: 2026-05-10--21-11
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -383,3 +383,67 @@ Replaced the static list with `discover_files()`, which calls
 - Added `--extensions` CLI arg for runtime override.
 
 **Result:** 39 files included automatically (up from 27), zero maintenance required.
+
+---
+
+## 2026-05-10 — Code-quality cleanup: indentation, dead code, config-driven model_info
+
+### Problem
+
+Three code-quality issues accumulated during the `claude-code-*` alias scheme +
+`count_tokens` feature additions (commits 02ea419 and 5ba6971):
+
+1. **Mixed indentation** — six newly added functions (`_extract_text_from_blocks`,
+   `count_tokens_endpoint`, `_claude_code_alias_for`, `_claude_code_alias_to_public`,
+   `_display_name_for`, `_LITELLM_ROUTED`) used hard-tab indentation; the rest of
+   `main.py` uses 4-space. Python 3 permits mixed indentation across blocks but
+   flake8 flags W191 and any auto-formatter would mass-rewrite unrelated lines.
+
+2. **Dead but buggy code in `_display_name_for`** — the `anthropic/` branch contained
+   a no-op ternary (`suffix[-8:].isdigit()` check whose two arms were identical),
+   producing wrong display names for versioned IDs. Since commit 5ba6971 excluded
+   `anthropic/*` from `list_models()`, this branch was unreachable — unreachable
+   buggy code is harder to remove safely later.
+
+3. **Hardcoded model_info fallbacks in `list_models()`** — all four `ollama-cloud/*`
+   models lacked `model_info:` blocks in `config.yaml`, so their context-window and
+   max-token values were hardcoded in a Python fallback dict. The `internal/gemma-4-e4b`
+   and `anthropic/claude-sonnet-4-6` entries already had proper `model_info:` blocks;
+   the Ollama Cloud entries just weren't updated at introduction time.
+
+### Fix
+
+1. **Tabs → 4-space**: `expand -t 4` applied to `main.py`; all 169 tab-indented
+   lines normalized. Zero tabs remain.
+
+2. **Dead branch deleted**: the entire `if public_id.startswith("anthropic/"):` block
+   removed from `_display_name_for`, replaced with a one-line comment explaining the
+   exclusion rationale.
+
+3. **Config-driven model_info**: added `model_info:` blocks to all four `ollama-cloud/*`
+   entries in `config.yaml` (same structure as existing Anthropic/Gemma entries:
+   `id`, `description`, `max_tokens`, `max_input_tokens`, `context_window`), then
+   deleted the 9-line hardcoded fallback dict from `list_models()`.
+
+### Values recorded in config.yaml
+
+| Model | context_window | max_tokens |
+|---|---|---|
+| `ollama-cloud/deepseek-v4-pro` | 1 000 000 | 32 000 |
+| `ollama-cloud/kimi-k2.6` | 256 000 | 32 000 |
+| `ollama-cloud/glm-5.1` | 200 000 | 32 000 |
+| `ollama-cloud/qwen3-coder-next` | 262 000 | 32 000 |
+
+### Rationale
+
+Two sources of truth for context-window values means one will get stale — if Ollama
+bumps deepseek-v4-pro to 2M context, there are now two places to update and the
+fallback dict is not where a maintainer would look. Config-as-the-single-source also
+makes the values visible to any config-reading tool (health checks, docs generation,
+etc.) without importing Python.
+
+### Code locations
+
+- `main.py`: `_display_name_for()` (dead branch removed), `list_models()` (fallback removed),
+  all six tab-indented functions (indentation normalized)
+- `config.yaml`: `ollama-cloud/*` entries (lines 83–125 after this change)

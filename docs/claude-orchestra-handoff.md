@@ -3,7 +3,7 @@ title: "claude-orchestra integration — handoff brief"
 created_at: 2026-05-10--17-52
 created_by: Claude Code (Claude Haiku 4.5)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-10--19-48
+updated_at: 2026-05-10--20-51
 context: >
   Self-contained brief produced by a SoHoAI /brain run on 2026-05-10. Captures
   the orchestra-side changes needed to consume SoHoAI's new claude-code-*
@@ -15,6 +15,18 @@ context: >
 ---
 
 # claude-orchestra integration — handoff brief
+
+## Implementation status — 2026-05-10
+
+Phases A + B + C have shipped to the claude-orchestra pipeline:
+
+- **Phase A (pricing.yaml + tier annotations)**: Orchestra now references SoHoAI's `pricing.yaml` for LiteLLM-routed model costs; tier annotations (fast/default/heavy) are ready for future per-step usage.
+- **Phase B (actor-heavy + planner-long)**: Subagent frontmatter updated to use cost-saving models (Qwen3 Coder for Actor, DeepSeek V4 Pro for Planner; Reviewer remains Sonnet 4.6 per design constraints).
+- **Phase C (Reviewer stays Sonnet 4.6)**: Reviewer tier locked to `claude-sonnet-4-6` (Anthropic) for statistical parity with design verification; cost optimization applies only to Actor and Planner.
+
+This document is retained as the alias-contract / caveats reference. See `docs/design-history.md §Amendment 2026-05-10` in claude-orchestra for implementation details.
+
+---
 
 ## 1. Purpose and alias scheme contract
 
