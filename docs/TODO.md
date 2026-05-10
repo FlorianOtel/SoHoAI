@@ -3,7 +3,7 @@ title: "SoHoAI — Future work and deferred tasks"
 created_at: 2026-05-04--17-30
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Haiku 4.5)
-updated_at: 2026-05-05--16-38
+updated_at: 2026-05-10--11-49
 context: >
   Tracks deferred implementation work that is understood, scoped, and intentionally
   left for a future session. Each entry includes the motivation, the known approach,
@@ -54,37 +54,51 @@ Required work in a future claude-orchestra branch:
 
 ---
 
-## [2026-05-04] Tool-use support on the local-model path (`/v1/messages` → LiteLLM)
+## [2026-05-04] Tool-use support on the LiteLLM path (`/v1/messages` → LiteLLM)
 
-**Status**: Deferred — understood and scoped, not yet implemented.
+**Status: IMPLEMENTED 2026-05-10** — see smoke harness `utils/tool_use_smoke_test.py`.
 
 ### Background
 
-`/v1/messages` has two routing paths (see `docs/proxy-functionality.md §2`):
+`/v1/messages` has two routing paths (see `docs/Model-routing.md §2`):
 
-1. **Transparent forward** (Anthropic models): the full request body is forwarded
+1. **Transparent forward** (`anthropic/*` models): the full request body is forwarded
    byte-for-byte to `api.anthropic.com`. Tools, `tool_use`, `tool_result`, and
    `cache_control` are preserved. Full Claude Code tool loop works.
 
-2. **LiteLLM conversion** (local models, currently only `gemma-4-e4b`): the request
-   is converted Anthropic→OpenAI format before routing through LiteLLM to llama-server.
-   **Current limitation**: our conversion code in `_anthropic_messages_litellm()` only
-   preserves `text` content blocks. Everything else is silently dropped.
+2. **LiteLLM conversion** (`internal/*` and `ollama-cloud/*` models): the request
+   is converted Anthropic→OpenAI format before routing through LiteLLM.
+   The conversion now preserves `tools`, `tool_use`, `tool_result`, and `cache_control` markers.
 
-### What is stripped and why it matters
+   Affected models (all five):
+   - `internal/gemma-4-e4b` → llama-server (Server 2)
+   - `ollama-cloud/deepseek-v4-pro`, `ollama-cloud/kimi-k2.6`, `ollama-cloud/glm-5.1`,
+     `ollama-cloud/qwen3-coder-next` → Ollama cloud (`https://ollama.com/v1`)
 
-| Dropped field | Effect on the local-model sub-agent |
-|---|---|
-| `tools` array | Model has no knowledge of available tools — cannot call Read/Write/Bash |
-| `tool_use` blocks in assistant messages | Model loses its own previous tool-call requests from conversation history |
-| `tool_result` blocks in user messages | Model loses file contents and command outputs returned by tool calls |
-| `cache_control` markers | No Anthropic-side prompt caching (irrelevant for local model, but noted) |
+### Implementation note
 
-**Important**: LiteLLM itself fully supports tool use. The stripping is entirely in
+Tool-use support was implemented in `main.py` via four helper functions: `_convert_tools()` (wraps
+Anthropic tools in OpenAI format), `_convert_assistant_message()` (splits text and tool_use blocks),
+`_convert_user_message()` (handles tool_result and image blocks), and extensions to the streaming
+SSE emitter (`anthropic_event_stream()`) to emit `content_block_start/delta/stop` events for tool
+calls. The non-streaming path also extracts `tool_calls` from the LiteLLM response and returns
+Anthropic-format `tool_use` content blocks. Streaming responses emit proper Anthropic SSE events
+including `message_delta` with `stop_reason: "tool_use"` on tool-calling responses.
+
+### What was previously stripped and why it matters (now forwarded)
+
+| Field | Effect on the local-model sub-agent | Status |
+|---|---|---|
+| `tools` array | Model has knowledge of available tools — can call Read/Write/Bash | ✅ Forwarded |
+| `tool_use` blocks in assistant messages | Model sees its own previous tool-call requests from conversation history | ✅ Forwarded |
+| `tool_result` blocks in user messages | Model sees file contents and command outputs returned by tool calls | ✅ Forwarded |
+| `cache_control` markers | No Anthropic-side prompt caching (irrelevant for local model, but noted) | ✅ Forwarded |
+
+**Important**: LiteLLM itself fully supports tool use. The stripping was entirely in
 *our* Anthropic→OpenAI conversion code, not in LiteLLM. LiteLLM correctly translates
 OpenAI `tool_calls` to the provider's native format.
 
-### Required implementation (~70 lines total in `_anthropic_messages_litellm()`)
+### Implementation detail (~70 lines total in `_anthropic_messages_litellm()`)
 
 **1. Convert `tools` array (Anthropic → OpenAI format)**
 
@@ -154,7 +168,7 @@ LiteLLM returns tool use in streaming as OpenAI `tool_calls` deltas:
 choices[0].delta.tool_calls[0].function.arguments = '{"file'
 ```
 
-Need to emit Anthropic SSE events instead of `text_delta`:
+Emits Anthropic SSE events:
 ```
 event: content_block_start
 data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_abc","name":"Read","input":{}}}
@@ -165,17 +179,173 @@ data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta"
 
 ~20 lines in the streaming loop.
 
-### Unknown: Gemma 4 tool-call reliability
+### Per-model tool-call reliability status
 
-llama-server exposes the OpenAI-compatible tools API and Gemma 4 E4B has
-instruction-following capability, but tool-call reliability at Q8_0 with complex
-multi-tool conversations is untested. May require:
-- Grammar-constrained generation (`--grammar` in llama-server) for reliable JSON output
-- Prompt engineering / system-prompt injection to improve tool adherence
-- Evaluation harness to measure tool-call success rate
+Once the conversion was implemented, reliability per model is now being validated:
 
-### When to implement
+- **`internal/gemma-4-e4b`**: llama-server exposes the OpenAI tools API; Gemma 4 E4B
+  has instruction-following capability but complex multi-tool JSON output reliability is
+  **informational-only in this session**. May need grammar-constrained generation (`--grammar`)
+  or prompt engineering if unreliable in practice. See deferred entry (a) below.
+- **`ollama-cloud/deepseek-v4-pro`** and **`ollama-cloud/qwen3-coder-next`**: both
+  support OpenAI function calling natively and are expected to be reliable for tool use.
+- **`ollama-cloud/kimi-k2.6`**, **`ollama-cloud/glm-5.1`**: untested.
 
-Implement when a concrete use case requires a local-model sub-agent to use file-access
-or bash tools (e.g. an Actor that reads and modifies files without paying Haiku API cost).
-Until then, use `claude-haiku-4-5` (transparent forward, full tool support, ~$0.01/session).
+---
+
+## Tool-use deferred: internal/gemma-4-e4b broader reliability verification
+
+**Synthetic smoke status (2026-05-10):** PASS on both streaming and non-streaming legs of `utils/tool_use_smoke_test.py`. Gemma 4 E4B Q8_0 produced a well-formed `tool_use(get_file_size, path="/etc/hostname")` on turn 1 and used the synthetic `"42"` tool_result correctly on turn 2. Grammar-constrained generation (deferred Step c) is therefore **not required for the simple single-tool case**.
+
+### Background / rationale
+
+The synthetic smoke harness exercises a single, simple tool with one string argument. Real Claude Code subagent traffic is more demanding: multi-tool catalogues (Read/Write/Bash/Glob/Grep/Edit/TodoWrite/Agent), parallel tool calls, deeply-nested JSON arguments, multi-turn tool chains, and 10K+ token system prompts. Gemma 4 E4B at Q8_0 may degrade on those workloads even though it handles the smoke. Without broader validation we cannot recommend `internal/gemma-4-e4b` as an Actor-tier subagent in claude-orchestra.
+
+### Goal
+
+Validate Gemma's tool-call reliability on representative claude-orchestra workloads (full Claude Code tool catalogue, multi-turn, parallel calls) before recommending it for any Actor-tier or research-tier subagent. If reliability holds, fold Gemma into the recommended-models list in `docs/Model-routing.md §3`. If it degrades, scope grammar-constrained generation (Step c) precisely against the failure modes observed.
+
+### What needs to be done
+
+1. Configure a non-trivial claude-orchestra subagent (e.g. a research-tier explore agent) to use `model: internal/gemma-4-e4b` in its frontmatter. Run a full `/duo` or `/brain` session against a real (not synthetic) task that requires Read/Glob/Grep/Bash.
+2. Capture: (a) tool-call success rate, (b) any malformed `arguments` JSON observed, (c) latency per turn, (d) whether the model hits the 110024-token slot context window faster than expected.
+3. Re-run with a multi-tool prompt that should provoke parallel tool calls. Record whether Gemma serializes (good) or attempts and fails parallelism (bad).
+4. If reliability ≥ 95 % across (1)-(3): update `docs/Model-routing.md §3` to drop the "unvalidated" qualifier, add Gemma to the recommended-Actor list with cost ≈ $0, and mark this entry complete. If reliability < 95 %: enumerate the failure classes observed and use them to scope Step c (grammar-constrained generation) precisely instead of speculatively.
+
+---
+
+## Tool-use deferred: image-block conversion live validation
+
+### Background / rationale
+
+`_convert_user_message()` includes conversion logic for Anthropic `image` content blocks:
+- `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"<b64>"}}` → `{"type":"image_url","image_url":{"url":"data:image/png;base64,<b64>"}}`
+- `{"type":"image","source":{"type":"url","url":"<url>"}}` → `{"type":"image_url","image_url":{"url":"<url>"}}`
+
+However, no vision-capable model is available in the current stack:
+- `internal/gemma-4-e4b`: text-only, no mmproj or vision encoder
+- `ollama-cloud/*`: currently text-only SKUs; Ollama may offer vision SKUs in the future
+- `anthropic/claude-*`: not on the LiteLLM path, so not affected by this conversion
+
+Image blocks in user messages would be forwarded to a non-vision model, which would either fail or silently ignore them.
+
+### Goal
+
+Validate that image-block conversion and forwarding work correctly when a vision-capable model becomes available.
+
+### What needs to be done
+
+1. Provision Gemma 4 with multimodal support (e.g. llama.cpp with a compatible CLIP/SigLIP mmproj and Server 2 GPU)
+   or wait for an Ollama cloud vision SKU.
+2. Add a smoke leg to `tool_use_smoke_test.py` that sends a small test image (e.g. a 32×32 PNG with a recognizable pattern)
+   and a prompt asking the model to describe its contents.
+3. Assert that the response text acknowledges the image content (e.g. contains "image" or a description of the pattern).
+4. Merge the vision-capable model config and re-run smoke; if image-block conversion passes, mark this entry complete.
+
+---
+
+## Tool-use deferred: grammar-constrained generation fallback for Gemma
+
+**Status (2026-05-10):** **likely unnecessary**, gated on the broader reliability check above. The synthetic smoke (single tool, one argument) passed on Gemma without any grammar constraint. Only revisit if Step (a)'s broader workload validation shows malformed `arguments` JSON or wrong tool selection. Keeping the entry for traceability.
+
+### Background / rationale
+
+If Step (a)'s broader validation shows Gemma 4 E4B produces malformed tool-call JSON at Q8_0 on real workloads, grammar-constrained generation is a proven technique to enforce valid JSON output. LiteLLM and llama.cpp both support the `--grammar` parameter (GBNF format). This would be a targeted fallback: only applied to `internal/gemma-4-e4b` when the request includes `tools`.
+
+Implementation cost: ~15–20 lines in the `kv_cache.py` native llama-server path to inject a grammar parameter into the `/completion` request; ~10 lines to define or fetch the JSON grammar spec.
+
+### Goal
+
+ONLY if Step (a) shows real-workload failures, implement grammar-constrained generation to bring Gemma to ≥ 95 % tool-call reliability. Skip this work entirely if Step (a) passes.
+
+### What needs to be done
+
+1. Confirm from Step (a) above that broader-workload Gemma reliability is < 95 % (synthetic-smoke pass alone is NOT a trigger).
+2. Obtain or generate a GBNF grammar for the OpenAI function-calling JSON schema (tools + arguments structure).
+3. Modify `kv_cache.py` `_call_native_llama()` to inject `grammar: <spec>` into the llama-server `/completion` request when `model.startswith("internal/")` and the request includes `tools`.
+4. Re-run the broader workload validation from Step (a); assert Gemma now produces valid JSON on all tool calls.
+5. Measure inference latency impact (grammar can add 5–20% overhead); document findings.
+
+---
+
+## Tool-use deferred: disable_parallel_tool_use semantic parity
+
+### Background / rationale
+
+The Anthropic API accepts `disable_parallel_tool_use: true` to force tool calls to be serialized (one at a time)
+instead of parallelized (multiple tool calls in one turn). This is forwarded to LiteLLM as `parallel_tool_calls: false`.
+
+However, not all providers enforce this semantic. For example, a provider might silently ignore the `parallel_tool_calls: false`
+directive and emit tool calls in parallel anyway. Currently there is no validation that the provider actually respects
+the serialization request.
+
+### Goal
+
+Verify that each provider (Ollama cloud and llama-server) respects `parallel_tool_calls: false` when forwarded.
+
+### What needs to be done
+
+1. Create a test prompt that requires multiple independent tool calls (e.g. "Read file A, then read file B, then read file C").
+2. Send the request with `parallel_tool_calls: false` to each target model.
+3. Assert that the response contains a single tool_use block (or a sequence of separate turns), not multiple tool_use blocks in one response.
+4. Document the per-model behavior: does the model serialize or parallelize?
+5. If a provider silently ignores the directive, escalate to a follow-up task to decide: accept the limitation, add a workaround
+   (e.g. inject constraint in system prompt), or deprecate that model for parallel-sensitive workloads.
+
+---
+
+## Tool-use deferred: is_error semantic parity across providers
+
+### Background / rationale
+
+The Anthropic API accepts `is_error: true` in `tool_result` content blocks to indicate that a tool call failed. The conversion
+adds an `[ERROR] ` prefix to the content string (a best-effort marker that some models may recognize). However, the standard
+OpenAI API does not have a native `is_error` field; instead, errors are typically indicated by error content or by the caller
+injecting `[ERROR]` prefix into the text.
+
+Different providers may respond differently to this `[ERROR]` prefix. For example:
+- Ollama cloud models may recognize the prefix and adjust their error recovery behavior.
+- llama-server (Gemma) may not have special handling and just treats it as literal text.
+
+Currently the behavior is undocumented.
+
+### Goal
+
+Validate that the `[ERROR]` prefix is handled sensibly by each provider and document any model-specific quirks.
+
+### What needs to be done
+
+1. Craft a two-turn scenario: Turn 1 calls a hypothetical tool; Turn 2 returns an error result marked with `is_error: true`
+   (which becomes `[ERROR] tool failed` in the content string).
+2. Send to each target model (`ollama-cloud/qwen3-coder-next`, `ollama-cloud/deepseek-v4-pro`, `internal/gemma-4-e4b`).
+3. Observe and document: does the model recognize the error flag? Does it retry the tool call or adjust its response?
+4. If a model completely ignores error signals, consider injecting a more verbose error message in the system prompt
+   or as a separate user message context.
+
+---
+
+## Tool-use deferred: extract conversion helpers to a dedicated module
+
+### Background / rationale
+
+The four helper functions (`_convert_tools()`, `_convert_tool_choice()`, `_convert_assistant_message()`, `_convert_user_message()`)
+are currently defined in `main.py` above `_anthropic_messages_litellm()`. Today they are only called by that one function.
+However, as the codebase grows, a second consumer may appear (e.g. a future `/proxy/v1/messages` endpoint for Cline that
+also needs Anthropic→OpenAI conversion).
+
+Extracting to a dedicated module `anthropic_openai_convert.py` at the top level would improve code organization and
+re-usability. However, until a second consumer exists, the extraction is premature (YAGNI principle).
+
+### Goal
+
+When a second consumer of the Anthropic→OpenAI conversion appears, extract the four helpers and their unit tests
+to `anthropic_openai_convert.py` for re-use.
+
+### What needs to be done
+
+1. Monitor the codebase for use cases that need Anthropic→OpenAI conversion outside `_anthropic_messages_litellm()`.
+2. When a second consumer appears: create `anthropic_openai_convert.py` with the four helper functions and comprehensive
+   unit tests (cover edge cases: empty tools, mixed content types, image blocks, tool errors, etc.).
+3. Update `main.py` to import from the new module instead of defining locally.
+4. Run the existing smoke harness to ensure no regression.
+5. Trigger: when Cline or another integration needs to use the same conversion logic.

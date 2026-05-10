@@ -62,7 +62,7 @@ class SmartRouter:
             # Fallback: if external (cloud) fails, go to internal (local)
             fallbacks=[
                 {
-                    "external": ["internal"],
+                    "anthropic/claude-sonnet-4-6": ["internal/gemma-4-e4b"],
                 }
             ],
             # Retry config
@@ -82,8 +82,8 @@ class SmartRouter:
                 _litellm.callbacks.append(self._usage_tracker)
 
         self.routing_config = self.config.get("routing", {})
-        self.default_model = self.routing_config.get("default_model", "internal")
-        self.cloud_model = self.routing_config.get("cloud_model", "external")
+        self.default_model = self.routing_config.get("default_model", "internal/gemma-4-e4b")
+        self.cloud_model = self.routing_config.get("cloud_model", "anthropic/claude-sonnet-4-6")
         self.complexity_threshold = self.routing_config.get(
             "complexity_threshold_tokens", 2000
         )
