@@ -2,29 +2,42 @@
 title: "claude-orchestra integration — handoff brief"
 created_at: 2026-05-10--17-52
 created_by: Claude Code (Claude Haiku 4.5)
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-10--19-48
 context: >
   Self-contained brief produced by a SoHoAI /brain run on 2026-05-10. Captures
   the orchestra-side changes needed to consume SoHoAI's new claude-code-*
   alias scheme. This document is the sole interface between the two projects;
   no other code or config in claude-orchestra needs to know about SoHoAI internals.
+  Updated 2026-05-10--19-48: /v1/models no longer includes anthropic/* entries —
+  only the 5 non-Anthropic models (1 local + 4 ollama-cloud) are returned.
+  Anthropic models remain accessible via Claude Code's native built-in list.
 ---
 
 # claude-orchestra integration — handoff brief
 
 ## 1. Purpose and alias scheme contract
 
-SoHoAI's `/v1/models` endpoint now publishes non-Anthropic models under a stable alias scheme:
+SoHoAI's `GET /v1/models` endpoint publishes **non-Anthropic models only** under a stable
+`claude-code-*` alias scheme. Anthropic models are intentionally excluded — Claude Code
+already knows `claude-haiku-4-5`, `claude-sonnet-4-6`, and `claude-opus-4-7` natively, and
+including them caused duplicate entries in the `/model` picker with gateway-synthesized
+metadata. They continue to route correctly via `ANTHROPIC_BASE_URL` without needing a
+discovery entry.
 
-| Backend | Public ID form (legacy) | claude-code-* alias (new) | Notes |
+**Models returned by `GET /v1/models` (non-Anthropic only):**
+
+| Backend | Public ID form (legacy) | claude-code-* alias | Notes |
 |---------|---|---|---|
-| Anthropic | `claude-haiku-4-5-20251001` | `claude-haiku-4-5` | Unchanged; native IDs in responses |
-| Anthropic | `claude-sonnet-4-6-20250514` | `claude-sonnet-4-6` | Unchanged |
-| Anthropic | `claude-opus-4-7-20250219` | `claude-opus-4-7` | Unchanged |
 | llama-server | `internal/gemma-4-e4b` | `claude-code-gemma-4-e4b` | LiteLLM-routed |
 | Ollama Cloud | `ollama-cloud/deepseek-v4-pro` | `claude-code-deepseek-v4-pro` | LiteLLM-routed; reasoning |
 | Ollama Cloud | `ollama-cloud/kimi-k2.6` | `claude-code-kimi-k2.6` | LiteLLM-routed; reasoning |
 | Ollama Cloud | `ollama-cloud/glm-5.1` | `claude-code-glm-5.1` | LiteLLM-routed; reasoning |
 | Ollama Cloud | `ollama-cloud/qwen3-coder-next` | `claude-code-qwen3-coder-next` | LiteLLM-routed; coding |
+
+Anthropic models (`claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`) remain fully
+available for subagent frontmatter — they come from Claude Code's native built-in list and
+route through the gateway transparently.
 
 **Stability invariant**: The `claude-code-{suffix}` scheme is the sole coupling between SoHoAI and claude-orchestra. Subagent frontmatter should use these full IDs (no env-var remapping, no shell aliases) to ensure deterministic model selection across sessions and operator machines.
 
@@ -167,17 +180,19 @@ On Server 1 (192.168.1.93):
 # Restart uvicorn (if running under systemd, use systemctl; if manual, SIGTERM and restart)
 # The FastAPI app reloads automatically if using --reload
 
-# Verify GET /v1/models shape — check for claude-code-* aliases
-curl -s http://192.168.1.93:8000/v1/models | python3 -m json.tool | grep -E '"id"|"owned_by"' | head -20
+# Verify GET /v1/models shape — should contain ONLY claude-code-* aliases (5 models total)
+curl -s http://192.168.1.93:8000/v1/models | python3 -m json.tool | grep '"id"'
 
-# Expected output (example):
-#   "id": "claude-code-qwen3-coder-next",
-#   "owned_by": "ollama-cloud",
+# Expected output — exactly 5 entries, no bare anthropic IDs:
+#   "id": "claude-code-gemma-4-e4b",
 #   "id": "claude-code-deepseek-v4-pro",
-#   "owned_by": "ollama-cloud",
-#   ...
-#   "id": "claude-sonnet-4-6",
-#   "owned_by": "anthropic",
+#   "id": "claude-code-kimi-k2.6",
+#   "id": "claude-code-glm-5.1",
+#   "id": "claude-code-qwen3-coder-next",
+#
+# NOTE: claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7 are intentionally absent.
+# They are served from Claude Code's native built-in list, not from gateway discovery.
+# Seeing them here would indicate a regression — the duplicate-picker bug is back.
 ```
 
 ### 5.2 Apply Claude Code settings.json env-var addition (if not already done in-session)
@@ -210,16 +225,29 @@ claude env | grep CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
 
 ### 5.3 Verify picker populates with claude-code-* aliases
 
-In Claude Code, open the model picker (`Cmd+Shift+M` or `Ctrl+Shift+M` depending on OS):
+In Claude Code, open the model picker (`/model`):
 
-- Ensure the picker shows `claude-code-qwen3-coder-next`, `claude-code-deepseek-v4-pro`, `claude-code-glm-5.1`, etc.
-- Anthropic models should still show as `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`.
+Expected layout — two distinct groups, no duplicates:
 
-If the picker is empty or shows only Anthropic models, check Claude Code's debug log:
+- **Native Claude Code entries** (from Claude Code's built-in list, not from gateway):
+  `Default (Opus 4.7)`, `Sonnet`, `Sonnet (1M context)`, `Haiku`
+
+- **From gateway** (from `GET /v1/models` — exactly 5 entries):
+  `Gemma 4 E4B (local, 110k ctx)`, `Deepseek V4 Pro (Ollama Cloud, ...)`,
+  `Kimi K2.6 (Ollama Cloud, ...)`, `Glm 5.1 (Ollama Cloud, ...)`,
+  `Qwen3 Coder Next (Ollama Cloud, ...)`
+
+**What to watch for:**
+- If `Claude Haiku 4 (Anthropic, ...)`, `Claude Sonnet 4 (Anthropic, ...)`, or
+  `Claude Opus 4 (Anthropic, ...)` appear under "From gateway": **regression** —
+  `/v1/models` is again returning `anthropic/*` entries. Check `main.py:list_models()`.
+- If no gateway entries appear at all: `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` is
+  not set or the gateway is unreachable.
 
 ```bash
-# Check Claude Code's error output (varies by platform; typically shown in the IDE output panel)
 # If CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=0 or unset, models won't populate
+# Check with:
+claude env | grep CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
 ```
 
 ### 5.4 Run alias bijection test
@@ -304,7 +332,7 @@ Use this checklist to track deployment progress:
 
 - [ ] Merge SoHoAI PR to main worktree
 - [ ] Restart uvicorn on Server 1
-- [ ] Verify `GET /v1/models` returns `claude-code-*` aliases
+- [ ] Verify `GET /v1/models` returns exactly 5 `claude-code-*` aliases (no `anthropic/*` entries)
 - [ ] Update `~/.claude/settings.json` with `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` (if not already done)
 - [ ] Restart Claude Code
 - [ ] Check model picker populates with aliases

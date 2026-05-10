@@ -726,10 +726,13 @@ async def list_models():
     models = []
 
     for public_id in _PROXY_EXPOSED_MODELS:
-        # Determine the id to return: claude-code-* for non-Anthropic, bare for Anthropic
+        # anthropic/* models are already known natively to Claude Code via ANTHROPIC_BASE_URL;
+        # skip them here to avoid duplicate /model picker entries with gateway-synthesized metadata.
         if public_id.startswith("anthropic/"):
-            model_id = public_id.split("/", 1)[1]
-        elif public_id.startswith("claude-"):
+            continue
+
+        # Determine the id to return: bare for claude-*, claude-code-* for everything else
+        if public_id.startswith("claude-"):
             model_id = public_id
         else:
             model_id = _claude_code_alias_for(public_id)
@@ -747,13 +750,7 @@ async def list_models():
 
         # Hardcoded fallbacks for models without model_info in config
         if not model_info:
-            if public_id == "anthropic/claude-haiku-4-5":
-                model_info = {"context_window": 200000, "max_tokens": 8192}
-            elif public_id == "anthropic/claude-sonnet-4-6":
-                model_info = {"context_window": 200000, "max_tokens": 8192}
-            elif public_id == "anthropic/claude-opus-4-7":
-                model_info = {"context_window": 200000, "max_tokens": 32000}
-            elif public_id == "ollama-cloud/deepseek-v4-pro":
+            if public_id == "ollama-cloud/deepseek-v4-pro":
                 model_info = {"context_window": 1000000, "max_tokens": 32000}
             elif public_id == "ollama-cloud/kimi-k2.6":
                 model_info = {"context_window": 256000, "max_tokens": 32000}

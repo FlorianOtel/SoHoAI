@@ -2,8 +2,8 @@
 title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Haiku 4.5)
-updated_at: 2026-05-10--17-52
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-10--19-48
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -391,22 +391,45 @@ Model self-description is not a reliable indicator of which model is handling th
 
 ### 4.5 Gateway model discovery and `claude-code-*` alias scheme
 
-SoHoAI's `GET /v1/models` endpoint publishes a unified model list suitable for claude-orchestra subagent dispatch. Anthropic models keep their native IDs (`claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`); non-Anthropic models are surfaced as `claude-code-{suffix}` aliases (e.g., `claude-code-qwen3-coder-next`, `claude-code-deepseek-v4-pro`, `claude-code-gemma-4-e4b`). The transformation is performed by `_claude_code_alias_for()` in `main.py` and reversed by `_claude_code_alias_to_public()` before routing to the backend. Bijection correctness is validated by `utils/alias_bijection_test.py`.
+SoHoAI's `GET /v1/models` endpoint publishes the models that Claude Code cannot discover
+on its own — non-Anthropic models only. The transformation is performed by
+`_claude_code_alias_for()` in `main.py` and reversed by `_claude_code_alias_to_public()`
+before routing to the backend. Bijection correctness is validated by `utils/alias_bijection_test.py`.
 
-**All 8 models via claude-code-* aliases:**
+**`GET /v1/models` does NOT include `anthropic/*` models.**
 
-| Public ID (legacy) | claude-code-* alias | Backend | Notes |
+Rationale: Claude Code already has `claude-haiku-4-5`, `claude-sonnet-4-6`, and
+`claude-opus-4-7` in its built-in native model list. When `ANTHROPIC_BASE_URL` points at
+the SoHoAI gateway, these are routed transparently through `POST /v1/messages` — no
+discovery entry is needed. Including them in `/v1/models` caused two problems:
+
+1. **Duplicate picker entries**: each Anthropic model appeared twice (once from the native list, once from gateway discovery).
+2. **Misleading metadata**: the gateway's copy carried hardcoded fallback values (`context_window`, `max_tokens`, display labels synthesized by `_display_name_for()`) rather than real Anthropic API metadata.
+
+**Models returned by `GET /v1/models` (5 total — non-Anthropic only):**
+
+| Public ID | claude-code-* alias | Backend | Notes |
 |---|---|---|---|
 | `internal/gemma-4-e4b` | `claude-code-gemma-4-e4b` | llama-server, Server 2 | $0/session |
-| `anthropic/claude-haiku-4-5` | `claude-haiku-4-5` | Anthropic API | Native Anthropic ID (unchanged) |
-| `anthropic/claude-sonnet-4-6` | `claude-sonnet-4-6` | Anthropic API | Native Anthropic ID (unchanged) |
-| `anthropic/claude-opus-4-7` | `claude-opus-4-7` | Anthropic API | Native Anthropic ID (unchanged) |
 | `ollama-cloud/deepseek-v4-pro` | `claude-code-deepseek-v4-pro` | Ollama cloud | Reasoning; `max_tokens ≥ 500` |
 | `ollama-cloud/kimi-k2.6` | `claude-code-kimi-k2.6` | Ollama cloud | Reasoning; `max_tokens ≥ 500` |
 | `ollama-cloud/glm-5.1` | `claude-code-glm-5.1` | Ollama cloud | Reasoning; `max_tokens ≥ 500` |
 | `ollama-cloud/qwen3-coder-next` | `claude-code-qwen3-coder-next` | Ollama cloud | Coding; standard `max_tokens` |
 
-Claude Code's model picker and subagent frontmatter read from this endpoint. Both the picker (when `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) and manual subagent `model:` fields accept the full `claude-code-*` identifier. The proxy's `_resolve_proxy_model()` function accepts both the legacy public_id forms (e.g., `ollama-cloud/deepseek-v4-pro`) and the new aliases for backward compatibility with existing configurations.
+Anthropic models (`claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`) are still
+fully accessible — they appear in the picker from Claude Code's native built-in list and
+route through the gateway transparently via `ANTHROPIC_BASE_URL`.
+
+**Contrast with `/proxy/v1/models` (Cline path):** that endpoint still returns all 8
+public IDs from `_PROXY_EXPOSED_MODELS` (including `anthropic/*`). The distinction matters
+because Cline manages its own model list and does not have a native built-in list that
+would conflict.
+
+Claude Code's model picker and subagent frontmatter read from `/v1/models`. Both the picker
+(when `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) and manual subagent `model:` fields
+accept the full `claude-code-*` identifier. The proxy's `_resolve_proxy_model()` function
+accepts both the legacy public_id forms (e.g., `ollama-cloud/deepseek-v4-pro`) and the
+new aliases for backward compatibility with existing configurations.
 
 **Token counting endpoint (`POST /v1/messages/count_tokens`):**
 
