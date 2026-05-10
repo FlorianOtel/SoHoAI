@@ -2,8 +2,8 @@
 title: "SoHoAI — Future work and deferred tasks"
 created_at: 2026-05-04--17-30
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Haiku 4.5)
-updated_at: 2026-05-10--11-49
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-10--15-21
 context: >
   Tracks deferred implementation work that is understood, scoped, and intentionally
   left for a future session. Each entry includes the motivation, the known approach,
@@ -189,7 +189,8 @@ Once the conversion was implemented, reliability per model is now being validate
   or prompt engineering if unreliable in practice. See deferred entry (a) below.
 - **`ollama-cloud/deepseek-v4-pro`** and **`ollama-cloud/qwen3-coder-next`**: both
   support OpenAI function calling natively and are expected to be reliable for tool use.
-- **`ollama-cloud/kimi-k2.6`**, **`ollama-cloud/glm-5.1`**: untested.
+- **`ollama-cloud/kimi-k2.6`**: gating target in `utils/tool_use_smoke_test.py`; **PASS (streaming, 2026-05-10)**.
+- **`ollama-cloud/glm-5.1`**: gating target in `utils/tool_use_smoke_test.py`; **PASS (streaming, 2026-05-10)**.
 
 ---
 
@@ -211,6 +212,36 @@ Validate Gemma's tool-call reliability on representative claude-orchestra worklo
 2. Capture: (a) tool-call success rate, (b) any malformed `arguments` JSON observed, (c) latency per turn, (d) whether the model hits the 110024-token slot context window faster than expected.
 3. Re-run with a multi-tool prompt that should provoke parallel tool calls. Record whether Gemma serializes (good) or attempts and fails parallelism (bad).
 4. If reliability ≥ 95 % across (1)-(3): update `docs/Model-routing.md §3` to drop the "unvalidated" qualifier, add Gemma to the recommended-Actor list with cost ≈ $0, and mark this entry complete. If reliability < 95 %: enumerate the failure classes observed and use them to scope Step c (grammar-constrained generation) precisely instead of speculatively.
+
+---
+
+## [2026-05-10] Tool-use deferred: full Claude Code tool catalogue + parallel tool calls
+
+**Status: OPEN** — the 2-turn single-tool smoke (`utils/tool_use_smoke_test.py`) has been validated for all 5 targets. The broader workload has not been run.
+
+### Background / rationale
+
+The smoke harness exercises a **single** tool (`get_file_size`) with **one string argument** in a **2-turn** exchange. Real Claude Code sub-agent traffic is more demanding in two dimensions:
+
+1. **Parallel tool calls** — Claude Code frequently requests multiple tools in a **single assistant response** (e.g. `Read file A` + `Glob pattern B` + `Bash command C` as three simultaneous `tool_use` blocks). The conversion helpers handle this structurally (multiple entries in `tool_calls`), but no provider has been tested with a prompt that actually triggers parallel invocation.
+
+2. **Full tool catalogue** — Claude Code's tool set includes Read, Write, Edit, Bash, Glob, Grep, TodoWrite, Agent, and more, each with multi-field schemas and deeply-nested arguments. Gemma 4 E4B and the Ollama cloud models have only been validated against a trivial single-argument schema.
+
+Without validating these two dimensions, `internal/gemma-4-e4b` and `ollama-cloud/*` models cannot be confidently recommended for full claude-orchestra Actor-tier work.
+
+### Goal
+
+Validate all 5 LiteLLM-path targets against:
+(a) The full Claude Code tool catalogue in a real (not synthetic) sub-agent session.
+(b) A prompt that provokes parallel tool calls (multiple `tool_use` blocks in one turn).
+
+### What needs to be done
+
+1. **Extend `utils/tool_use_smoke_test.py`** with a parallel-tool leg: construct a prompt that should elicit ≥2 `tool_use` blocks in one assistant response (e.g. "using the tools provided, get the size of /etc/hostname and /etc/hosts in a single response"). Assert the response contains exactly 2 `tool_use` blocks.
+2. Run the extended smoke against all 5 targets: `internal/gemma-4-e4b`, `ollama-cloud/qwen3-coder-next`, `ollama-cloud/deepseek-v4-pro`, `ollama-cloud/kimi-k2.6`, `ollama-cloud/glm-5.1`.
+3. Configure a non-trivial claude-orchestra sub-agent (e.g. research-explore agent, actor agent) with `model: ollama-cloud/qwen3-coder-next` or `model: internal/gemma-4-e4b`. Run a `/duo` or `/brain` session against a real task requiring Read/Glob/Grep/Bash.
+4. Record: (a) tool-call success rate, (b) malformed `arguments` JSON, (c) parallel vs serialized behavior, (d) latency per turn.
+5. If parallel tool calls work correctly across ≥3 targets: update `docs/Model-routing.md §4.3` to remove the "remaining open item" note and update the recommended-models table in §3. If parallel calls fail for a specific model, document the failure class and consider injecting `disable_parallel_tool_use` for that model.
 
 ---
 

@@ -2,8 +2,8 @@
 title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Opus 4.7)
-updated_at: 2026-05-10--12-30
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-10--15-21
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -309,7 +309,88 @@ Recommended Actor-tier model selection:
 
 ---
 
-## 4. Alternative - Anthropic passthrough -- and comparison 
+## 4. Claude Code Integration
+
+This section consolidates how Claude Code uses SoHoAI as a transparent proxy — both as
+the primary interactive client and as a sub-agent dispatcher.
+
+### 4.1 Two paths
+
+| Path | Config | Endpoint | Use case |
+|------|--------|----------|----------|
+| **Direct Anthropic** | `ANTHROPIC_BASE_URL=http://192.168.1.93:8000` in `~/.claude/settings.json` | `POST /v1/messages` | Interactive Claude Code sessions; all `anthropic/*` models |
+| **Sub-agent / proxy** | `api_base_url: http://192.168.1.93:8000/proxy` in agent frontmatter | `POST /proxy/v1/chat/completions` | Stateless sub-agent dispatch; `internal/*` + `anthropic/*` + `ollama-cloud/*` |
+
+**Direct Anthropic path** (transparent forward): the proxy relays the exact request bytes
+to `api.anthropic.com`. Tools, `tool_use`, `tool_result`, `cache_control`, and
+`anthropic-beta` headers are fully preserved. Prompt caching, streaming, and native SSE
+event types all work unchanged.
+
+**Sub-agent / proxy path** (`/proxy/v1/chat/completions`): stateless OpenAI-compatible
+pass-through. Sub-agents in claude-orchestra (`/brain`, `/duo`) use this path when
+given an `api_base_url` override in their frontmatter. The full model list is available.
+
+### 4.2 Available models for sub-agents
+
+All models exposed via `_PROXY_EXPOSED_MODELS` in `main.py`:
+
+| Model ID | Path | Backend | Notes |
+|----------|------|---------|-------|
+| `internal/gemma-4-e4b` | LiteLLM conversion | llama-server, Server 2 | $0/session; tool-use smoke PASS; broader validation pending |
+| `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | Safest Actor-tier choice; ~$0.01/session |
+| `anthropic/claude-sonnet-4-6` | Transparent forward | Anthropic API | Default interactive model |
+| `anthropic/claude-opus-4-7` | Transparent forward | Anthropic API | Brain tier in /brain pipeline |
+| `ollama-cloud/deepseek-v4-pro` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
+| `ollama-cloud/kimi-k2.6` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
+| `ollama-cloud/glm-5.1` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
+| `ollama-cloud/qwen3-coder-next` | LiteLLM conversion | Ollama cloud | Coding model; standard `max_tokens`; tool-use smoke PASS |
+
+### 4.3 Tool calling via sub-agents (LiteLLM path)
+
+When a sub-agent uses an `internal/*` or `ollama-cloud/*` model, Claude Code sends
+requests in Anthropic Messages API format. `_anthropic_messages_litellm()` in `main.py`
+converts them to OpenAI format for LiteLLM using four helpers:
+
+| Helper | Converts |
+|--------|---------|
+| `_convert_tools()` | Anthropic `tools` array → OpenAI `{"type":"function","function":{...}}` |
+| `_convert_tool_choice()` | Anthropic `tool_choice` → OpenAI `tool_choice` |
+| `_convert_assistant_message()` | `tool_use` content blocks → OpenAI `tool_calls` with JSON `arguments` |
+| `_convert_user_message()` | `tool_result` blocks → OpenAI `role:"tool"` messages; `image` blocks → `image_url` |
+
+Streaming responses emit proper Anthropic SSE `content_block_start/delta/stop` events
+for tool calls, including `message_delta` with `stop_reason: "tool_use"`.
+
+**Validation status (2026-05-10):**
+
+| Model | Smoke test | Notes |
+|-------|-----------|-------|
+| `internal/gemma-4-e4b` | PASS (streaming + non-streaming) | Broader workload validation pending |
+| `ollama-cloud/qwen3-coder-next` | PASS (streaming) | — |
+| `ollama-cloud/deepseek-v4-pro` | PASS (streaming) | Reasoning model: `max_tokens ≥ 500` |
+| `ollama-cloud/kimi-k2.6` | PASS (streaming) | Reasoning model: `max_tokens ≥ 500` |
+| `ollama-cloud/glm-5.1` | PASS (streaming) | Reasoning model: `max_tokens ≥ 500` |
+
+Smoke harness: `utils/tool_use_smoke_test.py` — 2-turn test with a single `get_file_size`
+tool. Run with `--server http://192.168.1.93:8001` (worktree) or `8000` (post-merge).
+
+**Remaining open item**: full Claude Code tool catalogue with parallel tool calls
+(multi-tool in a single response, parallel sub-agent dispatch). Only the simple
+single-tool 2-turn case has been validated. See `docs/TODO.md`.
+
+### 4.4 Identity caveat
+
+When an `ollama-cloud/*` model receives a Claude Code sub-agent request, it also
+receives Claude Code's system prompt ("You are Claude Code…"). These models follow
+the persona and **self-identify as "Claude"**. The actual model is confirmed by:
+- The status bar model indicator in the Claude Code UI
+- Server logs on Server 1 (`uvicorn` stdout shows `model=ollama-cloud/...`)
+
+Model self-description is not a reliable indicator of which model is handling the request.
+
+---
+
+## 5. Alternative - Anthropic passthrough — and comparison
 
 
 The problem: LiteLLM's standard proxy endpoint (`/v1/messages`) strips/transforms certain Anthropic-specific elements (cache_control markers, tools array, anthropic-beta headers) when it converts requests. 
@@ -327,7 +408,7 @@ LiteLLM's passthrough URL approach uses `ANTHROPIC_BASE_URL=http://localhost:800
 The real distinction is that SoHoAI operates at the server level with model-aware routing—Anthropic requests get forwarded transparently while local models get converted through LiteLLM—whereas the LiteLLM passthrough is purely Anthropic-focused with no branching logic, where the client -- e.g. claude code -- would use a custom URL, with no ability for the LiteLLM to do mode-aware routing 
 
 
-### 4.1 In-depth comparison 
+### 5.1 In-depth comparison
 
 Both are two implementations of the same fix. In more detail: 
 
@@ -337,7 +418,7 @@ The root cause in both cases is identical: LiteLLM's standard `/v1/messages` end
 
 **SoHoAI's `_anthropic_messages_forward()`** fixes this by implementing the same relay directly inside the FastAPI app — exact body bytes forwarded, `x-api-key` / `anthropic-version` / `anthropic-beta` headers preserved, raw SSE bytes streamed back.
 
-###  4.2 Why SoHoAI's approach is strictly more capable
+### 5.2 Why SoHoAI's approach is strictly more capable
 
 The critical difference is the **model-aware branching** at the `POST /v1/messages` handler:
 
@@ -348,19 +429,19 @@ model = "gemma-4-e4b"  →  _anthropic_messages_litellm()  (LiteLLM conversion)
 
 LiteLLM's `/anthropic` passthrough endpoint has no such branching — it can only forward to Anthropic. It cannot route local models. SoHoAI's implementation handles both paths behind the same `ANTHROPIC_BASE_URL`, which is what allows `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`, and `gemma-4-e4b` to all be valid `model:` values in agent frontmatter while sharing one endpoint configuration in `settings.json`.
 
-### 4.3 Observation regarding caching  The one finding worth noting
+### 5.3 Observation regarding caching — the one finding worth noting
 
-Section §5 below contains an important empirical result: prompt caching is **not currently active** on your account — `cache_creation_input_tokens: 0` and `inference_geo: not_available` on both proxy and direct Anthropic calls. 
+Section §6 below contains an important empirical result: prompt caching is **not currently active** on your account — `cache_creation_input_tokens: 0` and `inference_geo: not_available` on both proxy and direct Anthropic calls. 
 
 The transparent forward is correctly preserving `cache_control` markers; the limitation is account-tier or region on Anthropic's side. 
 
-This means the cost tables in §5 are the target state once caching activates, not the current state. The transparent forward implementation is correct and future-proof — no changes needed when caching becomes available.
+This means the cost tables in §6 are the target state once caching activates, not the current state. The transparent forward implementation is correct and future-proof — no changes needed when caching becomes available.
 
 
 
 ---
 
-## 5. Prompt caching and cost implications
+## 6. Prompt caching and cost implications
 
 ### How Anthropic prompt caching works (transparent path only)
 
@@ -435,7 +516,7 @@ context is re-read cached). Without caching (broken path), costs would be 3–4�
 
 ---
 
-## 6. LiteLLM `model_info` parameter semantics
+## 7. LiteLLM `model_info` parameter semantics
 
 These fields in `config.yaml model_info` are **not** forwarded to the provider API.
 
@@ -457,14 +538,17 @@ input-size enforcement using these values.
 
 ---
 
-## 7. Future work
+## 8. Future work
 
 Basic tool-use support for the local-model path (gemma-4-e4b and Ollama cloud models) is now implemented
-(see `docs/TODO.md` IMPLEMENTED banner). The following deferred items remain to be completed:
+and smoke-validated for all 5 targets (see `docs/TODO.md` IMPLEMENTED banner). The following deferred items remain:
 
-- Gemma 4 E4B tool-call reliability verification (empirical smoke testing)
+- **Full Claude Code tool catalogue + parallel tool calls** — the 2-turn single-tool smoke is validated; multi-tool
+  parallel invocation (multiple `tool_use` blocks in one response) and the full claude-orchestra tool catalogue
+  (Read/Write/Bash/Glob/Grep/Edit/TodoWrite/Agent) remain unvalidated. See `docs/TODO.md`.
+- Gemma 4 E4B broader workload reliability (smoke PASS; real claude-orchestra sessions not yet run)
 - Image-block conversion live validation (waiting for vision-capable model)
-- Grammar-constrained generation fallback (conditional on Gemma reliability findings)
+- Grammar-constrained generation fallback (conditional on Gemma reliability findings; likely unnecessary)
 - `disable_parallel_tool_use` semantic parity across providers
 - `is_error: true` semantic parity across providers
 - Helper extraction to a dedicated module (trigger: when a second consumer appears)
@@ -473,7 +557,7 @@ See `docs/TODO.md` for full detail on each deferred item.
 
 ---
 
-## 8. Implementation reference
+## 9. Implementation reference
 
 - **`main.py`**: `_ANTHROPIC_API_BASE`, `_PROXY_EXPOSED_MODELS`, `_resolve_proxy_model()`,
   `_build_proxy_model_entry()`, `proxy_model_info()`, `proxy_models()`,
