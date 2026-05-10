@@ -38,13 +38,13 @@ model_list:
   ### First use-case: interactive chat
 
   # --- Primary LLM: GPU inference on Server 2 ---
-  - model_name: internal
+  - model_name: "internal/gemma-4-e4b"
     litellm_params:
       model: openai/gemma4
       api_base: "http://${server2_ip}:8000/v1"
       api_key: "dummy-key"
     model_info:
-      id: "internal-llama-server"
+      id: "internal/gemma-4-e4b"
       description: "Gemma 4 E4B Q8_0 — summarization, offline fallback, background"
       # Advertised context window: per-slot capacity with `-c 220048 --parallel 2`.
       # 220048 / 2 = 110024. This is what external clients (Cline, Claude Code) read via
@@ -53,12 +53,12 @@ model_list:
       max_input_tokens: 110024
       context_window: 110024
 
-  - model_name: external
+  - model_name: "anthropic/claude-sonnet-4-6"
     litellm_params:
       model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
     model_info:
-      id: "external-claude"
+      id: "anthropic/claude-sonnet-4-6"
       description: "Claude Sonnet 4.6 (primary) — interactive chat default"
       # Advertised context window for any LiteLLM-style proxy consumer.
       max_tokens: 200000
@@ -80,17 +80,41 @@ model_list:
       model: anthropic/claude-haiku-4-5
       api_key: os.environ/ANTHROPIC_API_KEY
 
+  - model_name: "ollama-cloud/deepseek-v4-pro"
+    litellm_params:
+      model: openai/deepseek-v4-pro:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+
+  - model_name: "ollama-cloud/kimi-k2.6"
+    litellm_params:
+      model: openai/kimi-k2.6:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+
+  - model_name: "ollama-cloud/glm-5.1"
+    litellm_params:
+      model: openai/glm-5.1:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+
+  - model_name: "ollama-cloud/qwen3-coder-next"
+    litellm_params:
+      model: openai/qwen3-coder-next:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+
 
 # -- Routing Policy ------------------------------------------------------------
 routing:
-  default_model: "external"
-  fallback_chain: ["internal", "external"]
+  default_model: "anthropic/claude-sonnet-4-6"
+  fallback_chain: ["internal/gemma-4-e4b", "anthropic/claude-sonnet-4-6"]
   # Route to cloud when context exceeds threshold.
   # Hard limit: -c 220048 / 2 = 110024 tokens per slot. At 100K we route to cloud,
   # leaving ~10K headroom for output (default max_tokens=1024 + safety margin).
   complexity_threshold_tokens: 100000
-  cloud_model: "external"
-  summarization_model: "internal"
+  cloud_model: "anthropic/claude-sonnet-4-6"
+  summarization_model: "internal/gemma-4-e4b"
 
 
 #### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
@@ -126,7 +150,7 @@ rag:
     n_variants: 3
     lambda: 0.5
     pool_multiplier: 4
-    variant_model: "internal"
+    variant_model: "internal/gemma-4-e4b"
 
   # -- NFS scanner filters ------------------------------------------------------
   scanner:

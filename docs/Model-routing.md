@@ -2,8 +2,8 @@
 title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Haiku 4.5)
-updated_at: 2026-05-05--16-38
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-10--10-00
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -48,18 +48,29 @@ SoHoAI routes conversation inference across two model tiers: **external** (Claud
 
 ### Model mapping (`_PROXY_EXPOSED_MODELS` in `main.py`)
 
-| Public name (caller sends) | Internal router alias | Backend | Context window |
+`_PROXY_EXPOSED_MODELS` is an **identity map** — every public ID equals its LiteLLM
+`model_name` in `config.yaml`. No translation layer; `config.yaml` is the single source
+of truth.
+
+| Public ID (= config.yaml model_name) | Path | Backend | Context window |
 |---|---|---|---|
-| `gemma-4-e4b` | `internal` | llama-server, Server 2, Gemma 4 E4B Q8_0 | 110,024 |
-| `claude-haiku-4-5` | `claude-haiku-4-5` | Anthropic API | 200,000 |
-| `claude-sonnet-4-6` | `external` | Anthropic API (with Gemma fallback) | 200,000 |
-| `claude-opus-4-7` | `claude-opus-4-7` | Anthropic API | 200,000 |
+| `internal/gemma-4-e4b` | LiteLLM | llama-server, Server 2, Gemma 4 E4B Q8_0 | 110,024 |
+| `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | 200,000 |
+| `anthropic/claude-sonnet-4-6` | Transparent forward | Anthropic API (Gemma fallback if down) | 200,000 |
+| `anthropic/claude-opus-4-7` | Transparent forward | Anthropic API | 200,000 |
+| `ollama-cloud/deepseek-v4-pro` | LiteLLM | Ollama cloud (`https://ollama.com/v1`) | — |
+| `ollama-cloud/kimi-k2.6` | LiteLLM | Ollama cloud | — |
+| `ollama-cloud/glm-5.1` | LiteLLM | Ollama cloud | — |
+| `ollama-cloud/qwen3-coder-next` | LiteLLM | Ollama cloud | — |
 
-`claude-sonnet-4-6` maps to `external` to preserve the automatic Gemma fallback
-if Anthropic is unreachable. The other Anthropic models use direct aliases and
-hard-fail if Anthropic is down.
+`_resolve_proxy_model()` also accepts legacy bare names (`gemma-4-e4b`, `claude-sonnet-4-6`
+etc.) via `_LEGACY_ALIASES` for backward compat with existing Cline configs.
 
-`_resolve_proxy_model()` accepts bare names, `anthropic/`-prefixed, or `openai/`-prefixed forms.
+**Ollama cloud models are reasoning models** (DeepSeek V4 Pro, Kimi K2.6, GLM-5.1
+in particular). They spend a variable number of tokens on internal reasoning before
+emitting visible output. Use `max_tokens ≥ 500` for these models; requests with low
+limits (e.g. `max_tokens=20`) will hit the limit during the thinking phase and return
+empty `content[0].text` with `stop_reason: max_tokens`.
 
 ### Cline configuration
 
@@ -121,13 +132,22 @@ The proxy inspects the `model` field and branches on two paths:
 ```
 REQUEST arrives at POST /v1/messages
   │
-  ├─ model resolves to "internal" (gemma-4-e4b)
+  ├─ model starts with "internal/" (internal/gemma-4-e4b, future internal/*)
   │     → _anthropic_messages_litellm()
   │     → Anthropic→OpenAI format conversion (text blocks only)
   │     → LiteLLM Router → llama-server (Server 2)
   │     → LIMITATION: tools stripped (see §2.3 and docs/TODO.md)
   │
-  └─ model resolves to anything else (claude-*, or unresolved)
+  ├─ model starts with "ollama-cloud/" (all 4 Ollama cloud models)
+  │     → _anthropic_messages_litellm() [same conversion path]
+  │     → Anthropic→OpenAI format conversion (text blocks only)
+  │     → LiteLLM Router → https://ollama.com/v1 (OLLAMA_API_KEY from .env)
+  │     → LIMITATION: tools stripped (same — see docs/TODO.md)
+  │     → NOTE: reasoning models — use max_tokens ≥ 500
+  │     → NOTE: Claude Code system prompt causes model to identify as Claude
+  │
+  └─ model starts with "anthropic/" (or unresolved)
+        → "anthropic/" prefix stripped before forwarding
         → _anthropic_messages_forward()
         → transparent HTTP forward to api.anthropic.com/v1/messages
         → full fidelity: tools, history, caching, streaming all preserved
@@ -157,7 +177,7 @@ stripped → no caching → every turn paid full input-token cost; tools were st
 model could not call Read/Write/Bash → Claude Code fell back to injecting file contents
 as inline text that scrolled on screen.
 
-### §2.2 LiteLLM local path (gemma-4-e4b)
+### §2.2 LiteLLM path (internal/* and ollama-cloud/*)
 
 `_anthropic_messages_litellm()` in `main.py` converts the Anthropic-format request to
 OpenAI format and routes through LiteLLM Router to llama-server on Server 2.
@@ -189,16 +209,22 @@ provider's native format. If our conversion preserved tools (Anthropic→OpenAI 
 translation, ~70 lines), tool use would work — subject to Gemma 4's reliability.
 See `docs/TODO.md` for the full implementation plan and format-conversion spec.
 
-**Appropriate use cases for the local path:**
+**Appropriate use cases for the LiteLLM path:**
 - Simple text generation where tool use is not needed
-- Summarization tasks (already used by SoHoAI's `maybe_summarize()`)
-- Offline/background drafting when Anthropic is unreachable
+- Summarization tasks (`internal/gemma-4-e4b` already used by `maybe_summarize()`)
+- Offline/background drafting when Anthropic is unreachable (`internal/gemma-4-e4b`)
+- Exploratory prompting with Ollama cloud models (deepseek, kimi, glm, qwen3-coder)
 - Cost-zero tasks where quality is secondary to API cost
 
-**Inappropriate use cases:**
-- Full Claude Code sessions (tools broken → files injected inline → expensive + slow)
+**Inappropriate use cases (until TODO.md tool-use is implemented):**
+- Full Claude Code sessions requiring Read/Write/Bash tools
 - Any sub-agent that needs to read files, write code, or run bash commands
 - Tasks requiring multi-turn tool call chains
+
+**Claude Code identity note:** When using `ollama-cloud/*` models via `claude --model`,
+Claude Code injects its own system prompt ("You are Claude Code..."). Ollama cloud models
+follow this persona and will self-identify as Claude. The actual model is confirmed by
+the status bar and server logs — not the model's self-description.
 
 ---
 

@@ -133,7 +133,7 @@ async def lifespan(app: FastAPI):
             "preserving all key facts, decisions, and context needed to continue:\n\n"
             + text
         )
-        summarization_model = config.get("routing", {}).get("summarization_model", "internal")
+        summarization_model = config.get("routing", {}).get("summarization_model", "internal/gemma-4-e4b")
         resp = await app.state.router.complete(
             messages=[{"role": "user", "content": prompt}],
             model=summarization_model,
@@ -156,13 +156,13 @@ async def lifespan(app: FastAPI):
 
     # Variant LLM function for multi-query expansion (§8.3).
     # Uses the internal model via LiteLLM's OpenAI-compat endpoint — no KV slot involved.
-    _variant_model = app.state.rag_cfg.get("multi_query", {}).get("variant_model", "internal")
+    _variant_model = app.state.rag_cfg.get("multi_query", {}).get("variant_model", "internal/gemma-4-e4b")
 
     async def variant_llm_fn(prompt: str) -> str:
         resp = await app.state.router.complete(
             messages=[{"role": "user", "content": prompt}],
             model=_variant_model,
-            force_cloud=(_variant_model == "external"),
+            force_cloud=(_variant_model == "anthropic/claude-sonnet-4-6"),
             stream=False,
         )
         return resp.choices[0].message.content.strip()
@@ -325,7 +325,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
     rag_sources: list[str] | None = None
     rag_chunks_used: list[dict] = []
     assistant_content = ""
-    model_used = "internal"
+    model_used = "internal/gemma-4-e4b"
     used_internal = False
     inference_ok = False
 
@@ -334,7 +334,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
             # 5a. Select model and run inference
             target_model = router.select_model(messages, req.model, req.force_cloud)
             used_internal = (
-                target_model == "internal"
+                target_model.startswith("internal/")
                 and cache.kv_cache is not None
                 and slot_id is not None
             )
@@ -345,7 +345,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
                 prompt = apply_gemma_template(llm_messages)
                 result = await cache.kv_cache.inference(slot_id=slot_id, prompt=prompt)
                 raw_text = result["content"].strip()
-                model_used = "internal"
+                model_used = target_model
             else:
                 response = await router.complete(
                     messages=llm_messages,
@@ -717,8 +717,22 @@ async def health():
 
 @app.get("/v1/models")
 async def list_models():
-    """List available models."""
-    return {"models": app.state.router.available_models}
+    """List available models in Anthropic format."""
+    models = [
+        {
+            "type": "model",
+            "id": public_id,
+            "display_name": public_id,
+            "created_at": "2025-01-01T00:00:00Z",
+        }
+        for public_id in _PROXY_EXPOSED_MODELS
+    ]
+    return {
+        "data": models,
+        "first_id": models[0]["id"] if models else None,
+        "last_id": models[-1]["id"] if models else None,
+        "has_more": False,
+    }
 
 
 @app.get("/v1/models/health")
@@ -835,10 +849,17 @@ async def usage_stats(
 # Both paths reach the same LiteLLM Router, so prompt caching on external
 # applies here too; Gemma routing still lands on the shared llama-server.
 _PROXY_EXPOSED_MODELS: dict[str, str] = {
-    "gemma-4-e4b": "internal",
-    "claude-haiku-4-5": "claude-haiku-4-5",
-    "claude-sonnet-4-6": "external",            # keeps fallback-to-internal for Cline
-    "claude-opus-4-7": "claude-opus-4-7",
+    # Local inference
+    "internal/gemma-4-e4b": "internal/gemma-4-e4b",
+    # Anthropic cloud
+    "anthropic/claude-haiku-4-5": "claude-haiku-4-5",
+    "anthropic/claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
+    "anthropic/claude-opus-4-7": "claude-opus-4-7",
+    # Ollama cloud
+    "ollama-cloud/deepseek-v4-pro": "ollama-cloud/deepseek-v4-pro",
+    "ollama-cloud/kimi-k2.6": "ollama-cloud/kimi-k2.6",
+    "ollama-cloud/glm-5.1": "ollama-cloud/glm-5.1",
+    "ollama-cloud/qwen3-coder-next": "ollama-cloud/qwen3-coder-next",
 }
 
 
@@ -868,12 +889,21 @@ def _build_proxy_model_entry(config: dict, public_name: str, internal_name: str)
     }
 
 
+_LEGACY_ALIASES: dict[str, str] = {
+    "gemma-4-e4b":       "internal/gemma-4-e4b",
+    "claude-haiku-4-5":  "claude-haiku-4-5",
+    "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
+    "claude-opus-4-7":   "claude-opus-4-7",
+}
+
+
 def _resolve_proxy_model(name: str | None) -> str | None:
     """Resolve a proxy client's model name to the internal router alias.
 
     Accepts any of:
-      - bare public name:   "gemma-4-e4b", "claude-sonnet-4-6"
-      - provider-prefixed:  "openai/gemma-4-e4b", "anthropic/claude-sonnet-4-6"
+      - bare public name:   "gemma-4-e4b", "ollama-cloud/deepseek-v4-pro"
+      - provider-prefixed:  "openai/gemma-4-e4b", "anthropic/claude-sonnet-4-6", "ollama-cloud/deepseek-v4-pro"
+      - legacy bare names:  "claude-sonnet-4-6" (backward compat)
       - internal aliases:   "internal", "external"  (for direct testing)
     Returns the internal router alias or None if unknown.
     """
@@ -882,12 +912,18 @@ def _resolve_proxy_model(name: str | None) -> str | None:
     # Direct match on public name
     if name in _PROXY_EXPOSED_MODELS:
         return _PROXY_EXPOSED_MODELS[name]
-    # Strip a provider prefix like "openai/..." or "anthropic/..."
+    # Legacy aliases (bare names without prefix)
+    if name in _LEGACY_ALIASES:
+        return _LEGACY_ALIASES[name]
+    # Strip a provider prefix like "openai/...", "anthropic/...", "ollama-cloud/..."
     bare = name.split("/", 1)[-1] if "/" in name else name
     if bare in _PROXY_EXPOSED_MODELS:
         return _PROXY_EXPOSED_MODELS[bare]
+    if bare in _LEGACY_ALIASES:
+        return _LEGACY_ALIASES[bare]
     # Allow the raw internal alias to pass through
-    if name in set(_PROXY_EXPOSED_MODELS.values()):
+    all_aliases = set(_PROXY_EXPOSED_MODELS.values()) | set(_LEGACY_ALIASES.values())
+    if name in all_aliases:
         return name
     return None
 
@@ -1046,10 +1082,11 @@ def _anthropic_stop_reason(openai_finish_reason: str | None) -> str | None:
 async def anthropic_messages(req: Request):
     """Anthropic Messages API — model-aware routing.
 
-    Local model (gemma-4-e4b → internal alias): routes via LiteLLM with
-    Anthropic→OpenAI format conversion. Current limitation: the conversion
-    strips tools, tool_use, tool_result, and cache_control — see docs/TODO.md
-    for the planned fix (~70 lines of format-conversion code).
+    Local model (gemma-4-e4b → internal alias) and Ollama cloud models:
+    routes via LiteLLM with Anthropic→OpenAI format conversion.
+    Current limitation: the conversion strips tools, tool_use, tool_result,
+    and cache_control — see docs/TODO.md for the planned fix (~70 lines of
+    format-conversion code).
 
     Anthropic models (claude-*) or unresolved models: transparent HTTP forward
     to api.anthropic.com. Preserves tools, tool_use/tool_result history,
@@ -1062,9 +1099,22 @@ async def anthropic_messages(req: Request):
     public_model = body.get("model")
     resolved = _resolve_proxy_model(public_model)
 
-    if resolved == "internal":
-        logger.info("anthropic_messages: %r → LiteLLM local path", public_model)
+    _LITELLM_ROUTED = frozenset(
+        {v for v in _PROXY_EXPOSED_MODELS.values()
+         if v.startswith("internal/") or v.startswith("ollama-cloud/")}
+    )
+
+    if resolved in _LITELLM_ROUTED:
+        logger.info("anthropic_messages: %r → LiteLLM path (resolved: %s)", public_model, resolved)
+        body = {**body, "model": resolved, "_public_model": public_model}
         return await _anthropic_messages_litellm(body, req)
+
+    # Strip provider prefix (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6")
+    # before forwarding — the Anthropic API only accepts bare model names.
+    if public_model and "/" in public_model:
+        bare_model = public_model.split("/", 1)[-1]
+        body = {**body, "model": bare_model}
+        body_bytes = json.dumps(body).encode()
 
     logger.info("anthropic_messages: %r → transparent forward", public_model)
     return await _anthropic_messages_forward(req, body_bytes, body)
@@ -1175,7 +1225,7 @@ async def _anthropic_messages_forward(
 
 
 async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResponse | JSONResponse:
-    """LiteLLM conversion path for local models (gemma-4-e4b → internal).
+    """LiteLLM conversion path for local models (gemma-4-e4b → internal) and Ollama cloud.
 
     CURRENT LIMITATION — tools are stripped by our Anthropic→OpenAI conversion:
     - `tools` array: dropped (never forwarded to LiteLLM or the model)
@@ -1189,8 +1239,8 @@ async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResp
     Use this path only for simple text generation (summarization, offline drafts).
     Do NOT use for Claude Code sessions that require Read/Write/Bash tool calls.
     """
-    public_model = body.get("model")
-    internal_model = _resolve_proxy_model(public_model)
+    internal_model = body.get("model")
+    public_model = body.get("_public_model", internal_model)  # fallback to internal if not provided
     stream = bool(body.get("stream", False))
     system_raw = body.get("system")
     max_tokens = body.get("max_tokens", 1024)

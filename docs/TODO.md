@@ -54,22 +54,27 @@ Required work in a future claude-orchestra branch:
 
 ---
 
-## [2026-05-04] Tool-use support on the local-model path (`/v1/messages` → LiteLLM)
+## [2026-05-04] Tool-use support on the LiteLLM path (`/v1/messages` → LiteLLM)
 
 **Status**: Deferred — understood and scoped, not yet implemented.
 
 ### Background
 
-`/v1/messages` has two routing paths (see `docs/proxy-functionality.md §2`):
+`/v1/messages` has two routing paths (see `docs/Model-routing.md §2`):
 
-1. **Transparent forward** (Anthropic models): the full request body is forwarded
+1. **Transparent forward** (`anthropic/*` models): the full request body is forwarded
    byte-for-byte to `api.anthropic.com`. Tools, `tool_use`, `tool_result`, and
    `cache_control` are preserved. Full Claude Code tool loop works.
 
-2. **LiteLLM conversion** (local models, currently only `gemma-4-e4b`): the request
-   is converted Anthropic→OpenAI format before routing through LiteLLM to llama-server.
+2. **LiteLLM conversion** (`internal/*` and `ollama-cloud/*` models): the request
+   is converted Anthropic→OpenAI format before routing through LiteLLM.
    **Current limitation**: our conversion code in `_anthropic_messages_litellm()` only
    preserves `text` content blocks. Everything else is silently dropped.
+
+   Affected models (all five):
+   - `internal/gemma-4-e4b` → llama-server (Server 2)
+   - `ollama-cloud/deepseek-v4-pro`, `ollama-cloud/kimi-k2.6`, `ollama-cloud/glm-5.1`,
+     `ollama-cloud/qwen3-coder-next` → Ollama cloud (`https://ollama.com/v1`)
 
 ### What is stripped and why it matters
 
@@ -165,17 +170,22 @@ data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta"
 
 ~20 lines in the streaming loop.
 
-### Unknown: Gemma 4 tool-call reliability
+### Unknown: per-model tool-call reliability
 
-llama-server exposes the OpenAI-compatible tools API and Gemma 4 E4B has
-instruction-following capability, but tool-call reliability at Q8_0 with complex
-multi-tool conversations is untested. May require:
-- Grammar-constrained generation (`--grammar` in llama-server) for reliable JSON output
-- Prompt engineering / system-prompt injection to improve tool adherence
-- Evaluation harness to measure tool-call success rate
+Once the conversion is implemented, reliability per model is untested:
+
+- **`internal/gemma-4-e4b`**: llama-server exposes the OpenAI tools API; Gemma 4 E4B
+  has instruction-following capability but complex multi-tool JSON output is untested
+  at Q8_0. May need grammar-constrained generation (`--grammar`) or prompt engineering.
+- **`ollama-cloud/deepseek-v4-pro`** and **`ollama-cloud/qwen3-coder-next`**: both
+  support OpenAI function calling natively and are likely reliable for tool use.
+- **`ollama-cloud/kimi-k2.6`**, **`ollama-cloud/glm-5.1`**: untested.
 
 ### When to implement
 
-Implement when a concrete use case requires a local-model sub-agent to use file-access
-or bash tools (e.g. an Actor that reads and modifies files without paying Haiku API cost).
-Until then, use `claude-haiku-4-5` (transparent forward, full tool support, ~$0.01/session).
+Implement when a concrete use case requires a non-Anthropic model to use file-access
+or bash tools in a Claude Code session. Until then, use `anthropic/claude-haiku-4-5`
+(transparent forward, full tool support, ~$0.01/session).
+
+Highest-value first target: `ollama-cloud/deepseek-v4-pro` or `ollama-cloud/qwen3-coder-next`
+(both support function calling; cost ~$0 vs Haiku).

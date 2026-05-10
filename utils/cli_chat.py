@@ -219,14 +219,14 @@ class CLIChat:
             if not arg:
                 if self.model is None:
                     mode_info = "AUTO (router default: external/Sonnet)"
-                elif self.model == "internal":
+                elif self.model in ("internal", "internal/gemma-4-e4b"):
                     mode_info = "INTERNAL (Gemma 4 on GPU)"
                 else:
                     mode_info = f"EXTERNAL ({self.model})"
                 return f"  Current LLM mode: {mode_info}"
 
             if arg.lower() == "internal":
-                self.model = "internal"
+                self.model = "internal/gemma-4-e4b"
                 return "  Switched to internal LLM (Gemma 4 on GPU)."
             else:
                 # Assume any other argument is an external model name
@@ -234,7 +234,7 @@ class CLIChat:
                 return f"  External model set to: {self.model or 'auto'}."
 
         elif command == "/internal":
-            self.model = "internal"
+            self.model = "internal/gemma-4-e4b"
             return "  Switched to internal LLM (Gemma 4 on GPU)."
 
         elif command == "/cloud":
