@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-10--19-48
+updated_at: 2026-05-10--20-05
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -46,7 +46,7 @@ SoHoAI routes conversation inference across two model tiers: **external** (Claud
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/proxy/v1/models` | OpenAI-compatible model list |
+| GET | `/proxy/v1/models` | OpenAI-compatible model list — all 8 public IDs from `_PROXY_EXPOSED_MODELS` (including `anthropic/*`) |
 | GET | `/proxy/v1/model/info` | LiteLLM-compatible model info (`max_input_tokens`, `context_window`) — Cline reads this to set its context-window display |
 | POST | `/proxy/v1/chat/completions` | Stateless OpenAI chat completions, streaming supported |
 
@@ -66,6 +66,14 @@ of truth.
 | `ollama-cloud/kimi-k2.6` | LiteLLM | Ollama cloud | — |
 | `ollama-cloud/glm-5.1` | LiteLLM | Ollama cloud | — |
 | `ollama-cloud/qwen3-coder-next` | LiteLLM | Ollama cloud | — |
+
+**Why `/proxy/v1/models` exposes all 8 — including `anthropic/*`:** Cline builds its
+model dropdown entirely from this endpoint; it has no hardcoded built-in model list.
+Exposing `anthropic/*` here simply tells Cline those models are selectable — no
+duplication risk. This is the key difference from `GET /v1/models` (the Claude Code
+discovery endpoint, §4.5): that endpoint excludes `anthropic/*` because Claude Code
+already has those IDs in its native built-in list and would show each model twice if
+the gateway also returned them.
 
 `_resolve_proxy_model()` also accepts legacy bare names (`gemma-4-e4b`, `claude-sonnet-4-6`
 etc.) via `_LEGACY_ALIASES` for backward compat with existing Cline configs.
