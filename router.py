@@ -144,6 +144,10 @@ class SmartRouter:
             self._apply_cache_control(messages) if self._uses_anthropic(target) else messages
         )
 
+        # Override timeout for ollama-cloud targets
+        if target.startswith("ollama-cloud/"):
+            kwargs.setdefault("request_timeout", 30)
+
         try:
             if stream:
                 # Return async generator for SSE streaming
