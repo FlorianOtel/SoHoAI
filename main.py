@@ -70,6 +70,62 @@ logger = logging.getLogger("SoHoAI")
 
 _ANTHROPIC_API_BASE = "https://api.anthropic.com"
 
+# -- Orchestra session detection -----------------------------------------------
+# brain.md writes ~/.claude/active-sessions/<SESSION_ID>.lck (e.g. 20260510T204552Z-12345.lck)
+# at session start and removes it on cleanup/abandon. Native CC sessions use the
+# native-<UUID>.lck naming. We scan for the non-native pattern to tag all proxy
+# requests with the active orchestra session ID without relying on client-side headers.
+
+_ACTIVE_SESSIONS_DIR = Path.home() / ".claude/active-sessions"
+_ORCHESTRA_LCK_RE = re.compile(r"^(\d{8}T\d{6}Z-\d+)\.lck$")
+
+
+def _read_active_orchestra_session_id() -> str | None:
+    """Return the active orchestra session ID from ~/.claude/active-sessions/, or None.
+
+    Scans for non-native .lck files (pattern: YYYYMMDDTHHMMSSZ-<pid>.lck).
+    Verifies the CC process in the file is still alive to skip stale files
+    from crashed/abandoned sessions that didn't clean up their .lck.
+    """
+    try:
+        for lck in _ACTIVE_SESSIONS_DIR.iterdir():
+            m = _ORCHESTRA_LCK_RE.match(lck.name)
+            if not m:
+                continue
+            try:
+                content = lck.read_text()
+            except OSError:
+                continue
+            pid_m = re.search(r"cc_pid=(\d+)", content)
+            if pid_m:
+                try:
+                    os.kill(int(pid_m.group(1)), 0)  # signal 0 = alive check only
+                    return m.group(1)
+                except OSError:
+                    continue  # process dead — stale lck
+    except Exception:
+        pass
+    return None
+
+
+# -- LiteLLM model rate overrides -----------------------------------------------
+# LiteLLM's model registry has zero cache rates for claude-opus-4-7 (not yet in its
+# database as of 2025-08). Register correct Anthropic list rates so completion_cost()
+# and get_model_info() return accurate values for both the forward path and the
+# litellm fallback cost source in telemetry-summarize.py.
+litellm.register_model({
+    "claude-opus-4-7": {
+        "input_cost_per_token": 0.000015,
+        "output_cost_per_token": 0.000075,
+        "cache_creation_input_token_cost": 0.00001875,
+        "cache_read_input_token_cost": 0.0000015,
+        "litellm_provider": "anthropic",
+        "mode": "chat",
+        "max_tokens": 32000,
+        "max_input_tokens": 200000,
+    }
+})
+
 # -- Load config ---------------------------------------------------------------
 with open("config.yaml") as f:
     config = yaml.safe_load(f)
@@ -196,6 +252,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def inject_orchestra_session_id(request: Request, call_next):
+    """Tag every request with the active orchestra session ID (if any).
+
+    Reads ~/.claude/active-sessions/ for a live brain.md .lck file and stores
+    the session ID in request.state.orchestra_session_id. All proxy/messages
+    endpoints consume this instead of the X-Orchestra-Session-ID header, which
+    Claude Code never reliably injects.
+    """
+    request.state.orchestra_session_id = _read_active_orchestra_session_id()
+    return await call_next(request)
 
 
 # =============================================================================
@@ -1090,8 +1159,12 @@ async def proxy_chat_completions(req: Request):
     if stream:
         async def event_stream():
             try:
-                # Determine source from X-Orchestra-Session-ID header
-                orchestra_session_id = req.headers.get("x-orchestra-session-id")
+                # Prefer middleware-injected session ID; fall back to header for future
+                # client-side injection support.
+                orchestra_session_id = (
+                    getattr(req.state, "orchestra_session_id", None)
+                    or req.headers.get("x-orchestra-session-id")
+                )
                 source = "orchestra" if orchestra_session_id else "cline"
                 # Extract user_id from body if present
                 user_id = body.get("user")
@@ -1127,8 +1200,12 @@ async def proxy_chat_completions(req: Request):
         )
 
     # Non-streaming
-    # Determine source from X-Orchestra-Session-ID header
-    orchestra_session_id = req.headers.get("x-orchestra-session-id")
+    # Prefer middleware-injected session ID; fall back to header for future
+    # client-side injection support.
+    orchestra_session_id = (
+        getattr(req.state, "orchestra_session_id", None)
+        or req.headers.get("x-orchestra-session-id")
+    )
     source = "orchestra" if orchestra_session_id else "cline"
     # Extract user_id from body if present
     user_id = body.get("user")
@@ -1256,16 +1333,85 @@ async def _anthropic_messages_forward(
     stream = bool(body.get("stream", False))
 
     if stream:
+        # Accumulate SSE usage tokens while forwarding bytes unchanged.
+        # Anthropic SSE: message_start carries input+cache tokens; message_delta
+        # carries the final output_tokens count.
+        _usage_agg = {"input_tokens": 0, "output_tokens": 0,
+                      "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+        _streamed_model = [body.get("model", "unknown")]
+        _line_buf = [""]
+
+        def _parse_sse_chunk(raw: bytes) -> None:
+            _line_buf[0] += raw.decode("utf-8", errors="ignore")
+            while "\n" in _line_buf[0]:
+                line, _line_buf[0] = _line_buf[0].split("\n", 1)
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    ev = json.loads(line[6:])
+                    ev_type = ev.get("type")
+                    if ev_type == "message_start":
+                        msg = ev.get("message", {})
+                        u = msg.get("usage", {})
+                        for k in ("input_tokens", "cache_creation_input_tokens",
+                                  "cache_read_input_tokens"):
+                            _usage_agg[k] += u.get(k, 0)
+                        if msg.get("model"):
+                            _streamed_model[0] = msg["model"]
+                    elif ev_type == "message_delta":
+                        _usage_agg["output_tokens"] += ev.get("usage", {}).get("output_tokens", 0)
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
         async def _forward_stream():
-            async with httpx.AsyncClient(timeout=300) as client:
-                async with client.stream(
-                    "POST",
-                    f"{_ANTHROPIC_API_BASE}/v1/messages",
-                    content=body_bytes,
-                    headers=forward_headers,
-                ) as r:
-                    async for chunk in r.aiter_bytes():
-                        yield chunk
+            try:
+                async with httpx.AsyncClient(timeout=300) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{_ANTHROPIC_API_BASE}/v1/messages",
+                        content=body_bytes,
+                        headers=forward_headers,
+                    ) as r:
+                        async for chunk in r.aiter_bytes():
+                            _parse_sse_chunk(chunk)
+                            yield chunk
+            finally:
+                # Record usage event after stream completes or is interrupted.
+                if sum(_usage_agg.values()) > 0:
+                    try:
+                        _fwd_orch_id = (
+                            getattr(req.state, "orchestra_session_id", None)
+                            or req.headers.get("x-orchestra-session-id")
+                        )
+                        _fwd_src = "orchestra" if _fwd_orch_id else "claude_code_native"
+                        _fwd_model_norm = re.sub(r"-\d{8}$", "", _streamed_model[0])
+                        try:
+                            _fwd_info = litellm.get_model_info(_fwd_model_norm) or {}
+                            _fwd_cost = (
+                                _usage_agg["input_tokens"] * (_fwd_info.get("input_cost_per_token") or 0.0)
+                                + _usage_agg["output_tokens"] * (_fwd_info.get("output_cost_per_token") or 0.0)
+                                + _usage_agg["cache_creation_input_tokens"] * (_fwd_info.get("cache_creation_input_token_cost") or 0.0)
+                                + _usage_agg["cache_read_input_tokens"] * (_fwd_info.get("cache_read_input_token_cost") or 0.0)
+                            )
+                        except Exception:
+                            _fwd_cost = 0.0
+                        app.state.store.record_usage_event(
+                            request_id=str(uuid.uuid4()),
+                            created_at=datetime.datetime.utcnow().isoformat() + "Z",
+                            source=_fwd_src,
+                            user_id=None,
+                            chat_id=None,
+                            orchestra_session_id=_fwd_orch_id,
+                            model=_streamed_model[0],
+                            input_tokens=_usage_agg["input_tokens"],
+                            output_tokens=_usage_agg["output_tokens"],
+                            cache_creation_tokens=_usage_agg["cache_creation_input_tokens"],
+                            cache_read_tokens=_usage_agg["cache_read_input_tokens"],
+                            cost_usd=_fwd_cost,
+                            provider="anthropic",
+                        )
+                    except Exception as _e:
+                        logger.error("Error recording streaming usage: %s", _e, exc_info=True)
 
         return StreamingResponse(
             _forward_stream(),
@@ -1290,8 +1436,12 @@ async def _anthropic_messages_forward(
         cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
         cache_read_tokens = usage.get("cache_read_input_tokens", 0)
 
-        # Determine source and orchestra_session_id
-        orchestra_session_id = req.headers.get("x-orchestra-session-id")
+        # Prefer middleware-injected session ID; fall back to header for future
+        # client-side injection support.
+        orchestra_session_id = (
+            getattr(req.state, "orchestra_session_id", None)
+            or req.headers.get("x-orchestra-session-id")
+        )
         source = "orchestra" if orchestra_session_id else "claude_code_native"
 
         # Calculate cost via get_model_info() — covers base + cache token rates.
@@ -1591,8 +1741,12 @@ async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResp
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
     router: SmartRouter = app.state.router
 
-    # Determine source and session_id from request headers
-    orchestra_session_id = req.headers.get("x-orchestra-session-id")
+    # Prefer middleware-injected session ID; fall back to header for future
+    # client-side injection support.
+    orchestra_session_id = (
+        getattr(req.state, "orchestra_session_id", None)
+        or req.headers.get("x-orchestra-session-id")
+    )
     source = "orchestra" if orchestra_session_id else "claude_code_native"
 
     if stream:

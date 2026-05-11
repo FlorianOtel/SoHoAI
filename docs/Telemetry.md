@@ -3,7 +3,7 @@ title: "SoHoAI Usage and Billing Telemetry Pipeline"
 created_at: 2026-05-06--00-00
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-06--19-38
+updated_at: 2026-05-11--00-00
 context: >
   Cross-project design document for SoHoAI Stage 1 telemetry implementation.
   Goal: Add a complete usage and billing telemetry pipeline to SoHoAI so that
@@ -42,6 +42,32 @@ versioned model IDs have the date suffix stripped before `get_model_info()` look
 and applied to the extracted cache token counts. Without this, heavy-caching orchestra
 sessions (typical: ~1.5M cache_read tokens) would undercount cost by ~$0.45/session
 on the forward path.
+
+**Post-release fixes (2026-05-11, session fix-LiteLLM-telemetry):** Three bugs prevented
+the `sohoai_api` cost source from returning data for orchestra sessions:
+
+1. **Session attribution broken** — `X-Orchestra-Session-ID` header injection was never
+   wired up in Claude Code (`apiHeaders` silently ignored; env-based injection doesn't work
+   for subagents because they inherit the environment from before the session ID exists).
+   Fixed by adding `inject_orchestra_session_id` FastAPI middleware that reads
+   `~/.claude/active-sessions/<SESSION_ID>.lck` files (already written by `brain.md`'s setup
+   block) on every incoming request and sets `request.state.orchestra_session_id`. All four
+   call sites in `proxy_chat_completions`, `_anthropic_messages_litellm`, and
+   `_anthropic_messages_forward` updated to read from `request.state` (with header fallback).
+
+2. **Streaming requests not recorded** — `_anthropic_messages_forward()` streaming path
+   piped bytes unchanged with no usage recording, so all streaming Anthropic requests (Brain
+   parent Opus 4.7, Sonnet/Haiku subagents) produced zero records in `usage_events`. Fixed
+   by side-parsing SSE `message_start` and `message_delta` events into a usage accumulator
+   while forwarding bytes unchanged, then recording the event in the generator's `finally`
+   block after stream completion (or interruption).
+
+3. **LiteLLM has wrong Opus 4.7 rates** — LiteLLM's model registry carries approximately
+   1/3 of the correct rates for `claude-opus-4-7` (e.g. `cache_creation_input_token_cost`
+   = 6.25e-6 vs. correct 18.75e-6). Fixed in `main.py` via `litellm.register_model()` at
+   module level, overriding the wrong rates globally. Also fixed in `telemetry-summarize.py`
+   (claude-orchestra) where `query_litellm_cost()` now accepts `pricing_data` and always
+   prefers pricing.yaml cache rates for known models over LiteLLM's registry.
 
 **Post-review fix 2 (2026-05-06):** `litellm.completion_cost()` was called with
 `prompt_tokens=` and `completion_tokens=` kwargs that were removed in litellm 1.82.6.
@@ -138,14 +164,17 @@ orchestra vs. Claude Code vs. Cline).
 | `/proxy/v1/chat/completions` | claude_code_native | (if Claude Code uses this path) | Not currently used; documented for completeness |
 | `/v1/chat/completions` | cli_chat | (none) | Local CLI chat client (utils/cli_chat.py) |
 
-### X-Orchestra-Session-ID header
+### Orchestra session ID — middleware (current) vs. header (original design)
 
-When present on `/v1/messages` requests, indicates orchestration pipeline (Brain
-or Duo session). Header value must be the SESSION_DIR basename, e.g.,
-`20260506T154456Z-1605029`.
+**Current (2026-05-11+)**: SoHoAI reads `~/.claude/active-sessions/<SESSION_ID>.lck`
+on every request via `inject_orchestra_session_id` middleware. No client-side header
+injection required. The `orchestra_session_id` column in `usage_events` is populated
+for the duration of any active `/brain` or `/duo` session.
 
-Implementation in Stage 2: Brain and Duo setup blocks will inject this header on
-every /v1/messages call (one-liner, no performance impact).
+**X-Orchestra-Session-ID header**: Still accepted as fallback for any future
+client-side injection. The middleware takes precedence.
+
+**Session ID format**: SESSION_DIR basename, e.g., `20260510T204552Z-2645364`.
 
 ### Source enum
 
@@ -321,29 +350,24 @@ These items are **OUT OF SCOPE** for the SoHoAI Stage 1 session but are the
 direct responsibility of the Stage 2 claude-orchestra branch. This checklist is
 provided so the future implementer has a clear spec.
 
-### 1. Inject X-Orchestra-Session-ID header on every /v1/messages call
+### 1. Session attribution — orchestra session ID tagging
 
-**When**: During /brain and /duo sessions only (not other session types).
+**STATUS: DONE (2026-05-11) — implemented via filesystem middleware, not header injection.**
 
-**Where**: Brain setup block or orchestra hook (one-liner, minimal performance impact).
+Header injection (`X-Orchestra-Session-ID`) was the original design but proved unreliable:
+Claude Code silently ignores `apiHeaders` in agent definitions, and environment-based
+injection (`ANTHROPIC_CUSTOM_HEADERS`) fails for subagents because they inherit the
+environment from before the session ID was created.
 
-**Header value**: SESSION_DIR basename, e.g., `20260506T154456Z-1605029`.
+**Actual implementation**: `brain.md`'s setup block already writes
+`~/.claude/active-sessions/<SESSION_ID>.lck` (e.g. `20260510T204552Z-2645364.lck`).
+SoHoAI's `inject_orchestra_session_id` FastAPI middleware reads these files on every
+request, identifies the active orchestra session, and sets `request.state.orchestra_session_id`.
+All proxy/messages endpoints consume `request.state` (with `X-Orchestra-Session-ID`
+header as fallback for any future client-side injection).
 
-**Example**:
-```python
-# In Brain's setup or hook that calls /v1/messages:
-headers = {
-  "X-Orchestra-Session-ID": os.path.basename(SESSION_DIR)
-}
-response = httpx.post(
-  f"{ANTHROPIC_BASE_URL}/v1/messages",
-  headers=headers,
-  json=request_body
-)
-```
-
-**Verification**: Confirm via `GET /v1/usage/stats?session_id=<ID>` that at
-least one request is logged with that session_id.
+**Verification**: Start a `/brain` session; confirm `~/.claude/active-sessions/<ID>.lck`
+exists; call `GET /v1/usage/stats?session_id=<ID>` — `totals.cost_usd` should be non-zero.
 
 ### 2. Migrate T2 cost calculation from pricing.yaml to litellm.completion_cost()
 
@@ -440,6 +464,7 @@ urgent pricing.yaml update is needed.
 - **Cache creation** rates in pricing.yaml assume 5-minute TTL (1.25× base input rate per Anthropic docs). Long-cache (1h TTL, 2× input) is not yet tracked separately in SoHoAI.
 - **Last verified**: 2026-04-30 against https://docs.anthropic.com/en/docs/about-claude/models/all-models
 - **Frequency**: Update pricing.yaml and this table on every Anthropic price change; automate if possible via CI
+- **LiteLLM rate discrepancy (2026-05-11)**: LiteLLM's registry carries ~1/3 of correct rates for `claude-opus-4-7` (cache_creation 6.25e-6 vs. correct 18.75e-6). Corrected in `main.py` via `litellm.register_model()` and in `telemetry-summarize.py` via pricing.yaml override in `query_litellm_cost()`. Check other new models when added — LiteLLM's database may lag.
 
 ---
 
