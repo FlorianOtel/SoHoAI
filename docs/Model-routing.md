@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-10--20-05
+updated_at: 2026-05-11--11-00
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -15,6 +15,11 @@ context: >
   Gemma 4 E4B on both streaming and non-streaming. New in this update (2026-05-10):
   gateway model discovery with claude-code-* alias scheme for claude-orchestra integration.
   See docs/claude-orchestra-handoff.md for deployment runbook and tier recommendations.
+  Update 2026-05-11: ollama-cloud/* 503/timeout guard — deepseek-v4-pro has a documented
+  ~70% failure rate on Ollama shared inference. Silent LiteLLM fallback to another model
+  was rejected (causes per-request model oscillation mid-agent-task). Instead: 30s
+  request_timeout for ollama-cloud/* and HTTP 529 overloaded_error on failure so Claude
+  Code surfaces a clean error. --parallel smoke test extended to 5 simultaneous tools.
 ---
 
 # SoHoAI model routing — Cline and Claude Code integration
@@ -62,7 +67,7 @@ of truth.
 | `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | 200,000 |
 | `anthropic/claude-sonnet-4-6` | Transparent forward | Anthropic API (Gemma fallback if down) | 200,000 |
 | `anthropic/claude-opus-4-7` | Transparent forward | Anthropic API | 200,000 |
-| `ollama-cloud/deepseek-v4-pro` | LiteLLM | Ollama cloud (`https://ollama.com/v1`) | — |
+| `ollama-cloud/deepseek-v4-pro` | LiteLLM | Ollama cloud (`https://ollama.com/v1`) | **~70% 503 rate** — see §2.3 |
 | `ollama-cloud/kimi-k2.6` | LiteLLM | Ollama cloud | — |
 | `ollama-cloud/glm-5.1` | LiteLLM | Ollama cloud | — |
 | `ollama-cloud/qwen3-coder-next` | LiteLLM | Ollama cloud | — |
@@ -216,10 +221,11 @@ The conversion now handles full Anthropic→OpenAI transformation:
 **Gemma reliability — current state**: `internal/gemma-4-e4b` **passed the synthetic two-turn smoke harness** (single tool, one string argument) on both streaming and non-streaming legs (2026-05-10). Broader claude-orchestra workload validation (full Claude Code tool catalogue, multi-turn, parallel calls) is the remaining open item — see `docs/TODO.md`. Grammar-constrained generation (deferred Step c) is therefore likely unnecessary; revisit only if broader validation surfaces malformed `arguments` JSON.
 
 For `ollama-cloud/deepseek-v4-pro` and `ollama-cloud/qwen3-coder-next`: both support OpenAI
-function calling natively and are expected to be reliable for tool use.
+function calling natively and are expected to be reliable for tool use **when the endpoint
+is reachable** — see §2.3 for the reliability caveat on deepseek-v4-pro specifically.
 
 **Appropriate use cases for the LiteLLM path:**
-- Full Claude Code sessions with ollama-cloud models (deepseek-v4-pro, qwen3-coder-next) requiring Read/Write/Bash tools
+- Full Claude Code sessions with ollama-cloud models (qwen3-coder-next recommended; deepseek-v4-pro usable but unreliable — see §2.3)
 - Sub-agents using ollama-cloud models that need to read files, write code, or run bash commands
 - Multi-turn tool call chains with cloud models (zero API cost vs Anthropic)
 - Summarization tasks (`internal/gemma-4-e4b` already used by `maybe_summarize()`)
@@ -230,11 +236,52 @@ function calling natively and are expected to be reliable for tool use.
 **Inappropriate use cases:**
 - `internal/gemma-4-e4b` for tool-requiring workloads (until reliability is validated)
 - Tasks where tool-call reliability is mission-critical and cannot tolerate failures
+- `ollama-cloud/deepseek-v4-pro` for mission-critical or long-running agent tasks given its current instability
 
 **Claude Code identity note:** When using `ollama-cloud/*` models via `claude --model`,
 Claude Code injects its own system prompt ("You are Claude Code..."). Ollama cloud models
 follow this persona and will self-identify as Claude. The actual model is confirmed by
 the status bar and server logs — not the model's self-description.
+
+### §2.3 Ollama cloud reliability and 503 guard
+
+**deepseek-v4-pro has a documented ~70% HTTP 500/503 failure rate** on Ollama's shared
+inference tier since its April 2026 release (GitHub issues #15832, #15934). Ollama shared
+inference carries **no SLA**. The other three models (kimi-k2.6, glm-5.1, qwen3-coder-next)
+are substantially more reliable.
+
+**Why not a silent fallback?** A LiteLLM Router fallback (deepseek → Sonnet) was
+considered and rejected: LiteLLM fallback is per-request, so if deepseek recovers on the
+next turn it resumes answering. Within a single sub-agent task this produces alternating
+models mid-task — worse than a clean failure. It also incurs unexpected cost when the user
+explicitly chose a $0 model.
+
+**How failures are handled (2026-05-11):**
+
+| Path | deepseek 503/timeout behavior |
+|------|-------------------------------|
+| Streaming (`stream: true`) | SSE `error` event emitted in-stream; HTTP 200 (stream already open) |
+| Non-streaming | HTTP **529** `overloaded_error` with Anthropic-format JSON body |
+
+```json
+{
+  "type": "error",
+  "error": {
+    "type": "overloaded_error",
+    "message": "Model 'ollama-cloud/deepseek-v4-pro' is temporarily unavailable (Ollama cloud overloaded or timed out). Retry or switch models with /model. ..."
+  }
+}
+```
+
+HTTP 529 is Anthropic's own "overloaded" code — Claude Code renders it as a clean
+user-visible error rather than an opaque crash. The message includes a `/model` hint.
+
+**Timeout:** `request_timeout=30` is applied for all `ollama-cloud/*` targets (down from
+the global 60s) so failures surface in ≤30s rather than hanging a full minute.
+
+**Recommendation:** For interactive Claude Code sessions that need reliability, use
+`ollama-cloud/qwen3-coder-next` (coding) or an `anthropic/*` model. Reserve deepseek-v4-pro
+for exploratory/disposable sessions where occasional failures are acceptable.
 
 ---
 
@@ -349,10 +396,10 @@ All models exposed via `_PROXY_EXPOSED_MODELS` in `main.py`:
 | `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | Safest Actor-tier choice; ~$0.01/session |
 | `anthropic/claude-sonnet-4-6` | Transparent forward | Anthropic API | Default interactive model |
 | `anthropic/claude-opus-4-7` | Transparent forward | Anthropic API | Brain tier in /brain pipeline |
-| `ollama-cloud/deepseek-v4-pro` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
+| `ollama-cloud/deepseek-v4-pro` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; **~70% 503 rate** — see §2.3; not recommended for critical tasks |
 | `ollama-cloud/kimi-k2.6` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
 | `ollama-cloud/glm-5.1` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
-| `ollama-cloud/qwen3-coder-next` | LiteLLM conversion | Ollama cloud | Coding model; standard `max_tokens`; tool-use smoke PASS |
+| `ollama-cloud/qwen3-coder-next` | LiteLLM conversion | Ollama cloud | Coding model; standard `max_tokens`; tool-use smoke PASS; **recommended** for $0 coding tasks |
 
 ### 4.3 Tool calling via sub-agents (LiteLLM path)
 
@@ -370,22 +417,25 @@ converts them to OpenAI format for LiteLLM using four helpers:
 Streaming responses emit proper Anthropic SSE `content_block_start/delta/stop` events
 for tool calls, including `message_delta` with `stop_reason: "tool_use"`.
 
-**Validation status (2026-05-10):**
+**Validation status:**
 
-| Model | Smoke test | Notes |
-|-------|-----------|-------|
-| `internal/gemma-4-e4b` | PASS (streaming + non-streaming) | Broader workload validation pending |
-| `ollama-cloud/qwen3-coder-next` | PASS (streaming) | — |
-| `ollama-cloud/deepseek-v4-pro` | PASS (streaming) | Reasoning model: `max_tokens ≥ 500` |
-| `ollama-cloud/kimi-k2.6` | PASS (streaming) | Reasoning model: `max_tokens ≥ 500` |
-| `ollama-cloud/glm-5.1` | PASS (streaming) | Reasoning model: `max_tokens ≥ 500` |
+| Model | Single-tool smoke | 5-tool parallel smoke | Notes |
+|-------|------------------|-----------------------|-------|
+| `internal/gemma-4-e4b` | PASS (streaming + non-streaming, 2026-05-10) | INFO: 1/5 tools only | Broader workload validation pending |
+| `ollama-cloud/qwen3-coder-next` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | — |
+| `ollama-cloud/deepseek-v4-pro` | PASS (streaming, 2026-05-10) | FAIL — live 503 (2026-05-11) | Reasoning model: `max_tokens ≥ 500`; see §2.3 |
+| `ollama-cloud/kimi-k2.6` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | Reasoning model: `max_tokens ≥ 500` |
+| `ollama-cloud/glm-5.1` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | Reasoning model: `max_tokens ≥ 500` |
 
-Smoke harness: `utils/tool_use_smoke_test.py` — 2-turn test with a single `get_file_size`
-tool. Run with `--server http://192.168.1.93:8001` (worktree) or `8000` (post-merge).
+Smoke harness: `utils/tool_use_smoke_test.py`
+- Standard: `--server http://192.168.1.93:8000` — 2-turn, single tool
+- Parallel: `--parallel` — 2-turn, 5 simultaneous tools (get_file_size, get_file_owner,
+  get_file_permissions, get_file_modification_time, get_file_line_count)
 
-**Remaining open item**: full Claude Code tool catalogue with parallel tool calls
-(multi-tool in a single response, parallel sub-agent dispatch). Only the simple
-single-tool 2-turn case has been validated. See `docs/TODO.md`.
+**Remaining open item**: real claude-orchestra sub-agent session with full Claude Code tool
+catalogue (Read/Write/Edit/Bash/Glob/Grep) and parallel sub-agent dispatch. The 5-tool
+parallel smoke covers parallel tool calls in a single turn; multi-agent parallelism
+remains unvalidated. See `docs/TODO.md`.
 
 ### 4.4 Identity caveat
 
