@@ -10,12 +10,13 @@ Turn 2: POST with turn-1 history + tool_result (synthetic: 42 bytes)
         → Expect final text answer referencing "42".
 
 Parallel test (--parallel):
-Turn 1: POST with 3 tools (get_file_size, get_file_owner, get_file_permissions)
-        and prompt asking for all three simultaneously.
-        → Expect response contains exactly 3 tool_use blocks.
+Turn 1: POST with 5 tools (get_file_size, get_file_owner, get_file_permissions,
+        get_file_modification_time, get_file_line_count) and prompt asking
+        for all five simultaneously.
+        → Expect response contains exactly 5 tool_use blocks.
 
-Turn 2: POST with 3 tool_result blocks in a single user message.
-        → Expect final text referencing "42", "root", and "644".
+Turn 2: POST with 5 tool_result blocks in a single user message.
+        → Expect final text referencing "42", "root", "644", "2024-03-15", and "17".
 
 Targets: ollama-cloud/qwen3-coder-next, ollama-cloud/deepseek-v4-pro,
          ollama-cloud/kimi-k2.6, ollama-cloud/glm-5.1,
@@ -46,7 +47,7 @@ TOOL_DEF = {
     },
 }
 
-# Three tool definitions for the parallel test
+# Five tool definitions for the parallel test
 PARALLEL_TOOL_DEFS = [
     {
         "name": "get_file_size",
@@ -81,6 +82,28 @@ PARALLEL_TOOL_DEFS = [
             "required": ["path"],
         },
     },
+    {
+        "name": "get_file_modification_time",
+        "description": "Return the last modification time of the file as an ISO date string (YYYY-MM-DD).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "absolute path to the file"}
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "get_file_line_count",
+        "description": "Return the number of lines in the file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "absolute path to the file"}
+            },
+            "required": ["path"],
+        },
+    },
 ]
 
 # Synthetic results returned by the harness in turn 2
@@ -88,6 +111,8 @@ PARALLEL_TOOL_RESULTS = {
     "get_file_size": "42",
     "get_file_owner": "root",
     "get_file_permissions": "644",
+    "get_file_modification_time": "2024-03-15",
+    "get_file_line_count": "17",
 }
 
 
@@ -377,11 +402,11 @@ def run_parallel_tool_call_test(
     """
     Run a two-turn parallel tool-use test for a given model.
 
-    Turn 1: Send 3 tool definitions + prompt asking for all 3 simultaneously.
-            Expect exactly 3 tool_use blocks in a single assistant response.
+    Turn 1: Send 5 tool definitions + prompt asking for all 5 simultaneously.
+            Expect exactly 5 tool_use blocks in a single assistant response.
 
-    Turn 2: Send 3 tool_result blocks in one user message.
-            Expect final text containing "42", "root", and "644".
+    Turn 2: Send 5 tool_result blocks in one user message.
+            Expect final text containing "42", "root", "644", "2024-03-15", and "17".
 
     Returns:
         (passed: bool, detail: str)
@@ -396,8 +421,8 @@ def run_parallel_tool_call_test(
             {
                 "role": "user",
                 "content": (
-                    "What is the size, owner, and permissions of the file /etc/hostname? "
-                    "Call all three tools in parallel."
+                    "What is the size, owner, permissions, modification time, and line count "
+                    "of the file /etc/hostname? Call all five tools in parallel."
                 ),
             }
         ]
@@ -436,16 +461,19 @@ def run_parallel_tool_call_test(
                 if block.get("type") == "tool_use":
                     tool_use_blocks.append(block)
 
-        # Validate: must have exactly 3 tool_use blocks
-        if len(tool_use_blocks) != 3:
+        # Validate: must have exactly 5 tool_use blocks
+        if len(tool_use_blocks) != 5:
             tool_names = [b.get("name") for b in tool_use_blocks]
             return (
                 False,
-                f"turn1: expected 3 tool_use blocks, got {len(tool_use_blocks)}: {tool_names}",
+                f"turn1: expected 5 tool_use blocks, got {len(tool_use_blocks)}: {tool_names}",
             )
 
         # Validate: all expected tool names are present
-        expected_names = {"get_file_size", "get_file_owner", "get_file_permissions"}
+        expected_names = {
+            "get_file_size", "get_file_owner", "get_file_permissions",
+            "get_file_modification_time", "get_file_line_count",
+        }
         actual_names = {b.get("name") for b in tool_use_blocks}
         if actual_names != expected_names:
             missing = expected_names - actual_names
@@ -488,8 +516,8 @@ def run_parallel_tool_call_test(
             {
                 "role": "user",
                 "content": (
-                    "What is the size, owner, and permissions of the file /etc/hostname? "
-                    "Call all three tools in parallel."
+                    "What is the size, owner, permissions, modification time, and line count "
+                    "of the file /etc/hostname? Call all five tools in parallel."
                 ),
             },
             {
@@ -535,9 +563,9 @@ def run_parallel_tool_call_test(
                 if block.get("type") == "text":
                     final_text += block.get("text", "")
 
-        # Validate: final text must mention all three synthetic results
+        # Validate: final text must mention all five synthetic results
         missing_vals = []
-        for expected in ("42", "root", "644"):
+        for expected in ("42", "root", "644", "2024-03-15", "17"):
             if expected not in final_text:
                 missing_vals.append(expected)
 
@@ -625,7 +653,7 @@ def main():
 
     if args.parallel:
         # Run parallel tool-call test
-        print(f"=== Parallel tool-call test ({stream_label}) ===")
+        print(f"=== Parallel tool-call test ({stream_label}, 5 tools) ===")
         for model, informational_only in TARGETS:
             passed, detail = run_parallel_tool_call_test(
                 model, args.server, args.stream, args.max_tokens, args.timeout
@@ -635,8 +663,8 @@ def main():
                 status = "PASS" if not informational_only else "INFO"
                 print(
                     f"[{model}]  {status}  ({stream_label})  "
-                    f"— turn1: 3×tool_use (size+owner+perms)  "
-                    f"turn2: \"42\"+\"root\"+\"644\""
+                    f"— turn1: 5×tool_use (size+owner+perms+mtime+lines)  "
+                    f"turn2: \"42\"+\"root\"+\"644\"+\"2024-03-15\"+\"17\""
                 )
             else:
                 if informational_only:

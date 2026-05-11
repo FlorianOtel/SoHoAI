@@ -1201,7 +1201,29 @@ async def anthropic_messages(req: Request):
     if resolved in _LITELLM_ROUTED:
         logger.info("anthropic_messages: %r → LiteLLM path (resolved: %s)", public_model, resolved)
         body = {**body, "model": resolved, "_public_model": public_model}
-        return await _anthropic_messages_litellm(body, req)
+        if not resolved.startswith("ollama-cloud/"):
+            return await _anthropic_messages_litellm(body, req)
+        try:
+            return await _anthropic_messages_litellm(body, req)
+        except Exception as e:
+            logger.error(
+                "anthropic_messages: ollama-cloud LiteLLM path failed for %r: %s",
+                public_model, e,
+            )
+            return JSONResponse(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "overloaded_error",
+                        "message": (
+                            f"Model '{public_model}' is temporarily unavailable "
+                            f"(Ollama cloud overloaded or timed out). "
+                            f"Retry or switch models with /model. Detail: {str(e)[:200]}"
+                        ),
+                    },
+                },
+                status_code=529,
+            )
 
     # Strip provider prefix (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6")
     # before forwarding — the Anthropic API only accepts bare model names.
