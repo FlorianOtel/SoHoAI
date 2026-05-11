@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-11--11-00
+updated_at: 2026-05-11--00-00
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -66,7 +66,7 @@ of truth.
 | `internal/gemma-4-e4b` | LiteLLM | llama-server, Server 2, Gemma 4 E4B Q8_0 | 110,024 |
 | `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | 200,000 |
 | `anthropic/claude-sonnet-4-6` | Transparent forward | Anthropic API (Gemma fallback if down) | 200,000 |
-| `anthropic/claude-opus-4-7` | Transparent forward | Anthropic API | 200,000 |
+| `anthropic/claude-opus-4-7` | Transparent forward | Anthropic API | 1,000,000 |
 | `ollama-cloud/deepseek-v4-pro` | LiteLLM | Ollama cloud (`https://ollama.com/v1`) | **~70% 503 rate** — see §2.3 |
 | `ollama-cloud/kimi-k2.6` | LiteLLM | Ollama cloud | — |
 | `ollama-cloud/glm-5.1` | LiteLLM | Ollama cloud | — |

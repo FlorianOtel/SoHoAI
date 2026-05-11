@@ -28,9 +28,7 @@ redis:
 router_settings:
   enable_pre_call_checks: true
 
-litellm_settings:
-  context_window_fallbacks:
-    - "claude-opus-4-7": ["claude-opus-4-7-1m"]  # fall to 1M context if needed
+litellm_settings: {}
 
 # LiteLLM Model Routing ----------------------------------------------------
 # Default: internal (local Gemma) if cloud unreachable. Fallback: external (Sonnet 4.6) 
@@ -69,6 +67,9 @@ model_list:
     litellm_params:
       model: anthropic/claude-opus-4-7
       api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      context_window: 1000000
+      max_input_tokens: 1000000
 
   - model_name: claude-sonnet-4-6        # Planner/Reviewer — direct Anthropic (Claude Code sub-agent tier)
     litellm_params:
