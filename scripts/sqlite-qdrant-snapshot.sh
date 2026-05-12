@@ -3,7 +3,7 @@
 # Also copies rag_state.db alongside each snapshot so every Qdrant .snapshot
 # has a matched rag_state-<timestamp>.db — a complete, self-contained restore pair.
 # Snapshots are downloaded to NFS for DR recovery; local Qdrant copies are deleted.
-# Usage: bash scripts/qdrant/qdrant-snapshot.sh [--keep N]  (default: keep 3)
+# Usage: bash scripts/sqlite-qdrant-snapshot.sh [--keep N]  (default: keep 3)
 set -euo pipefail
 
 QDRANT_URL="http://192.168.1.93:6333"

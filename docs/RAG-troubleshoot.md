@@ -52,7 +52,7 @@ no score threshold, these zombies filled all 5 result slots.
 
 **Root cause 3 — `SNAPSHOTS_NFS_DIR` never used in snapshot script:**
 
-`scripts/qdrant/qdrant-snapshot.sh` defined `SNAPSHOTS_NFS_DIR` but never used it.
+`scripts/sqlite-qdrant-snapshot.sh` defined `SNAPSHOTS_NFS_DIR` but never used it.
 Snapshots were created and rotated only in Qdrant's local NVMe on Server 1 — zero
 DR copies on NFS. Cron was running (daily 01:00 UTC from Server 2), but all 12
 retained snapshots were on NVMe only, invisible on NFS.
@@ -310,7 +310,7 @@ client calling the search endpoint directly.
 
 ---
 
-#### `scripts/qdrant/qdrant-snapshot.sh` — NFS download fix (MODIFIED — commit `94f9d56`)
+#### `scripts/sqlite-qdrant-snapshot.sh` — NFS download fix (MODIFIED — commit `94f9d56`)
 
 **Old behavior (broken):** `SNAPSHOTS_NFS_DIR` was defined but never used.
 Snapshots were created and rotated in Qdrant's local NVMe storage only. Zero DR copies
@@ -329,7 +329,7 @@ successful download, preventing partial files from appearing as valid snapshots.
 
 **Verification after the fix:**
 ```bash
-bash scripts/qdrant/qdrant-snapshot.sh --keep 12
+bash scripts/sqlite-qdrant-snapshot.sh --keep 12
 ls -lh /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/
 # → should show a fresh .snapshot file with today's date and ~5GB size
 ```

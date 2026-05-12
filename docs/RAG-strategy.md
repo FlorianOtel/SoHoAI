@@ -455,7 +455,7 @@ storage:
 |-----------|-------|-----------|
 | Schedule | Daily at **03:00** (cron) | Low-activity window; ingestion daemon typically idle |
 | Retention | Last **3** snapshots kept | ~3 days of rollback; older ones deleted via API |
-| Script | `scripts/qdrant/qdrant-snapshot.sh` | Calls REST API, then prunes via API |
+| Script | `scripts/sqlite-qdrant-snapshot.sh` | Calls REST API, then prunes via API |
 | Log | `/var/log/qdrant-snapshot.log` | Check with `tail -f` or `grep -i error` |
 
 **Maximum data loss exposure**: up to 24 hours of ingested documents if the local NVMe
@@ -463,13 +463,13 @@ fails between snapshots. During an active ingestion run (~9 hours for the full N
 taking a manual mid-run snapshot is advisable:
 
 ```bash
-bash scripts/qdrant/qdrant-snapshot.sh
+bash scripts/sqlite-qdrant-snapshot.sh
 ```
 
 Once bulk ingestion is complete, new documents enter only via incremental re-scans
 (`rag_sync_nfs.py` detecting mtime changes), so daily snapshots provide adequate protection.
 
-#### Snapshot script logic (`scripts/qdrant/qdrant-snapshot.sh`)
+#### Snapshot script logic (`scripts/sqlite-qdrant-snapshot.sh`)
 
 ```
 1. POST /collections/documents/snapshots  → Qdrant creates archive on NFS
@@ -478,7 +478,7 @@ Once bulk ingestion is complete, new documents enter only via incremental re-sca
 ```
 
 All API calls use plain `curl` + `python3` (stdlib only, no extra dependencies).
-Run manually: `bash scripts/qdrant/qdrant-snapshot.sh [--keep N]`
+Run manually: `bash scripts/sqlite-qdrant-snapshot.sh [--keep N]`
 
 > **`creation_time: null` quirk (2026-05-06):** Qdrant v1.17.1 returns `"creation_time": null`
 > for all snapshots. The sort key uses `s.get("creation_time") or ""` (not `.get(..., "")`)
@@ -2588,7 +2588,7 @@ restore a consistent snapshot.
 
 **Step B — Qdrant snapshot**
 ```bash
-bash scripts/qdrant/qdrant-snapshot.sh --keep 12
+bash scripts/sqlite-qdrant-snapshot.sh --keep 12
 ```
 Creates a new snapshot via `POST http://192.168.1.93:6333/collections/documents/snapshots`.
 Qdrant's `snapshots_path` in `scripts/qdrant/qdrant-config.yaml` is
@@ -2812,7 +2812,7 @@ crontab -l | grep -v qdrant-snapshot | crontab -
 
 # On the new server — enable the timer and add the cron
 sudo systemctl enable --now rag-ingest.timer
-(crontab -l 2>/dev/null; echo "0 3 * * * bash /mnt/nfs/Florian/Gin-AI/projects/SoHoAI/scripts/qdrant/qdrant-snapshot.sh --keep 12 >> /var/log/qdrant-snapshot.log 2>&1") | crontab -
+(crontab -l 2>/dev/null; echo "0 3 * * * bash /mnt/nfs/Florian/Gin-AI/projects/SoHoAI/scripts/sqlite-qdrant-snapshot.sh --keep 12 >> /var/log/qdrant-snapshot.log 2>&1") | crontab -
 ```
 
 Ensure the new server can reach Qdrant at `http://192.168.1.93:6333` and has the NFS
@@ -2851,7 +2851,7 @@ After corpus growth to ~1.46M points, RAG search quality degraded:
 - Marks such files as `ignored` in SQLite so they don't re-enter the pipeline.
 - Prevents corrupt scanned PDFs and binary-encoded files from re-ingesting.
 
-**Snapshot script NFS fix** (`scripts/qdrant/qdrant-snapshot.sh`):
+**Snapshot script NFS fix** (`scripts/sqlite-qdrant-snapshot.sh`):
 - Fixed long-standing bug: `SNAPSHOTS_NFS_DIR` was defined but never used.
 - Snapshots now downloaded to NFS via `curl --max-time 3600`, then the Qdrant-local
   copy is deleted. NFS file rotation replaces API-based rotation.
@@ -2902,7 +2902,7 @@ python utils/rag_search_cli.py --query '$CWD blindly' --user florian
 python utils/rag_purge_corrupt.py --dry-run --user florian
 
 # Snapshot NFS fix
-bash scripts/qdrant/qdrant-snapshot.sh --keep 12
+bash scripts/sqlite-qdrant-snapshot.sh --keep 12
 # → creates snapshot + downloads to /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/
 ```
 

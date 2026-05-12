@@ -147,7 +147,7 @@ SoHoAI/
 │   └── qdrant/
 │       ├── qdrant-config.yaml      # Qdrant server config (storage paths, ports)
 │       ├── qdrant.service          # systemd unit file (copy to /etc/systemd/system/)
-│       └── qdrant-snapshot.sh      # Snapshot + cleanup script (cron: daily 03:00)
+├── sqlite-qdrant-snapshot.sh   # SQLite WAL checkpoint + Qdrant snapshot → NFS (cron: daily 03:00)
 └── NFS-files--MCP-server/      # nfs-files MCP server (✅ complete)
     ├── nfs_files_mcp_server.py  # MCP server implementation
     ├── nfs_files_mcp_server.sh  # Launch script (HTTP mode, port 3001)
@@ -244,7 +244,7 @@ llama-server \
 sudo systemctl start qdrant          # starts /usr/local/bin/qdrant on port 6333
 # Active storage: /var/lib/qdrant/storage (local NVMe — NOT NFS)
 # Snapshots (DR):  /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/
-# Manual snapshot: bash scripts/qdrant/qdrant-snapshot.sh   (auto-runs daily 03:00 via cron)
+# Manual snapshot: bash scripts/sqlite-qdrant-snapshot.sh   (auto-runs daily 03:00 via cron)
 # Restore from snapshot: PUT http://192.168.1.93:6333/collections/documents/snapshots/recover
 
 # Server 1 — Redis
