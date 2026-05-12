@@ -456,7 +456,7 @@ storage:
 | Schedule | Daily at **03:00** (cron) | Low-activity window; ingestion daemon typically idle |
 | Retention | Last **3** snapshots kept | ~3 days of rollback; older ones deleted via API |
 | Script | `scripts/sqlite-qdrant-snapshot.sh` | Calls REST API, then prunes via API |
-| Log | `/var/log/qdrant-snapshot.log` | Check with `tail -f` or `grep -i error` |
+| Log | `/mnt/nfs/__Backups/SoHoAI--databases/logs/sqlite-qdrant-snapshot.log` | Check with `tail -f` or `grep -i error` |
 
 **Maximum data loss exposure**: up to 24 hours of ingested documents if the local NVMe
 fails between snapshots. During an active ingestion run (~9 hours for the full NFS corpus),
@@ -2812,7 +2812,7 @@ crontab -l | grep -v qdrant-snapshot | crontab -
 
 # On the new server — enable the timer and add the cron
 sudo systemctl enable --now rag-ingest.timer
-(crontab -l 2>/dev/null; echo "0 3 * * * bash /mnt/nfs/Florian/Gin-AI/projects/SoHoAI/scripts/sqlite-qdrant-snapshot.sh --keep 12 >> /var/log/qdrant-snapshot.log 2>&1") | crontab -
+(crontab -l 2>/dev/null; echo "0 3 * * * bash /mnt/nfs/Florian/Gin-AI/projects/SoHoAI/scripts/sqlite-qdrant-snapshot.sh --keep 12 >> /mnt/nfs/__Backups/SoHoAI--databases/logs/sqlite-qdrant-snapshot.log 2>&1") | crontab -
 ```
 
 Ensure the new server can reach Qdrant at `http://192.168.1.93:6333` and has the NFS
