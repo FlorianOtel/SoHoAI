@@ -22,6 +22,11 @@ done
 # Ensure NFS directory exists
 mkdir -p "${SNAPSHOTS_NFS_DIR}"
 
+# Checkpoint SQLite WAL first so rag_state.db is fully self-contained before
+# the Qdrant snapshot is created — both reflect the same logical point in time.
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Checkpointing SQLite WAL..."
+sqlite3 "${SQLITE_DB}" "PRAGMA wal_checkpoint(TRUNCATE);"
+
 # Create snapshot
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Creating snapshot for '${COLLECTION}'..."
 RESPONSE=$(curl -sf -X POST "${QDRANT_URL}/collections/${COLLECTION}/snapshots")
@@ -52,10 +57,6 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Download complete ($(numfmt --to=iec-i --s
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Deleting snapshot from Qdrant local storage..."
 curl -sf -X DELETE "${QDRANT_URL}/collections/${COLLECTION}/snapshots/${NAME}" > /dev/null
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Qdrant local copy deleted"
-
-# Checkpoint SQLite WAL so the .db file is self-contained (no -wal needed to restore)
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Checkpointing SQLite WAL..."
-sqlite3 "${SQLITE_DB}" "PRAGMA wal_checkpoint(TRUNCATE);"
 
 # Copy rag_state.db alongside the Qdrant snapshot with a matching timestamp.
 # NAME is e.g. documents-8393594205839792-2026-05-12-01-00-01.snapshot
