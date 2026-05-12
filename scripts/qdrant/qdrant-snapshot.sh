@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Take a Qdrant snapshot for the documents collection and save to NFS.
+# Also copies rag_state.db alongside each snapshot so every Qdrant .snapshot
+# has a matched rag_state-<timestamp>.db — a complete, self-contained restore pair.
 # Snapshots are downloaded to NFS for DR recovery; local Qdrant copies are deleted.
 # Usage: bash scripts/qdrant/qdrant-snapshot.sh [--keep N]  (default: keep 3)
 set -euo pipefail
@@ -7,6 +9,7 @@ set -euo pipefail
 QDRANT_URL="http://192.168.1.93:6333"
 COLLECTION="documents"
 SNAPSHOTS_NFS_DIR="/mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/${COLLECTION}"
+SQLITE_DB="/mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db"
 KEEP=3
 
 while [[ $# -gt 0 ]]; do
@@ -50,6 +53,20 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Deleting snapshot from Qdrant local storag
 curl -sf -X DELETE "${QDRANT_URL}/collections/${COLLECTION}/snapshots/${NAME}" > /dev/null
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Qdrant local copy deleted"
 
+# Checkpoint SQLite WAL so the .db file is self-contained (no -wal needed to restore)
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Checkpointing SQLite WAL..."
+sqlite3 "${SQLITE_DB}" "PRAGMA wal_checkpoint(TRUNCATE);"
+
+# Copy rag_state.db alongside the Qdrant snapshot with a matching timestamp.
+# NAME is e.g. documents-8393594205839792-2026-05-12-01-00-01.snapshot
+# Extract the timestamp suffix (everything after the shard-id segment).
+SNAP_TS="${NAME#*-*-}"          # → 2026-05-12-01-00-01.snapshot
+SNAP_TS="${SNAP_TS%.snapshot}"  # → 2026-05-12-01-00-01
+SQLITE_DST="${SNAPSHOTS_NFS_DIR}/rag_state-${SNAP_TS}.db"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Copying rag_state.db → $(basename "${SQLITE_DST}")..."
+cp "${SQLITE_DB}" "${SQLITE_DST}"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  SQLite copy complete ($(numfmt --to=iec-i --suffix=B "$(stat -c%s "${SQLITE_DST}" 2>/dev/null || echo 0)" 2>/dev/null || echo "?"))"
+
 # Rotate NFS snapshots: keep only the most recent KEEP files
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Rotating snapshots (keeping ${KEEP} most recent)..."
 SNAPSHOTS_COUNT=$(find "${SNAPSHOTS_NFS_DIR}" -maxdepth 1 -type f -name "*.snapshot" | wc -l)
@@ -63,8 +80,14 @@ if [[ "${SNAPSHOTS_COUNT}" -gt "${KEEP}" ]]; then
         | while read -r old_file; do
             rm -f "${old_file}"
             echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Deleted old snapshot: $(basename "${old_file}")"
+            # Delete the matched SQLite copy (same timestamp, .db extension)
+            old_base="$(basename "${old_file}" .snapshot)"  # documents-...-2026-05-01-01-00-01
+            old_ts="${old_base#*-*-}"                       # 2026-05-01-01-00-01
+            old_sqlite="${SNAPSHOTS_NFS_DIR}/rag_state-${old_ts}.db"
+            rm -f "${old_sqlite}"
+            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Deleted old SQLite copy: rag_state-${old_ts}.db"
         done
 fi
 
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Snapshots in NFS: $(find "${SNAPSHOTS_NFS_DIR}" -maxdepth 1 -type f -name "*.snapshot" | wc -l)/${KEEP}"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Snapshot pairs in NFS: $(find "${SNAPSHOTS_NFS_DIR}" -maxdepth 1 -type f -name "*.snapshot" | wc -l)/${KEEP}"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  Snapshot complete"
