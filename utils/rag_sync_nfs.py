@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-import time
 from pathlib import Path
 
 # Project root is one directory up from utils/
@@ -33,7 +32,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml  # noqa: E402  (after sys.path fix)
 
-from qdrant_client.http.exceptions import ResponseHandlingException
 from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
 
 from rag_engine.collection import DOCUMENTS_COLLECTION, get_client
@@ -44,49 +42,29 @@ from rag_engine.state import StateDB
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-_DELETE_MAX_RETRIES = 5
-
-
 def _delete_path_from_qdrant(client, path: str, file_num: int, total: int) -> None:
-    """Delete Qdrant points for one source path, with exponential back-off on failure.
+    """Queue deletion of all Qdrant points for a single source path.
 
-    Uses wait=False so Qdrant queues the operation and returns immediately — the
-    caller never blocks on index re-optimization, which can take minutes on a large
-    collection. The crash-safe ordering is preserved: all deletes are submitted
-    before purge_deleted() removes the SQLite rows; surviving rows act as retry
-    markers if the process is killed mid-loop.
+    wait=False: Qdrant acknowledges immediately and processes asynchronously, so
+    the caller never blocks on index re-optimization. Any exception means Qdrant
+    did not receive the request at all (server down, network error) — propagate so
+    the script aborts. SQLite rows survive and the next sync re-submits.
     """
-    for attempt in range(1, _DELETE_MAX_RETRIES + 1):
-        try:
-            client.delete(
-                collection_name=DOCUMENTS_COLLECTION,
-                points_selector=FilterSelector(
-                    filter=Filter(
-                        must=[
-                            FieldCondition(
-                                key=FIELD_SOURCE_PATH,
-                                match=MatchValue(value=path),
-                            )
-                        ]
+    client.delete(
+        collection_name=DOCUMENTS_COLLECTION,
+        points_selector=FilterSelector(
+            filter=Filter(
+                must=[
+                    FieldCondition(
+                        key=FIELD_SOURCE_PATH,
+                        match=MatchValue(value=path),
                     )
-                ),
-                wait=False,
+                ]
             )
-            logger.info("Qdrant cleanup %d/%d: queued delete for %s", file_num, total, path)
-            return
-        except (ResponseHandlingException, Exception) as exc:
-            if attempt < _DELETE_MAX_RETRIES:
-                backoff = 2 ** attempt  # 2, 4, 8, 16 s
-                logger.warning(
-                    "Qdrant delete attempt %d/%d failed (%s) — retrying in %ds",
-                    attempt, _DELETE_MAX_RETRIES, exc, backoff,
-                )
-                time.sleep(backoff)
-            else:
-                logger.error(
-                    "Qdrant delete failed after %d attempts — aborting", _DELETE_MAX_RETRIES
-                )
-                raise
+        ),
+        wait=False,
+    )
+    logger.info("Qdrant cleanup %d/%d: queued delete for %s", file_num, total, path)
 
 
 def main() -> None:

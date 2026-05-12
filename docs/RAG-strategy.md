@@ -16,8 +16,7 @@ context: >
   — no-go verdict, permanently disabled; §8.4 contextual retrieval still frozen.
   Updated 2026-05-05: §10 RAG Ingestion Service — systemd timer + NFS lock +
   multi-user sync wrapper. Updated 2026-05-12: §4.3 incremental sync — Qdrant
-  deletions use wait=False (fire-and-forget) with per-file retry+backoff;
-  get_client() timeout parameter.
+  deletions use wait=False (fire-and-forget); get_client() timeout parameter.
 ---
 ---
 
@@ -841,10 +840,12 @@ full incremental reconciliation on every run:
 - **Deleted or excluded files:** if a previously `completed` file no longer appears in the
   scan results — whether because it was physically deleted from NFS, or because it is now
   matched by an exclusion filter in `config.yaml` — its SQLite row is removed **and** all
-  corresponding Qdrant points are deleted, filtered by `source_path`. Each delete is issued
-  with `wait=False` so Qdrant queues the operation and returns immediately rather than
-  blocking on index re-optimization. Up to 5 retries with exponential back-off (2/4/8/16 s)
-  on network errors. See [RAG-troubleshoot.md §2026-05-12](RAG-troubleshoot.md)
+  corresponding Qdrant points are deleted, filtered by `source_path`. Each delete uses
+  `wait=False` (fire-and-forget) — Qdrant queues it and returns immediately, so the script
+  never blocks on index re-optimization. Any exception (Qdrant unreachable) aborts the
+  script; SQLite rows survive as retry markers for the next run. Note: the ingestion
+  daemon's step-0 delete and step-6 upsert keep `wait=True` — they require synchronous
+  confirmation (see §4.4). See [RAG-troubleshoot.md §2026-05-12](RAG-troubleshoot.md)
   for the failure scenario that motivated this design.
 
 The third case covers the config-driven exclusion scenario: adding a new pattern to

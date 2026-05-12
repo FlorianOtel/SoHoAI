@@ -12,8 +12,8 @@ context: >
   re-queue after db_base_path rename, verifying specific files in the vector store,
   ignored file retry procedures, and clean restart procedures.
   Updated 2026-05-12: rag_sync_nfs.py sequential-delete timeout fix — wait=False on every
-  delete call (fire-and-forget, no blocking on index re-optimization) with per-file
-  retry+backoff; get_client() timeout parameter added.
+  delete call (fire-and-forget, no blocking on index re-optimization); get_client()
+  timeout parameter added.
 ---
 
 # SoHoAI RAG Pipeline — Troubleshooting
@@ -137,36 +137,22 @@ exceed the 60-second timeout, crashing the script.
 
 Two changes in `rag_sync_nfs.py` and `rag_engine/collection.py`:
 
-**1. `wait=False` on every delete call** — Qdrant queues the operation and returns
-immediately; the client never blocks on index re-optimization. The crash-safe ordering is
-preserved: all deletes are submitted before `purge_deleted()` removes the SQLite rows.
-Surviving rows act as retry markers if the process is killed mid-loop.
-
-**2. Per-file exponential back-off** — retries up to 5 times (2/4/8/16 s) on any error
-before aborting. Aborting leaves SQLite rows intact so the next sync re-submits the
-remaining deletes automatically.
+**`wait=False` on every delete call** — Qdrant queues the operation and returns immediately;
+the client never blocks on index re-optimization. No retry loop needed: with fire-and-forget
+semantics, the only failure mode is the request not reaching Qdrant at all (server down,
+network error), in which case the script aborts and SQLite rows survive as retry markers for
+the next sync run.
 
 ```python
-# New helper in rag_sync_nfs.py
-_DELETE_MAX_RETRIES = 5
-
 def _delete_path_from_qdrant(client, path: str, file_num: int, total: int) -> None:
-    for attempt in range(1, _DELETE_MAX_RETRIES + 1):
-        try:
-            client.delete(
-                collection_name=DOCUMENTS_COLLECTION,
-                points_selector=FilterSelector(filter=Filter(
-                    must=[FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=path))]
-                )),
-                wait=False,   # fire-and-forget: no blocking on index re-optimization
-            )
-            logger.info("Qdrant cleanup %d/%d: queued delete for %s", file_num, total, path)
-            return
-        except Exception as exc:
-            if attempt < _DELETE_MAX_RETRIES:
-                time.sleep(2 ** attempt)
-            else:
-                raise
+    client.delete(
+        collection_name=DOCUMENTS_COLLECTION,
+        points_selector=FilterSelector(filter=Filter(
+            must=[FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=path))]
+        )),
+        wait=False,
+    )
+    logger.info("Qdrant cleanup %d/%d: queued delete for %s", file_num, total, path)
 ```
 
 `get_client()` in `rag_engine/collection.py` now accepts an optional `timeout: int = 60`
