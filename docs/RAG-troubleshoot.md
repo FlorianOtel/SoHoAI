@@ -11,8 +11,9 @@ context: >
   session 2026-05-01). Merged 2026-05-01. Covers: Qdrant HTTP timeouts during bulk ingestion,
   re-queue after db_base_path rename, verifying specific files in the vector store,
   ignored file retry procedures, and clean restart procedures.
-  Updated 2026-05-12: rag_sync_nfs.py sequential-delete timeout fix — batched Qdrant deletes
-  (50 paths per request, OR filter) with retry+backoff; get_client() timeout parameter added.
+  Updated 2026-05-12: rag_sync_nfs.py sequential-delete timeout fix — wait=False on every
+  delete call (fire-and-forget, no blocking on index re-optimization) with per-file
+  retry+backoff; get_client() timeout parameter added.
 ---
 
 # SoHoAI RAG Pipeline — Troubleshooting
@@ -136,48 +137,46 @@ exceed the 60-second timeout, crashing the script.
 
 Two changes in `rag_sync_nfs.py` and `rag_engine/collection.py`:
 
-**1. Batch deletes using a `should` (OR) filter** — 50 paths per request instead of 1.
-Qdrant's index re-optimization is amortized across 50 files at once; 289 files → 6 requests
-instead of 289.
+**1. `wait=False` on every delete call** — Qdrant queues the operation and returns
+immediately; the client never blocks on index re-optimization. The crash-safe ordering is
+preserved: all deletes are submitted before `purge_deleted()` removes the SQLite rows.
+Surviving rows act as retry markers if the process is killed mid-loop.
+
+**2. Per-file exponential back-off** — retries up to 5 times (2/4/8/16 s) on any error
+before aborting. Aborting leaves SQLite rows intact so the next sync re-submits the
+remaining deletes automatically.
 
 ```python
 # New helper in rag_sync_nfs.py
-_DELETE_BATCH_SIZE = 50
-_DELETE_MAX_RETRIES = 3
+_DELETE_MAX_RETRIES = 5
 
-def _delete_paths_from_qdrant(client, paths: list[str]) -> None:
-    batches = [paths[i:i+_DELETE_BATCH_SIZE] for i in range(0, len(paths), _DELETE_BATCH_SIZE)]
-    for batch_num, batch in enumerate(batches, 1):
-        for attempt in range(1, _DELETE_MAX_RETRIES + 1):
-            try:
-                client.delete(
-                    collection_name=DOCUMENTS_COLLECTION,
-                    points_selector=FilterSelector(filter=Filter(
-                        should=[FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=p))
-                                for p in batch]
-                    )),
-                )
-                break
-            except Exception as exc:
-                if attempt < _DELETE_MAX_RETRIES:
-                    time.sleep(2 ** attempt)   # 2 s, 4 s, 8 s
-                else:
-                    raise
+def _delete_path_from_qdrant(client, path: str, file_num: int, total: int) -> None:
+    for attempt in range(1, _DELETE_MAX_RETRIES + 1):
+        try:
+            client.delete(
+                collection_name=DOCUMENTS_COLLECTION,
+                points_selector=FilterSelector(filter=Filter(
+                    must=[FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=path))]
+                )),
+                wait=False,   # fire-and-forget: no blocking on index re-optimization
+            )
+            logger.info("Qdrant cleanup %d/%d: queued delete for %s", file_num, total, path)
+            return
+        except Exception as exc:
+            if attempt < _DELETE_MAX_RETRIES:
+                time.sleep(2 ** attempt)
+            else:
+                raise
 ```
 
-**2. Longer per-request timeout for the sync client** — `get_client(qdrant_url, timeout=120)`
-instead of the default 60 s. Batch deletes trigger a single larger re-indexing pass; 120 s
-provides headroom without affecting the ingestion daemon (which retains its 60 s default).
-
 `get_client()` in `rag_engine/collection.py` now accepts an optional `timeout: int = 60`
-parameter — no other callers are affected.
+parameter (added in the same session) — no other callers are affected.
 
 #### Expected outcome
 
-289 files → 6 batched requests, completing in ~1–3 minutes instead of 19+ minutes (and
-failure). If a batch still times out, the retry loop fires up to 3 times with exponential
-back-off. On persistent failure the script aborts cleanly; SQLite rows survive for the next
-sync run.
+289 sequential deletes, each returning in milliseconds. Total cleanup time drops from 19+
+minutes to seconds. Index re-optimization happens asynchronously in Qdrant; the cleanup
+script is completely decoupled from it.
 
 #### Related entries
 

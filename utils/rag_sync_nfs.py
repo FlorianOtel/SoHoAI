@@ -44,63 +44,49 @@ from rag_engine.state import StateDB
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# Qdrant bulk-delete tuning: 50 paths per request keeps payloads small while
-# dramatically reducing round-trips (e.g. 289 files → 6 requests instead of 289).
-_DELETE_BATCH_SIZE = 50
-_DELETE_MAX_RETRIES = 3
+_DELETE_MAX_RETRIES = 5
 
 
-def _delete_paths_from_qdrant(client, paths: list[str]) -> None:
-    """Delete Qdrant points for all paths in batched requests, with retry on timeout.
+def _delete_path_from_qdrant(client, path: str, file_num: int, total: int) -> None:
+    """Delete Qdrant points for one source path, with exponential back-off on failure.
 
-    Uses a `should` (OR) filter so one HTTP call covers many source paths at once.
-    Qdrant's index re-optimization is triggered once per batch rather than once per
-    file, cutting total time from O(N) sequential waits to O(N/batch_size) waits.
-
-    Retries each batch up to _DELETE_MAX_RETRIES times with exponential back-off
-    before re-raising. If a batch ultimately fails, the script aborts: SQLite rows
-    survive intact so the next sync will retry the Qdrant cleanup automatically.
+    Uses wait=False so Qdrant queues the operation and returns immediately — the
+    caller never blocks on index re-optimization, which can take minutes on a large
+    collection. The crash-safe ordering is preserved: all deletes are submitted
+    before purge_deleted() removes the SQLite rows; surviving rows act as retry
+    markers if the process is killed mid-loop.
     """
-    batches = [
-        paths[i : i + _DELETE_BATCH_SIZE]
-        for i in range(0, len(paths), _DELETE_BATCH_SIZE)
-    ]
-    for batch_num, batch in enumerate(batches, 1):
-        for attempt in range(1, _DELETE_MAX_RETRIES + 1):
-            try:
-                client.delete(
-                    collection_name=DOCUMENTS_COLLECTION,
-                    points_selector=FilterSelector(
-                        filter=Filter(
-                            should=[
-                                FieldCondition(
-                                    key=FIELD_SOURCE_PATH,
-                                    match=MatchValue(value=p),
-                                )
-                                for p in batch
-                            ]
-                        )
-                    ),
-                )
-                logger.info(
-                    "Qdrant batch %d/%d: removed points for %d path(s)",
-                    batch_num, len(batches), len(batch),
-                )
-                break
-            except (ResponseHandlingException, Exception) as exc:
-                if attempt < _DELETE_MAX_RETRIES:
-                    wait = 2 ** attempt  # 2 s, 4 s, 8 s
-                    logger.warning(
-                        "Qdrant batch %d/%d attempt %d failed (%s) — retrying in %ds",
-                        batch_num, len(batches), attempt, exc, wait,
+    for attempt in range(1, _DELETE_MAX_RETRIES + 1):
+        try:
+            client.delete(
+                collection_name=DOCUMENTS_COLLECTION,
+                points_selector=FilterSelector(
+                    filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key=FIELD_SOURCE_PATH,
+                                match=MatchValue(value=path),
+                            )
+                        ]
                     )
-                    time.sleep(wait)
-                else:
-                    logger.error(
-                        "Qdrant batch %d/%d failed after %d attempts — aborting",
-                        batch_num, len(batches), _DELETE_MAX_RETRIES,
-                    )
-                    raise
+                ),
+                wait=False,
+            )
+            logger.info("Qdrant cleanup %d/%d: queued delete for %s", file_num, total, path)
+            return
+        except (ResponseHandlingException, Exception) as exc:
+            if attempt < _DELETE_MAX_RETRIES:
+                backoff = 2 ** attempt  # 2, 4, 8, 16 s
+                logger.warning(
+                    "Qdrant delete attempt %d/%d failed (%s) — retrying in %ds",
+                    attempt, _DELETE_MAX_RETRIES, exc, backoff,
+                )
+                time.sleep(backoff)
+            else:
+                logger.error(
+                    "Qdrant delete failed after %d attempts — aborting", _DELETE_MAX_RETRIES
+                )
+                raise
 
 
 def main() -> None:
@@ -129,11 +115,10 @@ def main() -> None:
     # survive intact and the next sync retries automatically (no orphaned Qdrant points).
     if deleted_paths:
         qdrant_url = config.get("rag", {}).get("qdrant_url", "http://192.168.1.93:6333")
-        # 120 s timeout: batch deletes on a large collection can trigger index
-        # re-optimization that takes longer than the default 60 s per request.
         qdrant_client = get_client(qdrant_url, timeout=120)
-        _delete_paths_from_qdrant(qdrant_client, deleted_paths)
-        logger.info("Deleted Qdrant points for %d removed file(s)", len(deleted_paths))
+        for i, path in enumerate(deleted_paths, 1):
+            _delete_path_from_qdrant(qdrant_client, path, i, len(deleted_paths))
+        logger.info("Queued Qdrant point deletion for %d removed file(s)", len(deleted_paths))
     if stale_paths:
         state_db.purge_deleted(stale_paths)
 
