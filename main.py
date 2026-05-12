@@ -747,6 +747,10 @@ async def rag_search(
     user: str | None = Query(None),
     top_k: int = Query(5, ge=1, le=20),
     file_types: list[str] | None = Query(None),
+    score_threshold: float = Query(0.0, ge=0.0, le=1.0,
+                                   description="Minimum cosine score; 0=no filter"),
+    multi_query: bool = Query(False,
+                              description="Enable multi-query expansion + MMR reranking"),
 ):
     """Retrieve RAG document hits without invoking any LLM.
 
@@ -756,16 +760,27 @@ async def rag_search(
     if app.state.qdrant_client is None:
         raise HTTPException(status_code=503, detail="Qdrant client not available")
 
-    results = await search_rag(
-        query=q,
-        user_id=user,
-        limit=top_k,
-        qdrant_client=app.state.qdrant_client,
-        rag_cfg=app.state.rag_cfg,
-        file_types=file_types,
-    )
+    if multi_query:
+        results = await multi_query_search(
+            query=q,
+            user_id=user,
+            limit=top_k,
+            qdrant_client=app.state.qdrant_client,
+            rag_cfg=app.state.rag_cfg,
+            llm_fn=app.state.variant_llm_fn,
+        )
+    else:
+        results = await search_rag(
+            query=q,
+            user_id=user,
+            limit=top_k,
+            qdrant_client=app.state.qdrant_client,
+            rag_cfg=app.state.rag_cfg,
+            file_types=file_types,
+            score_threshold=score_threshold,
+        )
 
-    logger.info("RAG search: q=%r user=%s top_k=%d → %d result(s)", q, user, top_k, len(results))
+    logger.info("RAG search: q=%r user=%s top_k=%d score_threshold=%.2f multi_query=%s → %d result(s)", q, user, top_k, score_threshold, multi_query, len(results))
     return {"query": q, "user": user, "results": results}
 
 

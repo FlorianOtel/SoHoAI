@@ -603,6 +603,18 @@ async def ingest_file(
             state_db.mark_completed(file_path)
             return
 
+        # Skip documents whose parsed text is mostly binary/garbage characters.
+        # Corrupt scanned PDFs and binary-encoded files produce noise vectors
+        # that crowd out legitimate search results.
+        _printable = sum(1 for c in text if c.isprintable()) / max(len(text), 1)
+        if _printable < 0.85:
+            logger.warning(
+                "Skipping %s — parsed text is %.0f%% printable (binary/corrupt content)",
+                file_path, _printable * 100,
+            )
+            state_db.mark_ignored(file_path, f"binary content: {_printable:.0%} printable chars")
+            return
+
         # ------------------------------------------------------------------
         # Step 3: chunk
         # ------------------------------------------------------------------

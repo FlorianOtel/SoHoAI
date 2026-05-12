@@ -3,7 +3,7 @@ title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-12--19-47
+updated_at: 2026-05-12--22-25
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -2817,4 +2817,92 @@ sudo systemctl enable --now rag-ingest.timer
 
 Ensure the new server can reach Qdrant at `http://192.168.1.93:6333` and has the NFS
 paths mounted. No code changes are required.
+
+---
+
+## 12. RAG Search Quality Improvements (2026-05-12)
+
+### 12.1 Problem
+
+After corpus growth to ~1.46M points, RAG search quality degraded:
+
+1. **Corrupt binary PDF vectors dominated top-k** — Nokia/Scan PDFs and COI-EMEA CSVs
+   parsed by docling as binary garbage (65–88% printable chars). Their pseudo-random
+   dense embeddings score 0.55–0.58 for many queries, filling all top_k=5 slots.
+2. **Zombie vectors** — high-impact files (Dave_Snowden, Nokia Scans, COI-EMEA) were
+   present in Qdrant but absent from SQLite, caused by the old `handle_deleted()` race
+   condition (SQLite row purged before Qdrant deletion completed). `find_deleted()` can
+   never detect these; only direct Qdrant deletion by `source_path` filter works.
+3. **No score threshold** — endpoint returned all top-k results regardless of score.
+4. **Dense-only search is fragile for exact phrases** — `$CWD blindly` vs
+   `blindly uses $cwd` get different embeddings even though they contain the same signal.
+
+### 12.2 Corpus cleanup
+
+**Zombie vector identification and deletion** (`utils/rag_purge_corrupt.py`):
+- New utility: scrolls all Qdrant points, computes printable-char ratio of `parent_text`.
+- `--dry-run` (default): reports corrupt paths with point count and SQLite presence.
+- `--confirm`: deletes corrupt vectors directly from Qdrant via `source_path` filter.
+  Skips files still on disk unless `--force`. Retries on Qdrant 500s (optimizer lock).
+- Uses a **read-only** SQLite connection (`mode=ro` URI) — never writes to SQLite.
+
+**Ingest quality gate** (`rag_engine/ingest.py`):
+- After parsing, skip documents where `printable_ratio(text) < 0.85`.
+- Marks such files as `ignored` in SQLite so they don't re-enter the pipeline.
+- Prevents corrupt scanned PDFs and binary-encoded files from re-ingesting.
+
+**Snapshot script NFS fix** (`scripts/qdrant/qdrant-snapshot.sh`):
+- Fixed long-standing bug: `SNAPSHOTS_NFS_DIR` was defined but never used.
+- Snapshots now downloaded to NFS via `curl --max-time 3600`, then the Qdrant-local
+  copy is deleted. NFS file rotation replaces API-based rotation.
+- Crontab remains on Server 2; daily at 03:00 CEST (`--keep 12`).
+
+### 12.3 Search improvements
+
+**Score threshold + expanded pool** (`rag_engine/search.py`):
+- New `score_threshold: float = 0.0` parameter; passed to `query_points(score_threshold=)`.
+- Internally fetches `min(limit × 3, 50)` candidates, then slices to `limit` after
+  threshold filtering — better recall without widening the public API.
+
+**Endpoint exposure** (`main.py`):
+- `/v1/rag/search` gains `?score_threshold=FLOAT` and `?multi_query=BOOL` params.
+- `multi_query=true` routes through `multi_query_search()` (Gemma query expansion + MMR).
+  Uses `app.state.variant_llm_fn` built at startup from `rag.multi_query.variant_model`.
+
+**CLI exposure** (`utils/rag_search_cli.py`):
+- `--score-threshold FLOAT` and `--multi-query` flags added.
+
+### 12.4 SQLite corruption incident (2026-05-12)
+
+**What happened:** `rag_purge_corrupt.py` originally used `StateDB` for SQLite access.
+`StateDB.__init__()` writes to the WAL (PRAGMA + schema migrations) even for read-only
+use. Running this over NFS while the Qdrant optimizer was mid-vacuum caused WAL
+corruption: B-tree page 1324 malformed, wrong index entry count on
+`sqlite_autoindex_ingestion_queue_1`.
+
+**Fix:** Replaced `StateDB` with a direct `sqlite3.connect(uri, mode=ro)` connection —
+zero writes to SQLite from this utility.
+
+**Recovery:** Restored `rag_state.db` from NFS snapshot (mtime 20:38, before corruption
+at ~21:04). Post-restore: 7,934 completed, 9 pending. Followed by `rag_sync_nfs.py`
+to re-detect the 8 deleted AWS--fotel files and bring SQLite/Qdrant back into sync.
+
+### 12.5 Verification
+
+```bash
+# Smoke test (regression)
+python utils/rag_smoke_test.py --query "AWS certifications" --user florian --expect "AWS"
+# → PASS
+
+# Golden-path test (original problem query — Nokia garbage gone, real content surfaces)
+python utils/rag_search_cli.py --query '$CWD blindly' --user florian
+# → Rank 1: brain-fix-for-telemetry chat file (0.546), no binary PDFs
+
+# Purge utility (read-only scan)
+python utils/rag_purge_corrupt.py --dry-run --user florian
+
+# Snapshot NFS fix
+bash scripts/qdrant/qdrant-snapshot.sh --keep 12
+# → creates snapshot + downloads to /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/
+```
 

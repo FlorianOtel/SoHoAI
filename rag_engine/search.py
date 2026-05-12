@@ -33,6 +33,7 @@ async def search_rag(
     qdrant_client: QdrantClient,
     rag_cfg: dict,
     file_types: list[str] | None = None,
+    score_threshold: float = 0.0,
 ) -> list[dict]:
     """
     Semantic search over the user's documents + shared (la-familia) content.
@@ -88,15 +89,17 @@ async def search_rag(
 
     # -- 3. Search ---------------------------------------------------------
     ensure_collection(qdrant_client)
+    _fetch_limit = min(limit * 3, 50)
     result = qdrant_client.query_points(
         collection_name=DOCUMENTS_COLLECTION,
         query=vector,
         query_filter=query_filter,
-        limit=limit,
+        limit=_fetch_limit,
+        score_threshold=score_threshold if score_threshold > 0.0 else None,
         with_payload=True,
     )
 
-    # -- 4. Unpack hits ----------------------------------------------------
+    # -- 4. Unpack hits and slice to limit ----
     results = [
         {
             "content":       (hit.payload or {}).get(FIELD_PARENT_TEXT, ""),
@@ -107,7 +110,7 @@ async def search_rag(
             "session_title": (hit.payload or {}).get(FIELD_SESSION_TITLE, ""),
         }
         for hit in result.points
-    ]
+    ][:limit]
 
     logger.debug(
         "search_rag: user_id=%s  query=%r  → %d result(s)",

@@ -21,23 +21,47 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import httpx  # noqa: E402
 import yaml  # noqa: E402
 
 from rag_engine.collection import get_client
 from rag_engine.search import search_rag
 
 
-async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_cfg: dict, file_types: list[str] | None = None) -> None:
+async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_cfg: dict, file_types: list[str] | None = None, score_threshold: float = 0.0, multi_query: bool = False) -> None:
     qdrant_client = get_client(qdrant_url)
 
-    results = await search_rag(
-        query=query,
-        user_id=user_id,
-        limit=top_k,
-        qdrant_client=qdrant_client,
-        rag_cfg=rag_cfg,
-        file_types=file_types,
-    )
+    if multi_query:
+        from rag_engine.multi_query import multi_query_search
+
+        async def _llm_fn(prompt: str) -> str:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "http://192.168.1.95:8000/v1/chat/completions",
+                    json={"model": "gemma4", "messages": [{"role": "user", "content": prompt}],
+                          "max_tokens": 150, "temperature": 0.4},
+                )
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"].strip()
+
+        results = await multi_query_search(
+            query=query,
+            user_id=user_id,
+            limit=top_k,
+            qdrant_client=qdrant_client,
+            rag_cfg=rag_cfg,
+            llm_fn=_llm_fn,
+        )
+    else:
+        results = await search_rag(
+            query=query,
+            user_id=user_id,
+            limit=top_k,
+            qdrant_client=qdrant_client,
+            rag_cfg=rag_cfg,
+            file_types=file_types,
+            score_threshold=score_threshold,
+        )
 
     if not results:
         print("No results found.")
@@ -70,6 +94,10 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=5, help="Number of results (default: 5)")
     parser.add_argument("--file-types", nargs="+", metavar="TYPE",
                         help="Filter by file type(s): pdf, pptx, ppt, docx, ipynb, md, yaml, txt, claude_chat")
+    parser.add_argument("--score-threshold", type=float, default=0.0, metavar="FLOAT",
+                        help="Minimum cosine score to include (0=no filter, e.g. 0.50)")
+    parser.add_argument("--multi-query", action="store_true",
+                        help="Enable multi-query expansion + MMR reranking (uses internal Gemma)")
     args = parser.parse_args()
 
     if not args.no_filter and not args.user:
@@ -82,7 +110,7 @@ def main() -> None:
 
     rag_cfg = config.get("rag", {})
 
-    asyncio.run(run(args.query, user_id, args.top_k, rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"), rag_cfg, file_types=args.file_types or None))
+    asyncio.run(run(args.query, user_id, args.top_k, rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"), rag_cfg, file_types=args.file_types or None, score_threshold=args.score_threshold, multi_query=args.multi_query))
 
 
 if __name__ == "__main__":
