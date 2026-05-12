@@ -3,7 +3,7 @@ title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-06--12-40
+updated_at: 2026-05-12--19-47
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -15,7 +15,9 @@ context: >
   contextual retrieval). Updated 2026-04-22: §8.3 multi-query+MMR evaluated
   — no-go verdict, permanently disabled; §8.4 contextual retrieval still frozen.
   Updated 2026-05-05: §10 RAG Ingestion Service — systemd timer + NFS lock +
-  multi-user sync wrapper.
+  multi-user sync wrapper. Updated 2026-05-12: §4.3 incremental sync — Qdrant
+  deletions now batched (50 paths/request, OR filter) with retry+backoff and
+  120 s timeout; get_client() timeout parameter.
 ---
 ---
 
@@ -839,7 +841,12 @@ full incremental reconciliation on every run:
 - **Deleted or excluded files:** if a previously `completed` file no longer appears in the
   scan results — whether because it was physically deleted from NFS, or because it is now
   matched by an exclusion filter in `config.yaml` — its SQLite row is removed **and** all
-  corresponding Qdrant points are deleted immediately, filtered by `source_path`.
+  corresponding Qdrant points are deleted, filtered by `source_path`. Deletions are sent in
+  batches of 50 paths per request using a Qdrant `should` (OR) filter, with up to 3 retries
+  per batch (2 s / 4 s / 8 s back-off). The sync client uses `timeout=120` s for these
+  batch operations (vs. the ingestion daemon's default 60 s), since each batch triggers a
+  single larger index re-optimization pass. See [RAG-troubleshoot.md §2026-05-12](RAG-troubleshoot.md)
+  for the failure scenario that motivated this design.
 
 The third case covers the config-driven exclusion scenario: adding a new pattern to
 `rag.scanner.exclude_dir_names`, `exclude_dir_suffixes`, or `exclude_file_patterns` and

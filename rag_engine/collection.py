@@ -24,17 +24,16 @@ DISTANCE = Distance.COSINE
 # Client factory
 # ---------------------------------------------------------------------------
 
-def get_client(url: str) -> QdrantClient:
+def get_client(url: str, timeout: int = 60) -> QdrantClient:
     """Connect to a running Qdrant server.
-    
-    Timeout set to 60 seconds to handle index optimization on large batches.
+
+    Default timeout is 60 seconds to handle index optimization on large batches.
     During heavy ingestion (e.g., 70K+ points), Qdrant may take >5 seconds to
     respond to delete/upsert requests while it optimizes indexes. Default httpx
-    timeout (~5s) is too short; 60s allows adequate time.
-    
-    See: /TROUBLESHOOTING.md — "Qdrant HTTP Timeouts"
+    timeout (~5s) is too short; 60s covers normal operations. Pass a higher
+    value for bulk-delete operations that may trigger longer re-indexing passes.
     """
-    return QdrantClient(url=url, timeout=60)
+    return QdrantClient(url=url, timeout=timeout)
 
 
 # ---------------------------------------------------------------------------

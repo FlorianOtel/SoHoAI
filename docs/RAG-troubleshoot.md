@@ -3,7 +3,7 @@ title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-08--11-53
+updated_at: 2026-05-12--19-47
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -11,6 +11,8 @@ context: >
   session 2026-05-01). Merged 2026-05-01. Covers: Qdrant HTTP timeouts during bulk ingestion,
   re-queue after db_base_path rename, verifying specific files in the vector store,
   ignored file retry procedures, and clean restart procedures.
+  Updated 2026-05-12: rag_sync_nfs.py sequential-delete timeout fix — batched Qdrant deletes
+  (50 paths per request, OR filter) with retry+backoff; get_client() timeout parameter added.
 ---
 
 # SoHoAI RAG Pipeline — Troubleshooting
@@ -94,6 +96,93 @@ Qdrant's active storage is local NVMe on Server 1 (`/var/lib/qdrant/storage`).
    absent from Qdrant will be re-queued automatically.
 4. Run `rag_ingest_daemon.py` to fill any gaps.
 5. Restart ingestion timer.
+
+---
+
+## Session — 2026-05-12
+
+### rag_sync_nfs.py timeout on bulk Qdrant cleanup
+
+#### Symptom
+
+`rag_sync_nfs.py` ran for ~19 minutes before crashing with
+`qdrant_client.http.exceptions.ResponseHandlingException: timed out` while deleting Qdrant
+points for 289 removed files. The script processed roughly 280 files successfully (~4 s each)
+then stalled on one request that exceeded the 60-second client timeout.
+
+The crash happened inside the Qdrant delete call, so SQLite rows survived intact (correct
+crash-safe ordering). But the cleanup was incomplete and the script had to be re-run manually.
+
+#### Root cause
+
+`rag_sync_nfs.py` deleted Qdrant points **one file at a time** in a sequential loop:
+
+```python
+for path in deleted_paths:
+    qdrant_client.delete(
+        collection_name=DOCUMENTS_COLLECTION,
+        points_selector=FilterSelector(filter=Filter(must=[
+            FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=path))
+        ])),
+    )
+```
+
+Each call uses `wait=true` (Qdrant default), blocking until the collection's index is
+fully re-optimized. On a large collection (98 K+ points), that optimization takes several
+seconds per request. 289 sequential requests meant any single slow optimization pass could
+exceed the 60-second timeout, crashing the script.
+
+#### Fix
+
+Two changes in `rag_sync_nfs.py` and `rag_engine/collection.py`:
+
+**1. Batch deletes using a `should` (OR) filter** — 50 paths per request instead of 1.
+Qdrant's index re-optimization is amortized across 50 files at once; 289 files → 6 requests
+instead of 289.
+
+```python
+# New helper in rag_sync_nfs.py
+_DELETE_BATCH_SIZE = 50
+_DELETE_MAX_RETRIES = 3
+
+def _delete_paths_from_qdrant(client, paths: list[str]) -> None:
+    batches = [paths[i:i+_DELETE_BATCH_SIZE] for i in range(0, len(paths), _DELETE_BATCH_SIZE)]
+    for batch_num, batch in enumerate(batches, 1):
+        for attempt in range(1, _DELETE_MAX_RETRIES + 1):
+            try:
+                client.delete(
+                    collection_name=DOCUMENTS_COLLECTION,
+                    points_selector=FilterSelector(filter=Filter(
+                        should=[FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=p))
+                                for p in batch]
+                    )),
+                )
+                break
+            except Exception as exc:
+                if attempt < _DELETE_MAX_RETRIES:
+                    time.sleep(2 ** attempt)   # 2 s, 4 s, 8 s
+                else:
+                    raise
+```
+
+**2. Longer per-request timeout for the sync client** — `get_client(qdrant_url, timeout=120)`
+instead of the default 60 s. Batch deletes trigger a single larger re-indexing pass; 120 s
+provides headroom without affecting the ingestion daemon (which retains its 60 s default).
+
+`get_client()` in `rag_engine/collection.py` now accepts an optional `timeout: int = 60`
+parameter — no other callers are affected.
+
+#### Expected outcome
+
+289 files → 6 batched requests, completing in ~1–3 minutes instead of 19+ minutes (and
+failure). If a batch still times out, the retry loop fires up to 3 times with exponential
+back-off. On persistent failure the script aborts cleanly; SQLite rows survive for the next
+sync run.
+
+#### Related entries
+
+- [Session 2026-04-22](#session--2026-04-22) — original `get_client()` 60 s timeout fix for
+  ingestion daemon timeouts.
 
 ---
 
@@ -532,21 +621,22 @@ The `QdrantClient` in `rag_engine/collection.py` was initialized with the httpx 
 - Database remained healthy throughout (473K points, green status)
 
 #### Solution
-Increase the HTTP timeout to 60 seconds in `rag_engine/collection.py`:
+Increase the HTTP timeout to 60 seconds in `rag_engine/collection.py`. The function now also
+accepts an optional `timeout` parameter so callers with heavier workloads (e.g. bulk-delete
+in `rag_sync_nfs.py`) can request a longer timeout without affecting ingestion:
 
 ```python
-def get_client(url: str) -> QdrantClient:
+def get_client(url: str, timeout: int = 60) -> QdrantClient:
     """Connect to a running Qdrant server.
 
-    Timeout set to 60 seconds to handle index optimization on large batches.
-    During heavy ingestion (e.g., 70K+ points), Qdrant may take >5 seconds to
-    respond to delete/upsert requests while it optimizes indexes. Default httpx
-    timeout (~5s) is too short; 60s allows adequate time.
+    Default timeout is 60 seconds to handle index optimization on large batches.
+    Pass a higher value for bulk-delete operations that may trigger longer
+    re-indexing passes.
     """
-    return QdrantClient(url=url, timeout=60)
+    return QdrantClient(url=url, timeout=timeout)
 ```
 
-**Fix applied:** 2026-04-22
+**Fix applied:** 2026-04-22 (timeout=60 default); `timeout` parameter added 2026-05-12.
 
 #### Why 60 Seconds?
 - Qdrant's default flush interval is 5 seconds (`flush_interval_sec: 5`)
