@@ -41,10 +41,11 @@ from qdrant_client.models import (
     FilterSelector,
     MatchValue,
     PointStruct,
+    SparseVector,
 )
 
-from .collection import DOCUMENTS_COLLECTION, ensure_collection
-from .embeddings import embed_batch
+from .collection import DOCUMENTS_COLLECTION, ensure_collection, collection_has_sparse
+from .embeddings import embed_batch, embed_sparse
 from .schema import (
     FIELD_CHUNK_INDEX,
     FIELD_FILE_NAME,
@@ -58,10 +59,42 @@ from .schema import (
     FIELD_SOURCE_PATH,
     FIELD_TAG,
     FIELD_TEXT,
+    SPARSE_VECTOR_NAME,
 )
 from .state import StateDB
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Sparse vector readiness cache
+# ---------------------------------------------------------------------------
+
+# Module-level cache: stores whether the Qdrant collection has sparse_text configured.
+# Lazily initialized on first call to _is_sparse_ready() and cached for the lifetime
+# of the worker process (across multiple file ingestions).
+_sparse_ready: bool | None = None
+
+
+def _is_sparse_ready(qdrant_client: QdrantClient) -> bool:
+    """
+    Check if the Qdrant collection has sparse vector support enabled.
+
+    Lazy-initializes the _sparse_ready cache on first call. Returns True if the
+    collection has the SPARSE_VECTOR_NAME (sparse_text) vector space configured;
+    False before migration via rag_sparse_migrate.py or if the collection is absent.
+
+    Args:
+        qdrant_client: Qdrant client instance.
+
+    Returns:
+        True if sparse vectors are supported, False otherwise.
+    """
+    global _sparse_ready
+    if _sparse_ready is None:
+        _sparse_ready = collection_has_sparse(qdrant_client)
+        logger.debug("Sparse vector readiness: %s", _sparse_ready)
+    return _sparse_ready
+
 
 # ---------------------------------------------------------------------------
 # Chunking parameters (RAG-strategy.md §3.4)
@@ -652,26 +685,41 @@ async def ingest_file(
         #
         # Random UUIDs — step 0 handles cleanup before re-insert, so there
         # are no orphan-ID concerns when chunking produces a different count.
+        #
+        # Sparse vectors (BM25) are conditionally included if the collection
+        # has sparse_text configured. Before migration via rag_sparse_migrate.py,
+        # ingest only dense vectors (backward compatible).
         # ------------------------------------------------------------------
-        points = [
-            PointStruct(
-                id=str(uuid.uuid4()),
-                vector=vector,
-                payload={
-                    FIELD_TEXT:        child_text,
-                    FIELD_PARENT_TEXT: parent_text,
-                    FIELD_OWNER:       owner,
-                    FIELD_SOURCE_PATH: file_path,
-                    FIELD_FILE_NAME:   file_name,
-                    FIELD_FILE_TYPE:   file_type,
-                    FIELD_PAGE:        0,   # page-level tracking: future enhancement
-                    FIELD_CHUNK_INDEX: chunk_idx,
-                    FIELD_TAG:         tag,
-                    **chat_meta,
-                },
+        sparse_ready = _is_sparse_ready(qdrant_client)
+        points = []
+        for chunk_idx, ((child_text, parent_text), vector) in enumerate(zip(pairs, vectors)):
+            if sparse_ready:
+                sparse_indices, sparse_values = embed_sparse(child_text)
+                point_vector = {
+                    "": vector,  # "" is the Qdrant key for the unnamed dense vector
+                    SPARSE_VECTOR_NAME: SparseVector(indices=sparse_indices, values=sparse_values),
+                }
+            else:
+                point_vector = vector  # dense-only until migration is complete
+
+            points.append(
+                PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=point_vector,
+                    payload={
+                        FIELD_TEXT:        child_text,
+                        FIELD_PARENT_TEXT: parent_text,
+                        FIELD_OWNER:       owner,
+                        FIELD_SOURCE_PATH: file_path,
+                        FIELD_FILE_NAME:   file_name,
+                        FIELD_FILE_TYPE:   file_type,
+                        FIELD_PAGE:        0,   # page-level tracking: future enhancement
+                        FIELD_CHUNK_INDEX: chunk_idx,
+                        FIELD_TAG:         tag,
+                        **chat_meta,
+                    },
+                )
             )
-            for chunk_idx, ((child_text, parent_text), vector) in enumerate(zip(pairs, vectors))
-        ]
 
         # ------------------------------------------------------------------
         # Step 6: batched upsert

@@ -16,6 +16,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Lazy-loaded sparse embedding model (BM25).
+_sparse_model = None
+
 _DEFAULT_OLLAMA_URL = "http://192.168.1.93:11434/api/embeddings"
 _DEFAULT_MODEL = "bge-m3"
 _BATCH_CONCURRENCY = 5      # max parallel Ollama requests (no native batch endpoint)
@@ -76,3 +79,28 @@ async def embed_batch(
         return result
 
     return list(await asyncio.gather(*[_one(t) for t in texts]))
+
+
+# ---------------------------------------------------------------------------
+# Sparse embeddings (BM25)
+# ---------------------------------------------------------------------------
+
+def _get_sparse_model():
+    """Lazy-load the BM25 sparse embedding model on first call."""
+    global _sparse_model
+    if _sparse_model is None:
+        from fastembed import SparseTextEmbedding
+        _sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
+    return _sparse_model
+
+
+def embed_sparse(text: str) -> tuple[list[int], list[float]]:
+    """
+    Generate a BM25 sparse vector for the given text.
+
+    Returns:
+        Tuple of (indices: list[int], values: list[float]).
+        Indices are token IDs; values are BM25 weights.
+    """
+    result = next(iter(_get_sparse_model().embed([text])))
+    return result.indices.tolist(), result.values.tolist()

@@ -63,7 +63,7 @@ model_list:
       max_input_tokens: 200000
       context_window: 200000
 
-  - model_name: claude-opus-4-7          # Brain — direct Anthropic (Claude Code sub-agent tier)
+  - model_name: claude-opus-4-7          #  This is used by SoHoAI chat -- not by CC or "claude-orchestra". These go transparently, via their own "x-api-key" header.
     litellm_params:
       model: anthropic/claude-opus-4-7
       api_key: os.environ/ANTHROPIC_API_KEY
@@ -71,12 +71,12 @@ model_list:
       context_window: 1000000
       max_input_tokens: 1000000
 
-  - model_name: claude-sonnet-4-6        # Planner/Reviewer — direct Anthropic (Claude Code sub-agent tier)
+  - model_name: claude-sonnet-4-6        #  This is used by SoHoAI chat -- not by CC or "claude-orchestra". These go transparently, via their own "x-api-key" header.
     litellm_params:
       model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  - model_name: claude-haiku-4-5         # Actor — direct Anthropic (Claude Code sub-agent tier)
+  - model_name: claude-haiku-4-5         #  This is used by SoHoAI chat -- not by CC or "claude-orchestra". These go transparently, via their own "x-api-key" header.
     litellm_params:
       model: anthropic/claude-haiku-4-5
       api_key: os.environ/ANTHROPIC_API_KEY
@@ -187,6 +187,14 @@ rag:
     timeout_seconds: 10.0                     # per-request HTTP timeout
     # Reranker server launched with -c 768 -b 768 for consistent context and batch handling.
     # Client does not truncate; server handles all typical queries and child chunks.
+
+  # -- Hybrid sparse+dense retrieval (§14) -----------------------------------
+  hybrid:
+    enabled: true                             # default on; override per-call via hybrid=False
+    sparse_vector_name: "sparse_text"
+    dense_fetch: 30                           # candidates from dense prefetch branch
+    sparse_fetch: 30                          # candidates from sparse prefetch branch
+    rrf_k: 60                                 # RRF constant k (standard: 60)
 
   # -- NFS scanner filters ------------------------------------------------------
   scanner:

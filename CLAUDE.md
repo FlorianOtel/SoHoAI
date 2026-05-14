@@ -2,8 +2,8 @@
 title: "SoHoAI — Project Context & Design Reference"
 created_at: 20260407-000000
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Haiku 4.5)
-updated_at: 2026-05-14--15-40
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-14--21-10
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   Project instructions and design decisions for Claude Code;
@@ -132,7 +132,11 @@ SoHoAI/
 │   ├── rag_search_cli.py       # CLI: retrieval-only — embed query + Qdrant search; prints top-k hits + parent_text preview
 │   ├── rag_smoke_test.py       # CLI: end-to-end smoke test — retrieval + /v1/chat/completions with rag_mode=on; --expect SUBSTR assertion; pass/fail exit code
 │   ├── rag_mmr_bench.py        # CLI: MMR benchmark harness (evaluated 2026-04-22; no-go verdict — kept for reference)
-│   ├── rag_bench_queries.txt   # 12 verified queries used by rag_mmr_bench.py
+│   ├── rag_rerank_bench.py     # CLI: dense vs reranked vs hybrid comparison bench; --mode dense|rerank|both|hybrid|hybrid+rerank
+│   ├── rag_bench_queries.txt   # 14 verified queries used by bench harnesses
+│   ├── rag_sparse_migrate.py   # CLI: one-time corpus migration to add sparse vectors (migrate / swap / status)
+│   ├── rag_purge_corrupt.py    # CLI: scan+delete corrupt/zombie Qdrant vectors; read-only SQLite (mode=ro)
+│   ├── qdrant_status.py        # CLI: Qdrant optimizer status, lag, segments; --watch for continuous monitoring
 │   ├── rag_reset.py            # CLI: reset Qdrant collection + ingestion queue
 │   ├── notebooklm_auth.py      # NotebookLM browser automation (Playwright + system Chrome)
 │   ├── snapshot_codebase.py    # Aggregate project files → codebase_snapshot.md
@@ -286,6 +290,11 @@ python utils/rag_status.py --list-pending              # print every pending fil
 python utils/rag_search_cli.py --query "certifications" --user florian        # retrieval only; add --no-rerank to skip cross-encoder reranking
 python utils/rag_smoke_test.py --query "AWS certifications" --user florian --expect "AWS-Certification"  # end-to-end retrieval + chat; pass/fail exit
 python utils/rag_rerank_bench.py --user florian                               # dense-only vs reranked top-5 comparison
+
+# RAG sparse migration — one-time, required to enable hybrid search (see RAG-strategy.md §14)
+python utils/rag_sparse_migrate.py status                       # check migration state
+python utils/rag_sparse_migrate.py migrate                      # phase 1: migrate data (live)
+python utils/rag_sparse_migrate.py swap --confirm               # phase 2: swap (stop uvicorn first)
 
 # Tool-use smoke test — validates LiteLLM path for ollama-cloud/* and internal/gemma-4-e4b
 # Run against worktree port 8001 (or 8000 after merge)

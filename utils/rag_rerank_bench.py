@@ -2,22 +2,29 @@
 """
 Cross-encoder reranking benchmark harness.
 
-Compares dense-only (Qdrant cosine) vs reranked (cross-encoder) top-k results
-on a labelled set of known-good queries. For each query it measures recall@top_k,
-wall-clock latency, and rank changes, then prints a side-by-side comparison table
-and summary statistics.
+Compares retrieval results across different modes on a labelled set of known-good
+queries. For each query it measures recall@top_k, wall-clock latency, and rank
+changes, then prints a side-by-side comparison table and summary statistics.
 
 Usage (run from project root):
     python utils/rag_rerank_bench.py --user florian
-    python utils/rag_rerank_bench.py --user florian --mode dense      # dense only
-    python utils/rag_rerank_bench.py --user florian --mode rerank     # rerank only
-    python utils/rag_rerank_bench.py --user florian --top-k 10        # fetch more
+    python utils/rag_rerank_bench.py --user florian --mode dense            # dense only
+    python utils/rag_rerank_bench.py --user florian --mode rerank           # rerank only
+    python utils/rag_rerank_bench.py --user florian --mode hybrid           # hybrid only
+    python utils/rag_rerank_bench.py --user florian --mode hybrid+rerank    # hybrid+rerank only
+    python utils/rag_rerank_bench.py --user florian --top-k 10              # fetch more
     python utils/rag_rerank_bench.py --user florian --rerank-url http://192.168.1.95:8001/v1/rerank
 
 Queries file format (utils/rag_bench_queries.txt by default):
     query text | expected_path_substring   # lines starting with # are comments
 
-Reranking is decided on-by-default; no go/no-go verdict is issued.
+Comparison modes:
+    both: dense vs reranked (cross-encoder rescoring)
+    dense: dense-only results (Qdrant cosine order)
+    rerank: reranked results (cross-encoder order)
+    hybrid: dense vs hybrid (bge-m3 sparse + dense combined, no reranking)
+    hybrid+rerank: dense vs hybrid with reranking applied
+
 Printed summary: recall counts, average latency overhead, and rank delta stats.
 """
 
@@ -156,6 +163,42 @@ async def run_rerank(
     return results, time.perf_counter() - t0
 
 
+async def run_hybrid(
+    query: str, user_id: str | None,
+    qdrant_client, rag_cfg: dict, top_k: int,
+) -> tuple[list[dict], float]:
+    """Run retrieval with hybrid mode enabled (bge-m3 sparse + dense combined, no reranking)."""
+    t0 = time.perf_counter()
+    results = await search_rag(
+        query=query,
+        user_id=user_id,
+        limit=top_k,
+        qdrant_client=qdrant_client,
+        rag_cfg=rag_cfg,
+        hybrid=True,  # Enable hybrid search
+        rerank=False,  # Disable reranking
+    )
+    return results, time.perf_counter() - t0
+
+
+async def run_hybrid_rerank(
+    query: str, user_id: str | None,
+    qdrant_client, rag_cfg: dict, top_k: int,
+) -> tuple[list[dict], float]:
+    """Run retrieval with hybrid mode and reranking enabled."""
+    t0 = time.perf_counter()
+    results = await search_rag(
+        query=query,
+        user_id=user_id,
+        limit=top_k,
+        qdrant_client=qdrant_client,
+        rag_cfg=rag_cfg,
+        hybrid=True,  # Enable hybrid search
+        rerank=True,  # Enable reranking
+    )
+    return results, time.perf_counter() - t0
+
+
 # ---------------------------------------------------------------------------
 # Table + summary
 # ---------------------------------------------------------------------------
@@ -164,9 +207,9 @@ _W_QUERY = 42
 _W_SCORE = 6
 
 
-def _print_header():
+def _print_header(right_label: str = "Reranked"):
     q = "Query".ljust(_W_QUERY)
-    print(f"\n  {q}  {'Dense (Qdrant)':^16}  {'Reranked':^16}  Rank Delta")
+    print(f"\n  {q}  {'Dense (Qdrant)':^16}  {right_label:^16}  Rank Delta")
     print(f"  {'─'*_W_QUERY}  {'─'*16}  {'─'*16}  {'─'*20}")
 
 
@@ -231,7 +274,7 @@ def main() -> int:
                    help="Path to queries file (query | expected_substring)")
     p.add_argument("--top-k", type=int, default=5,
                    help="Number of results to fetch (default: 5)")
-    p.add_argument("--mode", choices=["dense", "rerank", "both"], default="both",
+    p.add_argument("--mode", choices=["dense", "rerank", "both", "hybrid", "hybrid+rerank"], default="both",
                    help="Run mode (default: both)")
     p.add_argument("--rerank-url", default=None,
                    help="Override reranker server URL")
@@ -264,39 +307,63 @@ def main() -> int:
 
     async def run() -> list[dict]:
         rows = []
-        _print_header()
+
+        # Determine right column label and runner based on mode
+        if args.mode == "both":
+            right_label = "Reranked"
+            right_runner = run_rerank
+        elif args.mode == "dense":
+            right_label = None  # Single mode, no comparison
+            right_runner = None
+        elif args.mode == "rerank":
+            right_label = None  # Single mode, no comparison
+            right_runner = None
+        elif args.mode == "hybrid":
+            right_label = "Hybrid"
+            right_runner = run_hybrid
+        elif args.mode == "hybrid+rerank":
+            right_label = "Hybrid+RR"
+            right_runner = run_hybrid_rerank
+
+        if right_label:
+            _print_header(right_label)
+
         for query, expected in queries:
             d_results, d_time = ([], 0.0)
             r_results, r_time = ([], 0.0)
 
-            if args.mode in ("dense", "both"):
+            # Always run dense for comparison modes; single-mode runs only for their type
+            if args.mode in ("dense", "both", "hybrid", "hybrid+rerank"):
                 d_results, d_time = await run_dense(query, args.user, qdrant_client, rag_cfg, args.top_k)
 
-            if args.mode in ("rerank", "both"):
-                r_results, r_time = await run_rerank(query, args.user, qdrant_client, rag_cfg, args.top_k)
+            # Run the right-side variant if in a comparison mode
+            if right_runner:
+                r_results, r_time = await right_runner(query, args.user, qdrant_client, rag_cfg, args.top_k)
 
             d_hit = _recall(d_results, expected) if d_results else False
             r_hit = _recall(r_results, expected) if r_results else False
-            rank_stats = _rank_delta(d_results, r_results)
+            rank_stats = _rank_delta(d_results, r_results) if right_runner else {}
 
-            _print_row(query, expected,
-                       d_hit, d_time,
-                       r_hit, r_time,
-                       rank_stats)
+            # Only print row if we have results to display
+            if d_results or r_results:
+                _print_row(query, expected,
+                           d_hit, d_time,
+                           r_hit, r_time,
+                           rank_stats)
 
-            rows.append(dict(
-                query=query, expected=expected,
-                d_hit=d_hit, d_time=d_time,
-                r_hit=r_hit, r_time=r_time,
-                rank_stats=rank_stats,
-            ))
+                rows.append(dict(
+                    query=query, expected=expected,
+                    d_hit=d_hit, d_time=d_time,
+                    r_hit=r_hit, r_time=r_time,
+                    rank_stats=rank_stats,
+                ))
 
         return rows
 
     rows = asyncio.run(run())
 
-    # Print summary for "both" mode only
-    if args.mode == "both":
+    # Print summary for comparison modes only (where we have left/right comparison)
+    if args.mode in ("both", "hybrid", "hybrid+rerank"):
         _print_summary(rows)
 
     return 0

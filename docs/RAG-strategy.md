@@ -2,8 +2,8 @@
 title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Haiku 4.5)
-updated_at: 2026-05-14--15-55
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-14--21-10
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -17,6 +17,9 @@ context: >
   Updated 2026-05-05: §10 RAG Ingestion Service — systemd timer + NFS lock +
   multi-user sync wrapper. Updated 2026-05-12: §4.3 incremental sync — Qdrant
   deletions use wait=False (fire-and-forget); get_client() timeout parameter.
+  Updated 2026-05-14: §13 cross-encoder reranking (bge-reranker-v2-m3);
+  §14 hybrid sparse+dense search (fastembed BM25 + Qdrant RRF) — code complete,
+  migration pending; §8.4 hybrid note updated.
 ---
 ---
 
@@ -2328,10 +2331,10 @@ also spends money). Not appropriate until:
   new column `contextualised: bool` so we can distinguish fully-processed rows from
   pre-contextual-retrieval completions; run the contextualisation pass as an
   incremental backfill rather than a flag-day re-ingest.
-- **Hybrid search (BM25 + dense)**: Anthropic's published benchmark uses both. The
-  Qdrant 1.10+ sparse-vector feature handles BM25 natively alongside dense vectors in
-  the same collection. This is a natural add-on to contextual retrieval and should be
-  designed as part of the same work package, not bolted on afterwards.
+- **Hybrid search (BM25 + dense)**: ✅ **Implemented separately in §14 (2026-05-14)**,
+  without waiting for §8.4. fastembed `Qdrant/bm25` sparse vectors + Qdrant `Fusion.RRF`
+  + cross-encoder reranking. See §14 for full design and migration procedure. If §8.4
+  is ever implemented, the hybrid retrieval layer is already in place.
 
 #### Decision gate
 
@@ -3062,4 +3065,85 @@ python utils/rag_rerank_bench.py --user florian --top-k 10 --mode both   # fetch
 
 Output: side-by-side table with recall (hit/miss), latency, and rank deltas. Summary:
 total latency overhead and number of results that improved rank position.
+
+## §14 Hybrid Sparse+Dense Search
+
+### 14.1 Motivation
+
+Dense-only bge-m3 retrieval fails on exact-phrase and technical-identifier queries
+(`$CWD blindly`, session UUIDs, `FIELD_TEXT`, etc.) because token-order variation
+produces different dense vectors. BM25-style sparse search catches these via exact
+term matching regardless of order.
+
+### 14.2 Architecture
+
+**Sparse encoder**: fastembed `Qdrant/bm25` model (BM25 tokenizer, ~5MB, CPU-only, in-process)
+
+**Qdrant storage**: named sparse vector space `"sparse_text"` with `Modifier.IDF`
+(Qdrant computes TF-IDF at query time using corpus statistics)
+
+**Hybrid query**: `query_points(prefetch=[dense, sparse], query=Fusion.RRF)` — two
+independent candidate sets merged via Reciprocal Rank Fusion
+
+**RRF**: converts rankings (not scores) to a unified score: `1/(k + rank)` per branch,
+summed across branches; k=60 (standard value)
+
+**Composed with cross-encoder**: hybrid RRF pool → bge-reranker-v2-m3 → top-K
+
+Full pipeline:
+```
+query
+  ├─ bge-m3 dense (Ollama) → Qdrant prefetch(top 30)  ─┐
+  └─ BM25 sparse (fastembed) → Qdrant prefetch(top 30) ─┤
+                                                          ↓
+                                              RRF fusion (≤50 merged candidates)
+                                                          ↓
+                                  cross-encoder rerank (bge-reranker-v2-m3) → top 5
+```
+
+### 14.3 Configuration (config.yaml)
+
+```yaml
+rag:
+  hybrid:
+    enabled: true                  # default on; override per-call via hybrid=False
+    sparse_vector_name: "sparse_text"
+    dense_fetch: 30                # candidates per dense prefetch branch
+    sparse_fetch: 30               # candidates per sparse prefetch branch
+    rrf_k: 60                      # RRF constant k
+```
+
+### 14.4 Migration (one-time, required before hybrid activates)
+
+Existing corpus (946K points) was indexed without sparse vectors. Migration adds them:
+
+```bash
+# Phase 1: migrate data to new collection (safe to run while app is live; ~1-2 hours)
+python utils/rag_sparse_migrate.py migrate [--batch-size 500]
+
+# Check progress
+python utils/rag_sparse_migrate.py status
+
+# Phase 2: swap (requires uvicorn to be stopped; ~5 seconds)
+python utils/rag_sparse_migrate.py swap --confirm
+```
+
+After swap: `documents` is a Qdrant alias → `documents_new`. All code is transparent.
+
+### 14.5 Search code integration
+
+`search_rag(query, user_id, limit, ..., hybrid=None)`:
+
+- `hybrid=None` → reads `rag.hybrid.enabled` from config (default `true`)
+- `hybrid=True` → always hybrid
+- `hybrid=False` → always dense-only
+- If collection lacks `sparse_text` (pre-migration): falls back to dense-only automatically
+
+### 14.6 Backward compatibility and graceful degradation
+
+- Before migration: `collection_has_sparse()` returns False → `search_rag` uses dense-only
+  automatically even when `hybrid=True`
+- After migration + swap: alias is transparent; `collection_has_sparse()` returns True
+- `ingest.py` uses the same `_is_sparse_ready()` cache — new files get sparse vectors
+  automatically post-migration
 
