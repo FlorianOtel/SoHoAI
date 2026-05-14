@@ -173,7 +173,7 @@ async def lifespan(app: FastAPI):
         logger.warning("Redis not available — conversation cache disabled")
 
     app.state.store = ChatStore(
-        db_path=f"{_db_base}/sqlite/chats.db"
+        db_path=f"{_db_base}/sqlite/telemetry.db"
     )
     logger.info("Chat store (SQLite) ✓")
 

@@ -2,8 +2,8 @@
 title: "SoHoAI — Project Context & Design Reference"
 created_at: 20260407-000000
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-06--17-37
+updated_by: Claude Code (Claude Haiku 4.5)
+updated_at: 2026-05-14--15-40
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   Project instructions and design decisions for Claude Code;
@@ -36,7 +36,7 @@ for family photos and RL training data collection from chat interactions.
 
 > SQLite and Redis paths are derived from `db_base_path` in `config.yaml`. Qdrant active storage is local-only (see below).
 
-- Chat DB: `/mnt/nfs/__Backups/SoHoAI--databases/sqlite/chats.db` (SQLite, NAS)
+- Chat DB: `/mnt/nfs/__Backups/SoHoAI--databases/sqlite/telemetry.db` (SQLite, NAS)
 - RAG state DB: `/mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db` (SQLite, NAS)
 - Vector store (active): `/var/lib/qdrant/storage` (local NVMe, Server 1 only — **not NFS**)
 - Vector store (snapshots/DR): `/mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/` (NAS)
@@ -105,7 +105,7 @@ SoHoAI/
 ├── .mcp.json                   # Claude Code auto-discovers this
 ├── schemas.py                  # Pydantic models (ChatRequest, ChatResponse, etc.)
 ├── router.py                   # SmartRouter — LiteLLM wrapper with routing logic
-├── usage_tracker.py            # UsageTracker — LiteLLM CustomLogger callback; records usage_events to chats.db
+├── usage_tracker.py            # UsageTracker — LiteLLM CustomLogger callback; records usage_events to telemetry.db
 ├── conversation.py             # ConversationCache — Redis + KV cache coordinator
 ├── kv_cache.py                 # KVCacheManager — llama-server slot save/restore + inference; apply_gemma_template() (Gemma 4 <|turn> format)
 ├── chat_store.py               # ChatStore — SQLite long-term persistence

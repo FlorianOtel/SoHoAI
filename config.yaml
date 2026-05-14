@@ -9,7 +9,7 @@ server2_ip: &server2_ip "192.168.1.95"
 # -- Storage (NAS mount point) ------------------------------------------------
 nas_mount: "/mnt/nfs/Florian/Gin-AI/projects/SoHoAI"
 # Change db_base_path to relocate all databases in one place.
-# Python derives: {db_base_path}/sqlite/chats.db, {db_base_path}/sqlite/rag_state.db, {db_base_path}/qdrant/, {db_base_path}/redis/
+# Python derives: {db_base_path}/sqlite/telemetry.db, {db_base_path}/sqlite/rag_state.db, {db_base_path}/qdrant/, {db_base_path}/redis/
 # Note: redis.dir below must be updated manually if db_base_path changes (not auto-derived in Python).
 db_base_path: "/mnt/nfs/__Backups/SoHoAI--databases"
 rl_export_dir: "/mnt/nfs/Florian/Gin-AI/projects/SoHoAI/rl-data"

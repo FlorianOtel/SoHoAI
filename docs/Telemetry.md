@@ -2,8 +2,8 @@
 title: "SoHoAI Usage and Billing Telemetry Pipeline"
 created_at: 2026-05-06--00-00
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-11--00-00
+updated_by: Claude Code (Claude Haiku 4.5)
+updated_at: 2026-05-14--15-40
 context: >
   Cross-project design document for SoHoAI Stage 1 telemetry implementation.
   Goal: Add a complete usage and billing telemetry pipeline to SoHoAI so that
@@ -30,7 +30,7 @@ inbound API traffic:
 
 Phases:
 - **Phase 0** ✅: Design document (this file)
-- **Phase 1** ✅: Add usage_events table to chats.db; wire LiteLLM success_callback
+- **Phase 1** ✅: Add usage_events table to telemetry.db; wire LiteLLM success_callback
 - **Phase 2** ✅: Source attribution via endpoint + X-Orchestra-Session-ID header
 - **Phase 3** ✅: GET /v1/usage/stats endpoint
 
@@ -100,7 +100,7 @@ See §6 Stage 2 Checklist for full handoff requirements.
 
 ## §2 usage_events table schema
 
-Stored in `chats.db` alongside existing tables. All columns present from initial
+Stored in `telemetry.db` alongside existing tables. All columns present from initial
 creation; fields are nullable where indicated.
 
 ```sql

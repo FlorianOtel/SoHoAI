@@ -24,7 +24,7 @@ SoHoAI maintains conversation state across three distinct storage tiers, each op
 
 ### Long-term: SQLite
 
-- **Storage**: Single file on NAS (`/mnt/nfs/__Backups/SoHoAI--databases/sqlite/chats.db`)
+- **Storage**: Single file on NAS (`/mnt/nfs/__Backups/SoHoAI--databases/sqlite/telemetry.db`)
 - **Format**: SQL `chats` table + `messages` table (one row per user/assistant message)
 - **Columns**: `id`, `user_id`, `chat_id`, `role`, `content`, `created_at`, plus `summary_text` and `summary_covers_through_message_id` (populated by rolling summarization)
 - **Purpose**: Permanent audit log, full conversation history, chat list/search, markdown/JSONL export, RL training data extraction

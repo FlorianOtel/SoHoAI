@@ -2609,7 +2609,7 @@ All relevant files are under a single directory that the NFS server snapshots au
 ├── sqlite/
 │   ├── rag_state.db          ← ingestion queue (SQLite, WAL-checkpointed after each run)
 │   ├── rag_state.db-wal      ← should be empty / absent after a run; safe to ignore on restore
-│   └── chats.db              ← conversation history (unrelated to RAG rollback)
+│   └── telemetry.db          ← conversation history + API cost telemetry
 ├── qdrant-snapshots/
 │   └── documents/
 │       ├── documents-<id>-<YYYY-MM-DD-HH-MM-SS>.snapshot          ← Qdrant archive
