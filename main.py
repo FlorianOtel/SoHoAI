@@ -751,6 +751,8 @@ async def rag_search(
                                    description="Minimum cosine score; 0=no filter"),
     multi_query: bool = Query(False,
                               description="Enable multi-query expansion + MMR reranking"),
+    rerank: bool | None = Query(None,
+                                description="Enable cross-encoder reranking; None=config default"),
 ):
     """Retrieve RAG document hits without invoking any LLM.
 
@@ -778,9 +780,10 @@ async def rag_search(
             rag_cfg=app.state.rag_cfg,
             file_types=file_types,
             score_threshold=score_threshold,
+            rerank=rerank,
         )
 
-    logger.info("RAG search: q=%r user=%s top_k=%d score_threshold=%.2f multi_query=%s → %d result(s)", q, user, top_k, score_threshold, multi_query, len(results))
+    logger.info("RAG search: q=%r user=%s top_k=%d score_threshold=%.2f multi_query=%s rerank=%s → %d result(s)", q, user, top_k, score_threshold, multi_query, rerank, len(results))
     return {"query": q, "user": user, "results": results}
 
 

@@ -2,8 +2,8 @@
 title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-12--22-25
+updated_by: Claude Code (Claude Haiku 4.5)
+updated_at: 2026-05-14--15-55
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -2905,4 +2905,161 @@ python utils/rag_purge_corrupt.py --dry-run --user florian
 bash scripts/sqlite-qdrant-snapshot.sh --keep 12
 # → creates snapshot + downloads to /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/documents/
 ```
+
+---
+
+## 13. Cross-Encoder Reranking (2026-05-14)
+
+### 13.1 Problem
+
+Dense retrieval (cosine similarity in embedding space) preserves semantic similarity but
+struggles with exact-phrase and syntax-heavy queries. Example failures observed in §12:
+- `$CWD blindly` (shell pattern match) — embedding is too coarse to rank project-context
+  code snippets (`.claude/`, `PLAN.md`) at the top.
+- `brain inflight marker` (control-flow jargon) — generic dense embedding misses the
+  claude-orchestra `.brain-inflight` marker files which are specific to the orchestrator
+  implementation.
+
+These queries have correct results in the full corpus (top-20+) but dense-only top-5
+misses them, requiring multi-query expansion (§8.3) or LLM intervention. Cross-encoder
+reranking addresses this by rescoring a larger dense-retrieved pool using a specialized
+**ranking** model (not an embedding model), which is trained to predict relevance on a
+0–1 scale.
+
+### 13.2 Architecture
+
+```
+User query
+    │
+    ├─→ Embedding layer
+    │      (bge-m3 on Server 1, Ollama)
+    │
+    ├─→ Qdrant dense retrieval
+    │      (top-N candidates, e.g. N = limit × fetch_multiplier, capped at fetch_cap)
+    │      Score key: "score" (cosine similarity, 0–1)
+    │
+    ├─→ Cross-encoder reranking [NEW]
+    │      (bge-reranker-v2-m3 on Server 2, llama.cpp /v1/rerank endpoint)
+    │      Server launched with: -c 768 -b 768 --reranking --pooling rank
+    │      Input:  query (raw, no client-side truncation)
+    │              candidate texts (FIELD_TEXT, child chunks, raw)
+    │      Output: list of {index, relevance_score} sorted by score descending
+    │      Score key: "rerank_score" (Spearman correlation, 0–1, not directly comparable to cosine)
+    │
+    └─→ Top-K results returned to LLM
+           (reranked order, or Qdrant order if reranker unavailable)
+```
+
+The reranker does **not** consume embedding dimensions (it uses contrastive cross-attention)
+and thus can re-rank 30+ candidates at inference time without re-embedding. Latency is
+~40ms per candidate (sequential server-side), i.e., 1.2s for 30 candidates.
+
+**Context and batch handling:** The reranker server is configured with `-c 768 -b 768`,
+ensuring both context and physical batch sizes are consistent and handle typical queries
+and child chunks without issue. If a (query, document) pair ever exceeds 768 tokens, the
+server returns HTTP 500 and the client gracefully falls back to Qdrant order (same fallback
+path as server-unreachable).
+
+### 13.3 Configuration
+
+All settings are in the `rag.rerank` block of `config.yaml`:
+
+```yaml
+rag:
+  rerank:
+    enabled: true                             # on by default (override per-call)
+    server_url: "http://192.168.1.95:8001/v1/rerank"   # llama-server on Server 2
+    model: "bge-reranker-v2-m3"               # cross-encoder model name
+    fetch_multiplier: 6                       # Qdrant fetch = min(top_k × 6, fetch_cap)
+    fetch_cap: 30                             # hard cap on Qdrant fetch pool
+    timeout_seconds: 10.0                     # per-request HTTP timeout to reranker
+```
+
+| Key | Default | Unit | Notes |
+|-----|---------|------|-------|
+| `enabled` | `true` | bool | Can be overridden by client: `?rerank=false` (API) or `--no-rerank` (CLI) |
+| `server_url` | `http://192.168.1.95:8001/v1/rerank` | URL | Fallback: Qdrant-order (no exception) |
+| `model` | `bge-reranker-v2-m3` | string | Model alias for the reranker server |
+| `fetch_multiplier` | `6` | unitless | Qdrant candidate pool size = `limit × fetch_multiplier`, capped at `fetch_cap` |
+| `fetch_cap` | `30` | count | Max candidates to rerank per query |
+| `timeout_seconds` | `10.0` | seconds | HTTP request timeout; failure → fallback to Qdrant order |
+
+### 13.4 Latency budget
+
+Measured end-to-end latency impact on a single-turn retrieval call:
+
+- **Dense only** (current): ~200–250ms (Ollama embed + Qdrant query)
+- **Dense + rerank** (fetch_cap=30): ~1.2–1.5s (Ollama embed + Qdrant fetch 30 + reranker rescore)
+- **Two-iteration retrieval** (rag_mode=on with max_iterations=2): up to 2.4–3.0s total
+
+This is acceptable for interactive chat (user sees streaming token output in parallel),
+and unavoidable when exact-phrase matching is needed. For latency-sensitive applications
+(e.g., mobile), set `rag.rerank.enabled: false` to skip reranking and use dense-only
+top-5.
+
+### 13.5 Failure mode
+
+If the reranker is unavailable (network error, timeout, server crash):
+1. HTTP error is caught in `rag_engine/rerank.py`.
+2. Single WARN log is issued: `"reranker failed: <reason> — falling back to Qdrant order"`.
+3. Candidates list is returned in Qdrant cosine order (unchanged).
+4. Chat continues without exception.
+
+This ensures no chat outage if Server 2's reranker process dies. The WARN log makes the
+fallback visible for debugging (see `docs/RAG-troubleshoot.md` §2026-05-14).
+
+### 13.6 Scoring and backward compatibility
+
+- **`rerank_score`** (0–1): new field added to results; measures relevance via cross-attention.
+  Not directly comparable to `score` (cosine similarity). Used for final ranking.
+- **`score`** (0–1): cosine similarity, preserved in results for backward compatibility.
+  When reranking is disabled, results are ordered by `score` (Qdrant order).
+
+When calling `search_rag()` programmatically, check for presence of `rerank_score` to
+detect reranking:
+```python
+for r in results:
+    s = r.get("rerank_score") or r.get("score")
+```
+
+### 13.7 Opt-out mechanisms
+
+Reranking is **enabled by default** but can be disabled at multiple levels:
+
+1. **Configuration** (global):
+   ```yaml
+   rag:
+     rerank:
+       enabled: false              # disable for all calls
+   ```
+
+2. **API endpoint** (`/v1/rag/search`):
+   ```bash
+   curl http://192.168.1.93:8000/v1/rag/search?q=...&user=florian&rerank=false
+   ```
+
+3. **CLI** (`utils/rag_search_cli.py`):
+   ```bash
+   python utils/rag_search_cli.py --query "..." --user florian --no-rerank
+   ```
+
+4. **Programmatic** (internal callers):
+   ```python
+   results = await search_rag(..., rerank=False)
+   ```
+
+### 13.8 Benchmarking
+
+Use `utils/rag_rerank_bench.py` to compare dense-only vs reranked results on a fixed
+query set (includes §12's failure cases: `$CWD blindly`, `brain inflight marker`):
+
+```bash
+python utils/rag_rerank_bench.py --user florian                    # both modes
+python utils/rag_rerank_bench.py --user florian --mode dense       # dense baseline
+python utils/rag_rerank_bench.py --user florian --mode rerank      # reranked only
+python utils/rag_rerank_bench.py --user florian --top-k 10 --mode both   # fetch more
+```
+
+Output: side-by-side table with recall (hit/miss), latency, and rank deltas. Summary:
+total latency overhead and number of results that improved rank position.
 

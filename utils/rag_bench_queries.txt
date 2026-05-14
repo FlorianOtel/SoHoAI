@@ -49,3 +49,7 @@ neural network multilayer perceptron backprop | multilayer-perceptrons
 
 # GitLab enablement session docs
 GitLab CI CD pipeline | GitLab--Berlin
+
+# claude-orchestra session memory references (corner cases)
+$CWD blindly | claude-orchestra
+brain inflight marker | claude-orchestra

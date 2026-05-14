@@ -177,6 +177,17 @@ rag:
     pool_multiplier: 4
     variant_model: "internal/gemma-4-e4b"
 
+  # -- Cross-encoder reranking (§13) -----------------------------------------
+  rerank:
+    enabled: true                             # on by default; override via ?rerank=false or --no-rerank
+    server_url: "http://192.168.1.95:8001/v1/rerank"
+    model: "bge-reranker-v2-m3"
+    fetch_multiplier: 6                       # Qdrant fetch = min(top_k * fetch_multiplier, fetch_cap)
+    fetch_cap: 30                             # hard cap on Qdrant fetch pool
+    timeout_seconds: 10.0                     # per-request HTTP timeout
+    # Reranker server launched with -c 768 -b 768 for consistent context and batch handling.
+    # Client does not truncate; server handles all typical queries and child chunks.
+
   # -- NFS scanner filters ------------------------------------------------------
   scanner:
     # File extensions to ingest (whitelist).

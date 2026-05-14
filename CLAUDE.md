@@ -283,8 +283,9 @@ python utils/rag_status.py --watch /tmp/rag-ingestion.log   # live monitor for m
 python utils/rag_status.py --list-pending              # print every pending file path (pipeable; combine with --user)
 
 # RAG testing
-python utils/rag_search_cli.py --query "certifications" --user florian        # retrieval only
+python utils/rag_search_cli.py --query "certifications" --user florian        # retrieval only; add --no-rerank to skip cross-encoder reranking
 python utils/rag_smoke_test.py --query "AWS certifications" --user florian --expect "AWS-Certification"  # end-to-end retrieval + chat; pass/fail exit
+python utils/rag_rerank_bench.py --user florian                               # dense-only vs reranked top-5 comparison
 
 # Tool-use smoke test — validates LiteLLM path for ollama-cloud/* and internal/gemma-4-e4b
 # Run against worktree port 8001 (or 8000 after merge)

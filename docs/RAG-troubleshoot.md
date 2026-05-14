@@ -2,8 +2,8 @@
 title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-12--22-30
+updated_by: Claude Code (Claude Haiku 4.5)
+updated_at: 2026-05-14--15-55
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -17,6 +17,82 @@ context: >
 ---
 
 # SoHoAI RAG Pipeline — Troubleshooting
+
+---
+
+## 2026-05-14 — Cross-Encoder Reranker: What to Check When It Misbehaves
+
+### Reachability
+
+Check that the reranker server on Server 2 is responding to HTTP requests:
+
+```bash
+curl http://192.168.1.95:8001/v1/rerank -sS \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"bge-reranker-v2-m3","query":"test","documents":["foo"]}'
+```
+
+Expected response: `{"results":[{"index":0,"relevance_score":<float>}]}`. If you get
+a connection timeout or "connection refused," the reranker is down.
+
+### Reranker failure fallback
+
+If the orchestrator logs show `[WARNING] reranker failed: ...`, the reranker is either
+unavailable or timing out. **No action is required for chat continuity:** the orchestrator
+automatically falls back to Qdrant cosine-ordered results. The WARN line is for debugging
+only; users do not see an error.
+
+To get reranking back: restart the reranker process on Server 2 (see below) and re-run
+the failing query.
+
+### Context limits and batch size
+
+The bge-reranker-v2-m3 model on Server 2 is now launched with `-c 768 -b 768`, ensuring
+both context and physical batch sizes are consistently 768 tokens. This eliminates the
+previous 512-token physical batch limit issue.
+
+**Previously** (before 2026-05-14): The physical batch limit was 512 tokens, causing HTTP 500
+errors on dense CSV content or long child chunks. Client-side truncation (query: 64 tokens +
+doc: 380 tokens) was used as a workaround.
+
+**Now**: The server handles all typical queries and child chunks without truncation. No client-side
+truncation is needed or performed.
+
+To verify reranking is working: run `python utils/rag_search_cli.py --query '$CWD blindly' --user florian`
+and check that `rerank_score` is present in the output (indicates successful reranking).
+If HTTP 500 is still returned, check that Server 2's llama-server was restarted with the new `-b 768` flag.
+
+### Reranker VRAM usage
+
+The reranker model (`bge-reranker-v2-m3`) shares the GPU on Server 2 with Gemma 4 E4B
+chat model. Smoke testing (2026-05-14) confirmed both models are resident in VRAM:
+- Gemma 4 E4B Q8_0: ~4.8 GB
+- bge-reranker-v2-m3: ~0.5 GB
+- KV cache slots (2 × 110024 ctx): ~1.76 GB
+- Overhead: ~1 GB
+- **Total: ~9.3 GB / 12 GB available**
+
+No VRAM OOM observed under typical load. If you observe OOM errors, check:
+1. Are other processes consuming GPU VRAM? (e.g., `nvidia-smi`)
+2. Is the model quantization stale? (old Q6_K Gemma causing higher VRAM use)
+
+### Reranker process restart
+
+The reranker runs on Server 2 as part of the same `llama-server` process that serves
+the chat endpoint (Gemma 4 on port 8000). The reranker listens on port 8001. To check:
+
+```bash
+ssh Server2
+ps aux | grep llama-server
+# Should see one llama-server process with flags: --parallel 2 --port 8000 --slot-save-path ...
+# (port 8001 reranker is served by the same process via model routing)
+```
+
+To restart the reranker:
+1. Stop the llama-server process (kills both port 8000 and 8001).
+2. Restart: `llama-server ... (full command from CLAUDE.md)`
+3. Wait ~10 seconds for model to load.
+4. Verify: `curl http://192.168.1.95:8001/v1/rerank ...` (should succeed).
 
 ---
 
