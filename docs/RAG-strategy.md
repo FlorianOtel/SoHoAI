@@ -3,7 +3,7 @@ title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-14--21-10
+updated_at: 2026-05-14--23-08
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -19,7 +19,8 @@ context: >
   deletions use wait=False (fire-and-forget); get_client() timeout parameter.
   Updated 2026-05-14: §13 cross-encoder reranking (bge-reranker-v2-m3);
   §14 hybrid sparse+dense search (fastembed BM25 + Qdrant RRF) — code complete,
-  migration pending; §8.4 hybrid note updated.
+  migration complete 2026-05-14, hybrid live; §14.7 qdrant-client API name
+  mismatches fixed (sparse_vectors, FusionQuery, Prefetch.filter).
 ---
 ---
 
@@ -3113,9 +3114,18 @@ rag:
     rrf_k: 60                      # RRF constant k
 ```
 
-### 14.4 Migration (one-time, required before hybrid activates)
+### 14.4 Migration (completed 2026-05-14)
 
-Existing corpus (946K points) was indexed without sparse vectors. Migration adds them:
+Migration of the 947K-point corpus was completed on 2026-05-14.
+`documents` is now a Qdrant alias → `documents_new`. Hybrid search is live.
+
+```bash
+# Status check (read-only):
+python utils/rag_sparse_migrate.py status
+# → documents: ALIAS -> documents_new  (947224 points, sparse vectors: ✓ YES)
+```
+
+For reference (migration procedure for a fresh corpus or rollback):
 
 ```bash
 # Phase 1: migrate data to new collection (safe to run while app is live; ~1-2 hours)
@@ -3146,4 +3156,61 @@ After swap: `documents` is a Qdrant alias → `documents_new`. All code is trans
 - After migration + swap: alias is transparent; `collection_has_sparse()` returns True
 - `ingest.py` uses the same `_is_sparse_ready()` cache — new files get sparse vectors
   automatically post-migration
+
+### 14.7 qdrant-client API name mismatches (bugs discovered during activation, 2026-05-14)
+
+Three bugs in the initial implementation were exposed when hybrid queries first fired against
+the migrated corpus. All three are qdrant-client API version mismatches — the code used
+names from docs/examples that don't match the installed client.
+
+**Bug 1 — `sparse_vectors_config` vs `sparse_vectors` (collection.py, rag_sparse_migrate.py)**
+
+`CollectionParams` attribute name in REST API response is `sparse_vectors`, not `sparse_vectors_config`.
+
+```python
+# Wrong:
+sparse = getattr(info.config.params, "sparse_vectors_config", None)  # always None → always False
+
+# Correct:
+sparse = getattr(info.config.params, "sparse_vectors", None)
+```
+
+Effect: `collection_has_sparse()` returned `False` even after migration → hybrid silently
+fell back to dense-only. The migration had succeeded; only the check was wrong.
+
+Verify via REST: `curl http://192.168.1.93:6333/collections/documents_new | python3 -m json.tool`
+→ look for `"sparse_vectors": {"sparse_text": {"modifier": "idf"}}` under `config.params`.
+
+**Bug 2 — `Prefetch(query_filter=...)` vs `Prefetch(filter=...)`**
+
+`Prefetch` Pydantic model does not accept a `query_filter` keyword argument — the parameter
+is named `filter`.
+
+```python
+# Wrong:
+Prefetch(query=vector, using="", limit=30, query_filter=query_filter)   # ValidationError
+
+# Correct:
+Prefetch(query=vector, using="", limit=30, filter=query_filter)
+```
+
+Effect: `ValidationError: Extra inputs are not permitted` on every hybrid query attempt.
+
+**Bug 3 — `query=Fusion.RRF` vs `query=FusionQuery(fusion=Fusion.RRF)`**
+
+`query_points()` accepts `FusionQuery` (a Pydantic model), not the raw `Fusion` enum value.
+
+```python
+# Wrong:
+query_points(..., query=Fusion.RRF)   # Qdrant 400: "Expected some form of vector or query"
+
+# Correct:
+from qdrant_client.models import FusionQuery
+query_points(..., query=FusionQuery(fusion=Fusion.RRF))
+```
+
+Effect: Qdrant returns HTTP 400 with a JSON parse error pointing to the wrong field type.
+
+All three fixes are in `rag_engine/collection.py`, `rag_engine/search.py`, and
+`utils/rag_sparse_migrate.py`. Smoke test passes after all fixes applied.
 

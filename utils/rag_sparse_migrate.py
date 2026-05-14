@@ -7,16 +7,16 @@ via update_collection. This script creates a new collection with the correct sch
 copies all points with computed sparse vectors, and swaps the alias.
 
 Usage (run from project root):
-    python utils/rag_sparse_migrate.py --migrate [--batch-size 500] [--qdrant-url URL] [--force]
-    python utils/rag_sparse_migrate.py --swap --confirm [--qdrant-url URL]
-    python utils/rag_sparse_migrate.py --status [--qdrant-url URL]
+    python utils/rag_sparse_migrate.py migrate [--batch-size 500] [--qdrant-url URL] [--force]
+    python utils/rag_sparse_migrate.py swap [--confirm] [--qdrant-url URL]
+    python utils/rag_sparse_migrate.py status [--qdrant-url URL]
 
 Phases:
-    Phase 1 (--migrate):  Safe to run while app is live. Creates documents_new collection,
-                          copies all points from documents with computed sparse vectors.
-    Phase 2 (--swap):     Requires app to be stopped (brief downtime ~5s).
-                          Deletes documents, creates alias documents -> documents_new.
-    Phase 3 (--status):   Read-only, can run anytime. Shows collection state.
+    migrate:  Safe to run while app is live. Creates documents_new collection,
+              copies all points from documents with computed sparse vectors.
+    swap:     Requires app to be stopped (brief downtime ~5s).
+              Deletes documents, creates alias documents -> documents_new.
+    status:   Read-only, can run anytime. Shows collection state.
 """
 
 from __future__ import annotations
@@ -315,7 +315,7 @@ def status(qdrant_url: str) -> None:
     # Check sparse vector support
     try:
         info = client.get_collection(DOCUMENTS_COLLECTION)
-        sparse_config = getattr(info.config.params, "sparse_vectors_config", None)
+        sparse_config = getattr(info.config.params, "sparse_vectors", None)  # qdrant-client uses "sparse_vectors", not "sparse_vectors_config"
         has_sparse = sparse_config is not None and SPARSE_VECTOR_NAME in sparse_config
         print(f"  sparse vectors: {'✓ YES' if has_sparse else '✗ NO'}")
     except Exception as e:

@@ -2,8 +2,8 @@
 title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Haiku 4.5)
-updated_at: 2026-05-14--15-55
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-14--23-08
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -14,9 +14,89 @@ context: >
   Updated 2026-05-12: rag_sync_nfs.py sequential-delete timeout fix — wait=False on every
   delete call (fire-and-forget, no blocking on index re-optimization); get_client()
   timeout parameter added.
+  Updated 2026-05-14: hybrid search activation — three qdrant-client API name mismatches
+  (sparse_vectors attribute, Prefetch.filter, FusionQuery); corpus migration completed.
 ---
 
 # SoHoAI RAG Pipeline — Troubleshooting
+
+---
+
+## 2026-05-14 — Hybrid Search Activation: qdrant-client API Name Mismatches
+
+Three bugs were discovered when hybrid queries first fired against the migrated corpus.
+All are qdrant-client API mismatches — names that differ between documentation/examples
+and the installed library version.
+
+### Bug 1 — `collection_has_sparse()` always returns False
+
+**Symptom:** `python utils/rag_sparse_migrate.py status` shows `sparse vectors: ✗ NO`
+even after a successful migration. Hybrid search silently falls back to dense-only.
+
+**Root cause:** `CollectionParams` attribute is named `sparse_vectors` in the Qdrant
+Python client, but the code checked `sparse_vectors_config` (which doesn't exist, so
+`getattr(..., None)` always returns `None`).
+
+**Fix** (`rag_engine/collection.py`, `utils/rag_sparse_migrate.py`):
+```python
+# Wrong:
+sparse = getattr(info.config.params, "sparse_vectors_config", None)
+
+# Correct:
+sparse = getattr(info.config.params, "sparse_vectors", None)
+```
+
+**Verification:**
+```bash
+python utils/rag_sparse_migrate.py status
+# → sparse vectors: ✓ YES
+
+# Or directly via REST:
+curl -s http://192.168.1.93:6333/collections/documents_new | python3 -m json.tool | grep -A3 sparse_vectors
+# → "sparse_vectors": { "sparse_text": { "modifier": "idf" } }
+```
+
+### Bug 2 — `Prefetch` rejects `query_filter` kwarg
+
+**Symptom:** `pydantic_core.ValidationError: Extra inputs are not permitted` on any
+hybrid search call. Traceback points to `Prefetch` model construction.
+
+**Root cause:** `Prefetch` Pydantic model uses `filter` (not `query_filter`) for the
+ownership/file-type filter parameter.
+
+**Fix** (`rag_engine/search.py`):
+```python
+# Wrong:
+Prefetch(query=vector, using="", limit=30, query_filter=query_filter)
+
+# Correct:
+Prefetch(query=vector, using="", limit=30, filter=query_filter)
+```
+
+### Bug 3 — `query=Fusion.RRF` causes Qdrant 400
+
+**Symptom:** `qdrant_client.http.exceptions.UnexpectedResponse: 400 Bad Request —
+"Expected some form of vector, id, or a type of query"` deep in the request JSON.
+
+**Root cause:** `query_points()` `query` parameter accepts `FusionQuery` (a Pydantic
+model), not the raw `Fusion` enum value.
+
+**Fix** (`rag_engine/search.py`):
+```python
+from qdrant_client.models import FusionQuery
+
+# Wrong:
+query_points(..., query=Fusion.RRF)
+
+# Correct:
+query_points(..., query=FusionQuery(fusion=Fusion.RRF))
+```
+
+**Post-fix smoke test:**
+```bash
+python utils/rag_smoke_test.py --query "AWS certifications" --user florian --expect "AWS"
+# → PASS
+```
 
 ---
 

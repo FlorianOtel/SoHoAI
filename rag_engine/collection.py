@@ -82,7 +82,7 @@ def collection_has_sparse(client: QdrantClient) -> bool:
     """
     try:
         info = client.get_collection(DOCUMENTS_COLLECTION)
-        sparse = getattr(info.config.params, "sparse_vectors_config", None)
+        sparse = getattr(info.config.params, "sparse_vectors", None)  # qdrant-client uses "sparse_vectors", not "sparse_vectors_config"
         return sparse is not None and SPARSE_VECTOR_NAME in sparse
     except Exception:
         return False
