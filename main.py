@@ -1257,6 +1257,27 @@ async def proxy_chat_completions(req: Request):
 #    { "env": { "ANTHROPIC_BASE_URL": "http://192.168.1.93:8000" } }
 # =============================================================================
 
+_TOOL_ID_VALID = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+
+def _sanitize_tool_use_id(raw_id: str | None) -> str:
+    """Ensure a tool_use id satisfies Anthropic's '^[a-zA-Z0-9_-]+$' pattern.
+
+    Some non-Anthropic models (e.g. Ollama kimi-k2.6) return IDs like
+    'functions.Bash:38' containing '.' and ':'.  Replace invalid chars with '_'
+    so the ID stays recognisable and round-trips deterministically through CC's
+    conversation history.  Falls back to a fresh UUID-based ID if raw_id is
+    absent or would sanitize to an empty string.
+    """
+    if raw_id and _TOOL_ID_VALID.match(raw_id):
+        return raw_id
+    if raw_id:
+        sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', raw_id)
+        if sanitized:
+            return sanitized
+    return f"toolu_{uuid.uuid4().hex[:24]}"
+
+
 def _anthropic_stop_reason(openai_finish_reason: str | None) -> str | None:
     """Map OpenAI finish_reason to Anthropic stop_reason."""
     if not openai_finish_reason:
@@ -1291,6 +1312,26 @@ async def anthropic_messages(req: Request):
     body = json.loads(body_bytes)
 
     public_model = body.get("model")
+
+    # Block models in proxy.blocked_models (e.g. Haiku subagents auto-spawned by CC
+    # when the main model is a claude-code-* Ollama Cloud model).
+    _blocked = app.state.router.config.get("proxy", {}).get("blocked_models", [])
+    if public_model in _blocked:
+        logger.info("anthropic_messages: blocked model %r (proxy.blocked_models)", public_model)
+        return JSONResponse(
+            {
+                "type": "error",
+                "error": {
+                    "type": "not_supported_error",
+                    "message": (
+                        f"Model '{public_model}' is not available via this proxy. "
+                        "Use an explicit claude-code-* model."
+                    ),
+                },
+            },
+            status_code=400,
+        )
+
     resolved = _resolve_proxy_model(public_model)
 
     if resolved in _LITELLM_ROUTED:
@@ -1818,7 +1859,7 @@ async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResp
                                     text_block_open = False
 
                                 # Open new tool_use block
-                                tc_id = tc.get("id", f"toolu_{uuid.uuid4().hex[:16]}")
+                                tc_id = _sanitize_tool_use_id(tc.get("id"))
                                 tc_name = (tc.get("function") or {}).get("name", "")
                                 tool_call_state[tc_index] = {"id": tc_id, "name": tc_name}
                                 sse_index = 1 + tc_index
@@ -1891,7 +1932,7 @@ async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResp
                 parsed_input = {"_raw": raw_args}
             content_blocks.append({
                 "type": "tool_use",
-                "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:16]}"),
+                "id": _sanitize_tool_use_id(tc.get("id")),
                 "name": fn.get("name", ""),
                 "input": parsed_input,
             })

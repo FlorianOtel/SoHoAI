@@ -24,7 +24,16 @@ redis:
   dir: "/mnt/nfs/__Backups/SoHoAI--databases/redis"
   default_ttl_seconds: 86400  # 24 hours
 
-#### --- LiteLLM  configuration --- 
+# -- Proxy access control ------------------------------------------------------
+proxy:
+  # Models listed here are refused at /v1/messages with HTTP 400.
+  # Primary use: prevent CC from auto-spawning Haiku subagents when the main
+  # model is a claude-code-* (Ollama Cloud) model. The versioned name is what
+  # CC sends internally.
+  blocked_models:
+    - claude-haiku-4-5-20251001
+
+#### --- LiteLLM  configuration ---
 router_settings:
   enable_pre_call_checks: true
 

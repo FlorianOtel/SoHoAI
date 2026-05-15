@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-11--00-00
+updated_at: 2026-05-15--11-49
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -243,7 +243,7 @@ Claude Code injects its own system prompt ("You are Claude Code..."). Ollama clo
 follow this persona and will self-identify as Claude. The actual model is confirmed by
 the status bar and server logs — not the model's self-description.
 
-### §2.3 Ollama cloud reliability and 503 guard
+### §2.3 Ollama cloud reliability, timeout backoff, and 503 guard
 
 **deepseek-v4-pro has a documented ~70% HTTP 500/503 failure rate** on Ollama's shared
 inference tier since its April 2026 release (GitHub issues #15832, #15934). Ollama shared
@@ -256,10 +256,24 @@ next turn it resumes answering. Within a single sub-agent task this produces alt
 models mid-task — worse than a clean failure. It also incurs unexpected cost when the user
 explicitly chose a $0 model.
 
-**How failures are handled (2026-05-11):**
+**Timeout and backoff (updated 2026-05-15):** Instead of a single 30s timeout that immediately
+surfaces as HTTP 529, the proxy now uses a **3-step increasing-timeout backoff** in
+`SmartRouter.complete()` (`router.py`):
 
-| Path | deepseek 503/timeout behavior |
-|------|-------------------------------|
+| Attempt | Timeout | Log |
+|---------|---------|-----|
+| 1 | 30 s | (silent) |
+| 2 | 60 s | WARNING: `ollama-cloud … timed out on attempt 1/3, retrying (timeout=60s)…` |
+| 3 | 90 s | WARNING: `ollama-cloud … timed out on attempt 2/3, retrying (timeout=90s)…` |
+| exhausted | — | ERROR: `ollama-cloud … all 3 attempts timed out` → HTTP 529 |
+
+Worst-case total: 30+60+90 = 180 s — within CC's 300 s httpx limit. Only `litellm.Timeout`
+triggers a retry; auth errors and 4xx responses propagate immediately.
+
+**How final failures are reported:**
+
+| Path | behavior after all 3 attempts exhausted |
+|------|----------------------------------------|
 | Streaming (`stream: true`) | SSE `error` event emitted in-stream; HTTP 200 (stream already open) |
 | Non-streaming | HTTP **529** `overloaded_error` with Anthropic-format JSON body |
 
@@ -276,12 +290,42 @@ explicitly chose a $0 model.
 HTTP 529 is Anthropic's own "overloaded" code — Claude Code renders it as a clean
 user-visible error rather than an opaque crash. The message includes a `/model` hint.
 
-**Timeout:** `request_timeout=30` is applied for all `ollama-cloud/*` targets (down from
-the global 60s) so failures surface in ≤30s rather than hanging a full minute.
-
 **Recommendation:** For interactive Claude Code sessions that need reliability, use
 `ollama-cloud/qwen3-coder-next` (coding) or an `anthropic/*` model. Reserve deepseek-v4-pro
 for exploratory/disposable sessions where occasional failures are acceptable.
+
+### §2.4 Subagent blocking for `claude-code-*` sessions
+
+When Claude Code uses a `claude-code-*` (Ollama Cloud) model as its main model, it
+internally auto-spawns `claude-haiku-4-5-20251001` for lightweight background tasks.
+These would otherwise be transparently forwarded to Anthropic — incurring unexpected cost
+while the user expects a $0 Ollama session.
+
+**Guard in place (2026-05-15):** `proxy.blocked_models` in `config.yaml` contains
+`claude-haiku-4-5-20251001`. In `anthropic_messages()`, any request whose `model` is in
+this list returns HTTP 400 (`not_supported_error`) before routing. CC does not retry 400s
+and falls back to the main model.
+
+```yaml
+proxy:
+  blocked_models:
+    - claude-haiku-4-5-20251001
+```
+
+Add future versioned Haiku model names here as needed.
+
+### §2.5 Tool_use ID sanitization
+
+Ollama Cloud models (confirmed: kimi-k2.6) return tool call IDs in the format
+`functions.{name}:{index}` — e.g. `functions.Bash:38`. These contain `.` and `:` which
+violate Anthropic's required pattern `^[a-zA-Z0-9_-]+$`. Without sanitization, CC stores
+these IDs in its conversation history and the next call to an Anthropic-native model fails
+with HTTP 400.
+
+**Guard in place (2026-05-15):** `_sanitize_tool_use_id()` in `main.py` replaces invalid
+characters with `_` (`functions.Bash:38` → `functions_Bash_38`). Applied in both the
+streaming and non-streaming paths of `_anthropic_messages_litellm()`. Substitution is
+deterministic, so the ID round-trips correctly when CC sends it back as `tool_use_id`.
 
 ---
 
@@ -674,14 +718,16 @@ See `docs/TODO.md` for full detail on each deferred item.
 
 - **`main.py`**: `_ANTHROPIC_API_BASE`, `_PROXY_EXPOSED_MODELS`, `_resolve_proxy_model()`,
   `_build_proxy_model_entry()`, `proxy_model_info()`, `proxy_models()`,
-  `proxy_chat_completions()`, `anthropic_messages()`, `_anthropic_messages_forward()`,
-  `_anthropic_messages_litellm()`, `_anthropic_stop_reason()`, `_claude_code_alias_for()`,
-  `_claude_code_alias_to_public()`, `_display_name_for()`, `_LITELLM_ROUTED`,
-  `anthropic_count_tokens()` (token counting endpoint)
+  `proxy_chat_completions()`, `anthropic_messages()` (with `proxy.blocked_models` check),
+  `_anthropic_messages_forward()`, `_anthropic_messages_litellm()`,
+  `_anthropic_stop_reason()`, `_TOOL_ID_VALID`, `_sanitize_tool_use_id()`,
+  `_claude_code_alias_for()`, `_claude_code_alias_to_public()`, `_display_name_for()`,
+  `_LITELLM_ROUTED`, `anthropic_count_tokens()` (token counting endpoint)
 - **`router.py`**: `SmartRouter` — used by Cline path and LiteLLM local path;
-  `enable_pre_call_checks` and `context_window_fallbacks` wired from `config.yaml`
-- **`config.yaml`**: `model_list` entries; `router_settings.enable_pre_call_checks: true`;
-  `litellm_settings.context_window_fallbacks`
+  3-step timeout backoff for `ollama-cloud/*`; `enable_pre_call_checks` and
+  `context_window_fallbacks` wired from `config.yaml`
+- **`config.yaml`**: `model_list` entries; `proxy.blocked_models`;
+  `router_settings.enable_pre_call_checks: true`; `litellm_settings.context_window_fallbacks`
 - **`utils/alias_bijection_test.py`**: validates `_claude_code_alias_for()` ↔ `_claude_code_alias_to_public()` bijection
 - **`docs/claude-orchestra-handoff.md`**: deployment runbook, tier recommendations, and integration checklist for claude-orchestra
 - **`docs/TODO.md`**: deferred work — local-model tool-use implementation plan

@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Optional
 
+import litellm
 import yaml
 from litellm import Router
 
@@ -144,31 +145,54 @@ class SmartRouter:
             self._apply_cache_control(messages) if self._uses_anthropic(target) else messages
         )
 
-        # Override timeout for ollama-cloud targets
         if target.startswith("ollama-cloud/"):
-            kwargs.setdefault("request_timeout", 30)
-
-        try:
-            if stream:
-                # Return async generator for SSE streaming
-                response = await self.litellm_router.acompletion(
-                    model=target,
-                    messages=messages_to_send,
-                    stream=True,
-                    **kwargs,
-                )
-                return response
-            else:
-                response = await self.litellm_router.acompletion(
-                    model=target,
-                    messages=messages_to_send,
-                    stream=False,
-                    **kwargs,
-                )
-                return response
-        except Exception as e:
-            logger.error(f"All models failed: {e}")
-            raise
+            # 3-step geometric backoff: each successive attempt allows more time.
+            # Timeouts: 30s → 60s → 90s. Worst case: 180s total (within CC's 300s httpx limit).
+            # Only litellm.Timeout triggers a retry; other exceptions (auth, 4xx) propagate immediately.
+            _backoff_timeouts = [30, 60, 90]
+            last_exc: Exception | None = None
+            for attempt, timeout in enumerate(_backoff_timeouts, start=1):
+                if attempt > 1:
+                    logger.warning(
+                        "ollama-cloud %s timed out on attempt %d/3, retrying (timeout=%ds)...",
+                        target, attempt - 1, timeout,
+                    )
+                kw = {**kwargs, "request_timeout": timeout}
+                try:
+                    if stream:
+                        return await self.litellm_router.acompletion(
+                            model=target, messages=messages_to_send, stream=True, **kw
+                        )
+                    else:
+                        return await self.litellm_router.acompletion(
+                            model=target, messages=messages_to_send, stream=False, **kw
+                        )
+                except litellm.Timeout as exc:
+                    last_exc = exc
+                    continue
+                except Exception:
+                    raise
+            logger.error("ollama-cloud %s: all 3 attempts timed out", target)
+            raise last_exc  # type: ignore[misc]
+        else:
+            try:
+                if stream:
+                    return await self.litellm_router.acompletion(
+                        model=target,
+                        messages=messages_to_send,
+                        stream=True,
+                        **kwargs,
+                    )
+                else:
+                    return await self.litellm_router.acompletion(
+                        model=target,
+                        messages=messages_to_send,
+                        stream=False,
+                        **kwargs,
+                    )
+            except Exception as e:
+                logger.error(f"All models failed: {e}")
+                raise
 
     def _uses_anthropic(self, target: str) -> bool:
         """Return True if the target model alias is served via Anthropic API.

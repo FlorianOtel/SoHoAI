@@ -3,7 +3,7 @@ title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-10--21-11
+updated_at: 2026-05-15--11-49
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -354,6 +354,56 @@ Added clarification to `docs/RAG-strategy.md` §1.2 ("Exclusion filters") with a
 
 - Allow `claude_chats.roots` to point to directories other than `.claude/projects/` (e.g. other users' sessions on the NAS)
 - Support additional session formats (not just Claude Code `.jsonl`)
+
+---
+
+## 2026-05-15 — Proxy hardening: subagent blocking, geometric backoff, tool_use ID sanitization
+
+### Problem
+
+Three production issues surfaced during Claude Code sessions using `claude-code-kimi-k2.6`:
+
+1. **Haiku subagent leak**: CC internally auto-spawns `claude-haiku-4-5-20251001` for lightweight tasks even when the main model is `claude-code-kimi-k2.6` (an Ollama Cloud model). These Haiku requests hit `/v1/messages`, resolved to `None` in `_resolve_proxy_model()`, and were transparently forwarded to Anthropic — incurring unexpected Anthropic API cost while the user believed they were on a $0 Ollama session.
+
+2. **No backoff on Ollama Cloud timeouts**: When Ollama Cloud timed out (30s), the error was immediately surfaced to CC as HTTP 529. No retries. A transient slowness caused the whole task to fail.
+
+3. **Invalid `tool_use.id` from Ollama models**: Kimi K2.6 (and likely other Ollama models) returns tool call IDs in the format `functions.Bash:38` — containing `.` and `:` which violate Anthropic's required pattern `^[a-zA-Z0-9_-]+$`. Our LiteLLM path passed these IDs through unchanged. CC stored them in its conversation history. On a subsequent turn using an Anthropic-native model (transparent forward), Anthropic returned HTTP 400. Confirmed via session `/home/florian/.claude/projects/-mnt-nfs-Florian-Gin-AI-projects-claude-orchestra/31111cfa-ca5d-4b9a-a87c-b25ebb3fbeff.jsonl`.
+
+### Solutions
+
+**Fix 1 — Subagent blocklist** (`config.yaml` + `main.py`):
+
+Added `proxy.blocked_models` list to `config.yaml`. In `anthropic_messages()`, before any routing logic, the model is checked against this list and rejected with HTTP 400 (`not_supported_error`) if it matches. Default list: `[claude-haiku-4-5-20251001]`.
+
+```yaml
+proxy:
+  blocked_models:
+    - claude-haiku-4-5-20251001
+```
+
+CC receives a 400 (not retried) and falls back to using its main model for the task, or skips the subagent entirely. Additional model names (future versioned Haiku releases etc.) can be added without code changes.
+
+**Fix 2 — 3-step geometric backoff** (`router.py`):
+
+Replaced the single `request_timeout=30` for `ollama-cloud/*` targets with a 3-attempt retry loop using increasing timeouts: 30s → 60s → 90s. Only `litellm.Timeout` triggers a retry; auth errors and 4xx responses propagate immediately. Worst-case total: 180s (within CC's 300s httpx limit).
+
+**Fix 3 — Tool_use ID sanitization** (`main.py`):
+
+Added `_sanitize_tool_use_id()` helper and `_TOOL_ID_VALID = re.compile(r'^[a-zA-Z0-9_-]+$')` above the Anthropic utilities section. The helper replaces invalid characters with `_` (deterministic substitution — `functions.Bash:38` → `functions_Bash_38`). Applied in both the streaming SSE path (line ~1862) and non-streaming path (line ~1935) of `_anthropic_messages_litellm()`. The old `f"toolu_{uuid.uuid4().hex[:16]}"` fallbacks are unified into this helper.
+
+### Design notes
+
+- **Subagent blocklist** is intentionally a denylist (explicit opt-in). A wildcard block of all non-`claude-code-*` models would also block legitimate main-model Haiku sessions.
+- **Backoff timeouts grow, not waits** — the 30s/60s/90s are per-attempt timeout durations, not sleep delays between retries. This avoids the 5-minute total that sleep-based backoff would produce.
+- **Tool ID substitution is deterministic** — same input, same output. CC stores the sanitized ID and sends it back as `tool_use_id`; the round-trip is consistent. Most Ollama models don't validate `tool_call_id` strictly, so the tool-use loop continues to function.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `config.yaml` | New `proxy.blocked_models` key |
+| `main.py` | Blocklist check in `anthropic_messages()`; `_TOOL_ID_VALID` + `_sanitize_tool_use_id()` helper; both tool_use ID sites updated |
+| `router.py` | `import litellm`; 3-step timeout backoff for `ollama-cloud/*` |
 
 ---
 
