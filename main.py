@@ -1313,24 +1313,6 @@ async def anthropic_messages(req: Request):
 
     public_model = body.get("model")
 
-    # Block models in proxy.blocked_models (e.g. Haiku subagents auto-spawned by CC
-    # when the main model is a claude-code-* Ollama Cloud model).
-    _blocked = app.state.router.config.get("proxy", {}).get("blocked_models", [])
-    if public_model in _blocked:
-        logger.info("anthropic_messages: blocked model %r (proxy.blocked_models)", public_model)
-        return JSONResponse(
-            {
-                "type": "error",
-                "error": {
-                    "type": "not_supported_error",
-                    "message": (
-                        f"Model '{public_model}' is not available via this proxy. "
-                        "Use an explicit claude-code-* model."
-                    ),
-                },
-            },
-            status_code=400,
-        )
 
     resolved = _resolve_proxy_model(public_model)
 
