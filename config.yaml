@@ -31,19 +31,19 @@ router_settings:
 litellm_settings: {}
 
 # LiteLLM Model Routing ----------------------------------------------------
-# Default: internal (local Gemma) if cloud unreachable. Fallback: external (Sonnet 4.6) 
+# Default: internal (local Qwen3.5) if cloud unreachable. Fallback: external (Sonnet 4.6)
 model_list:
   ### First use-case: interactive chat
 
   # --- Primary LLM: GPU inference on Server 2 ---
-  - model_name: "internal/gemma-4-e4b"
+  - model_name: "internal/qwen3-4b"
     litellm_params:
-      model: openai/gemma4
+      model: openai/qwen3-4b
       api_base: "http://${server2_ip}:8000/v1"
       api_key: "dummy-key"
     model_info:
-      id: "internal/gemma-4-e4b"
-      description: "Gemma 4 E4B Q8_0 — summarization, offline fallback, background"
+      id: "internal/qwen3-4b"
+      description: "Qwen3.5-4B Q6_K_XL — summarization, offline fallback, background"
       # Advertised context window: per-slot capacity with `-c 220048 --parallel 2`.
       # 220048 / 2 = 110024. This is what external clients (Cline, Claude Code) read via
       # /proxy/v1/model/info for their contextWindow setting.
@@ -133,13 +133,13 @@ model_list:
 # -- Routing Policy ------------------------------------------------------------
 routing:
   default_model: "anthropic/claude-sonnet-4-6"
-  fallback_chain: ["internal/gemma-4-e4b", "anthropic/claude-sonnet-4-6"]
+  fallback_chain: ["internal/qwen3-4b", "anthropic/claude-sonnet-4-6"]
   # Route to cloud when context exceeds threshold.
   # Hard limit: -c 220048 / 2 = 110024 tokens per slot. At 100K we route to cloud,
   # leaving ~10K headroom for output (default max_tokens=1024 + safety margin).
   complexity_threshold_tokens: 100000
   cloud_model: "anthropic/claude-sonnet-4-6"
-  summarization_model: "internal/gemma-4-e4b"
+  summarization_model: "internal/qwen3-4b"
 
 
 #### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
@@ -175,7 +175,7 @@ rag:
     n_variants: 3
     lambda: 0.5
     pool_multiplier: 4
-    variant_model: "internal/gemma-4-e4b"
+    variant_model: "internal/qwen3-4b"
 
   # -- Cross-encoder reranking (§13) -----------------------------------------
   rerank:
@@ -272,8 +272,7 @@ llama_server:
   # Must match --slot-save-path passed to llama-server on Server 2
   slot_save_path: "/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v-caches/"
   # Number of parallel slots (must match --parallel N on llama-server).
-  # Gemma 4 + f16 KV + 110024 ctx: ~1,760 MiB per slot (4 global KV layers + 20 SWA layers at 512-window).
-  # New llama.cpp SWA-aware implementation: f16 uses same VRAM as old q8_0 but with better precision.
+  # Qwen3.5-4B Q6_K_XL + q8_0 KV + --jinja; 2 slots × 110024 ctx.
   num_slots: 2
   timeout_seconds: 120
 
@@ -292,7 +291,7 @@ chat:
 # litellm.completion_cost() returns 0.0 for local models (correct — no API cost).
 # This block is a placeholder for future electricity-cost estimates if needed.
 local_model_pricing:
-  gemma-4-e4b:
+  qwen3-4b:
     cost_per_million_input_tokens: 0.0    # no API cost
     cost_per_million_output_tokens: 0.0
-    notes: "Gemma 4 E4B 7.52B Q8_0 on RTX 5070; electricity cost not tracked"
+    notes: "Qwen3.5-4B Q6_K_XL on RTX 5070; electricity cost not tracked"

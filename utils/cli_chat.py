@@ -58,7 +58,7 @@ Commands:
   /help                 Show this help
   /new                  Start a new chat
   /model [name]         Show/switch external model (e.g., gpt4, claude; auto=default)
-  /internal             Switch to internal LLM (Gemma 4 on GPU)
+  /internal             Switch to internal LLM (Qwen3.5-4B on GPU)
   /cloud                Force next message to use cloud model
   /rag [on|off|only]    Set RAG mode (default: off)
   /rag status           Show RAG config (mode, user, top_k, Qdrant points)
@@ -219,23 +219,23 @@ class CLIChat:
             if not arg:
                 if self.model is None:
                     mode_info = "AUTO (router default: external/Sonnet)"
-                elif self.model in ("internal", "internal/gemma-4-e4b"):
-                    mode_info = "INTERNAL (Gemma 4 on GPU)"
+                elif self.model in ("internal", "internal/qwen3-4b"):
+                    mode_info = "INTERNAL (Qwen3.5-4B on GPU)"
                 else:
                     mode_info = f"EXTERNAL ({self.model})"
                 return f"  Current LLM mode: {mode_info}"
 
             if arg.lower() == "internal":
-                self.model = "internal/gemma-4-e4b"
-                return "  Switched to internal LLM (Gemma 4 on GPU)."
+                self.model = "internal/qwen3-4b"
+                return "  Switched to internal LLM (Qwen3.5-4B on GPU)."
             else:
                 # Assume any other argument is an external model name
                 self.model = arg if arg != "auto" else None
                 return f"  External model set to: {self.model or 'auto'}."
 
         elif command == "/internal":
-            self.model = "internal/gemma-4-e4b"
-            return "  Switched to internal LLM (Gemma 4 on GPU)."
+            self.model = "internal/qwen3-4b"
+            return "  Switched to internal LLM (Qwen3.5-4B on GPU)."
 
         elif command == "/cloud":
             self.force_cloud = True

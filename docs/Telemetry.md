@@ -2,8 +2,8 @@
 title: "SoHoAI Usage and Billing Telemetry Pipeline"
 created_at: 2026-05-06--00-00
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Haiku 4.5)
-updated_at: 2026-05-14--15-40
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-15--19-54
 context: >
   Cross-project design document for SoHoAI Stage 1 telemetry implementation.
   Goal: Add a complete usage and billing telemetry pipeline to SoHoAI so that
@@ -212,13 +212,13 @@ Google, etc.) and returns total cost in USD.
 
 ### Local models
 
-For local models (Gemma 4 / "internal"), `litellm.completion_cost()` returns 0.0
+For local models (Qwen3.5 / "internal"), `litellm.completion_cost()` returns 0.0
 (correct — no API charges). To shadow-cost local inference for internal
 accounting, add an optional `local_model_pricing` block to config.yaml:
 
 ```yaml
 local_model_pricing:
-  gemma-4-e4b:
+  qwen3-4b:
     input_per_1m_tokens: 0.0
     output_per_1m_tokens: 0.0
 ```
@@ -237,7 +237,7 @@ Log a WARNING-level message whenever `completion_cost()` returns 0.0 for a model
 that should not be free:
 
 ```python
-if cost_usd == 0.0 and response.model not in ['internal', 'gemma-4-e4b']:
+if cost_usd == 0.0 and response.model not in ['internal', 'qwen3-4b']:
   logger.warning(f"Zero cost returned for cloud model {response.model}; "
                  f"pricing may be outdated or model unknown to LiteLLM")
 ```
@@ -316,7 +316,7 @@ GET /v1/usage/stats?model=claude-sonnet-4-6&group_by=source
   },
   "by_model": [
     {"model": "claude-sonnet-4-6", "requests": 100, "input_tokens": 400000, "output_tokens": 80000, "cache_creation_tokens": 0, "cache_read_tokens": 0, "cost_usd": 1.00},
-    {"model": "gemma-4-e4b", "requests": 27, "input_tokens": 50280, "output_tokens": 9432, "cache_creation_tokens": 0, "cache_read_tokens": 0, "cost_usd": 0.0}
+    {"model": "qwen3-4b", "requests": 27, "input_tokens": 50280, "output_tokens": 9432, "cache_creation_tokens": 0, "cache_read_tokens": 0, "cost_usd": 0.0}
   ],
   "by_source": [
     {"source": "claude_code_native", "requests": 80, "input_tokens": 300000, "output_tokens": 60000, "cache_creation_tokens": 0, "cache_read_tokens": 0, "cost_usd": 0.75},
@@ -456,7 +456,7 @@ urgent pricing.yaml update is needed.
 
 | Model | Input | Output | Notes |
 |-------|-------|--------|-------|
-| gemma-4-e4b | $0.00 | $0.00 | Local inference; litellm.completion_cost() returns 0 (correct) |
+| qwen3-4b | $0.00 | $0.00 | Local inference; litellm.completion_cost() returns 0 (correct) |
 | internal (alias) | $0.00 | $0.00 | Fallback; treated as local |
 
 ### Notes

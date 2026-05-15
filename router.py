@@ -6,7 +6,7 @@ Routing strategy (post 2026-04-22 flip):
   2. If force_cloud flag → use cloud (kept for API compat; cloud is now default anyway)
   3. If message context is very long → use cloud (better context handling)
   4. Default → external (Sonnet 4.6, cloud); LiteLLM falls back to internal
-     (local Gemma via llama-server) if the external call fails.
+     (local Qwen3.5 via llama-server) if the external call fails.
 
 LiteLLM handles the actual fallback retries; this module decides
 the *starting point* and any pre-routing logic.
@@ -63,7 +63,7 @@ class SmartRouter:
             # Fallback: if external (cloud) fails, go to internal (local)
             fallbacks=[
                 {
-                    "anthropic/claude-sonnet-4-6": ["internal/gemma-4-e4b"],
+                    "anthropic/claude-sonnet-4-6": ["internal/qwen3-4b"],
                 }
             ],
             # Retry config
@@ -83,7 +83,7 @@ class SmartRouter:
                 _litellm.callbacks.append(self._usage_tracker)
 
         self.routing_config = self.config.get("routing", {})
-        self.default_model = self.routing_config.get("default_model", "internal/gemma-4-e4b")
+        self.default_model = self.routing_config.get("default_model", "internal/qwen3-4b")
         self.cloud_model = self.routing_config.get("cloud_model", "anthropic/claude-sonnet-4-6")
         self.complexity_threshold = self.routing_config.get(
             "complexity_threshold_tokens", 2000

@@ -3,7 +3,7 @@ title: "SoHoAI — Future work and deferred tasks"
 created_at: 2026-05-04--17-30
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-10--15-45
+updated_at: 2026-05-15--19-54
 context: >
   Tracks deferred implementation work that is understood, scoped, and intentionally
   left for a future session. Each entry includes the motivation, the known approach,
@@ -50,7 +50,7 @@ Required work in a future claude-orchestra branch:
 
 **CLIP model** (openai/clip-vit-base-patch32) on Server 2 GPU. Family photo ingestion → CLIP embeddings → separate Qdrant `images` collection (same Qdrant instance as `documents`). Text-to-image similarity search for family photo library.
 
-**RL training data pipeline**: export conversations with feedback signals (thumbs up/down on turns) as DPO-format JSONL for training with TRL framework. Goal: fine-tune a smaller local model (e.g. Gemma 4 E4B) on real family conversations to reduce API cost over time.
+**RL training data pipeline**: export conversations with feedback signals (thumbs up/down on turns) as DPO-format JSONL for training with TRL framework. Goal: fine-tune a smaller local model (e.g. Qwen3.5-4B or similar) on real family conversations to reduce API cost over time.
 
 ---
 
@@ -71,7 +71,7 @@ Required work in a future claude-orchestra branch:
    The conversion now preserves `tools`, `tool_use`, `tool_result`, and `cache_control` markers.
 
    Affected models (all five):
-   - `internal/gemma-4-e4b` → llama-server (Server 2)
+   - `internal/qwen3-4b` → llama-server (Server 2)
    - `ollama-cloud/deepseek-v4-pro`, `ollama-cloud/kimi-k2.6`, `ollama-cloud/glm-5.1`,
      `ollama-cloud/qwen3-coder-next` → Ollama cloud (`https://ollama.com/v1`)
 
@@ -183,7 +183,7 @@ data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta"
 
 Once the conversion was implemented, reliability per model is now being validated:
 
-- **`internal/gemma-4-e4b`**: llama-server exposes the OpenAI tools API; Gemma 4 E4B
+- **`internal/qwen3-4b`**: llama-server exposes the OpenAI tools API; Qwen3.5-4B
   has instruction-following capability but complex multi-tool JSON output reliability is
   **informational-only in this session**. May need grammar-constrained generation (`--grammar`)
   or prompt engineering if unreliable in practice. See deferred entry (a) below.
@@ -194,24 +194,24 @@ Once the conversion was implemented, reliability per model is now being validate
 
 ---
 
-## Tool-use deferred: internal/gemma-4-e4b broader reliability verification
+## Tool-use deferred: internal/qwen3-4b broader reliability verification
 
-**Synthetic smoke status (2026-05-10):** PASS on both streaming and non-streaming legs of `utils/tool_use_smoke_test.py`. Gemma 4 E4B Q8_0 produced a well-formed `tool_use(get_file_size, path="/etc/hostname")` on turn 1 and used the synthetic `"42"` tool_result correctly on turn 2. Grammar-constrained generation (deferred Step c) is therefore **not required for the simple single-tool case**.
+**Synthetic smoke status (2026-05-10):** PASS on both streaming and non-streaming legs of `utils/tool_use_smoke_test.py` with Gemma 4 E4B. Qwen3.5-4B replaced Gemma 4 E4B on 2026-05-15 — tool-use validation carried over to the new model. Initial validation needed with Qwen3.5-4B to match Gemma's baseline.
 
 ### Background / rationale
 
-The synthetic smoke harness exercises a single, simple tool with one string argument. Real Claude Code subagent traffic is more demanding: multi-tool catalogues (Read/Write/Bash/Glob/Grep/Edit/TodoWrite/Agent), parallel tool calls, deeply-nested JSON arguments, multi-turn tool chains, and 10K+ token system prompts. Gemma 4 E4B at Q8_0 may degrade on those workloads even though it handles the smoke. Without broader validation we cannot recommend `internal/gemma-4-e4b` as an Actor-tier subagent in claude-orchestra.
+The synthetic smoke harness exercises a single, simple tool with one string argument. Real Claude Code subagent traffic is more demanding: multi-tool catalogues (Read/Write/Bash/Glob/Grep/Edit/TodoWrite/Agent), parallel tool calls, deeply-nested JSON arguments, multi-turn tool chains, and 10K+ token system prompts. Qwen3.5-4B may degrade on those workloads even though a predecessor passed smoke. Without broader validation we cannot recommend `internal/qwen3-4b` as an Actor-tier subagent in claude-orchestra.
 
 ### Goal
 
-Validate Gemma's tool-call reliability on representative claude-orchestra workloads (full Claude Code tool catalogue, multi-turn, parallel calls) before recommending it for any Actor-tier or research-tier subagent. If reliability holds, fold Gemma into the recommended-models list in `docs/Model-routing.md §3`. If it degrades, scope grammar-constrained generation (Step c) precisely against the failure modes observed.
+Validate Qwen3.5's tool-call reliability on representative claude-orchestra workloads (full Claude Code tool catalogue, multi-turn, parallel calls) before recommending it for any Actor-tier or research-tier subagent. If reliability holds, fold Qwen into the recommended-models list in `docs/Model-routing.md §3`. If it degrades, scope grammar-constrained generation (Step c) precisely against the failure modes observed.
 
 ### What needs to be done
 
-1. Configure a non-trivial claude-orchestra subagent (e.g. a research-tier explore agent) to use `model: internal/gemma-4-e4b` in its frontmatter. Run a full `/duo` or `/brain` session against a real (not synthetic) task that requires Read/Glob/Grep/Bash.
-2. Capture: (a) tool-call success rate, (b) any malformed `arguments` JSON observed, (c) latency per turn, (d) whether the model hits the 110024-token slot context window faster than expected.
-3. Re-run with a multi-tool prompt that should provoke parallel tool calls. Record whether Gemma serializes (good) or attempts and fails parallelism (bad).
-4. If reliability ≥ 95 % across (1)-(3): update `docs/Model-routing.md §3` to drop the "unvalidated" qualifier, add Gemma to the recommended-Actor list with cost ≈ $0, and mark this entry complete. If reliability < 95 %: enumerate the failure classes observed and use them to scope Step c (grammar-constrained generation) precisely instead of speculatively.
+1. Configure a non-trivial claude-orchestra subagent (e.g. a research-tier explore agent) to use `model: internal/qwen3-4b` in its frontmatter. Run a full `/duo` or `/brain` session against a real (not synthetic) task that requires Read/Glob/Grep/Bash.
+2. Capture: (a) tool-call success rate, (b) any malformed `arguments` JSON observed, (c) latency per turn, (d) whether the model hits context window limits faster than expected.
+3. Re-run with a multi-tool prompt that should provoke parallel tool calls. Record whether Qwen serializes (good) or attempts and fails parallelism (bad).
+4. If reliability ≥ 95 % across (1)-(3): update `docs/Model-routing.md §3` to drop the "unvalidated" qualifier, add Qwen to the recommended-Actor list with cost ≈ $0, and mark this entry complete. If reliability < 95 %: enumerate the failure classes observed and use them to scope Step c (grammar-constrained generation) precisely instead of speculatively.
 
 ---
 
@@ -223,11 +223,11 @@ Validate Gemma's tool-call reliability on representative claude-orchestra worklo
 
 **Parallel tool calls — DONE.** `utils/tool_use_smoke_test.py --parallel` added and run successfully with 3 simultaneous tools (`get_file_size`, `get_file_owner`, `get_file_permissions`). Results:
 - All 4 ollama-cloud models (`qwen3-coder-next`, `deepseek-v4-pro`, `kimi-k2.6`, `glm-5.1`): **PASS** on both streaming and non-streaming legs.
-- `internal/gemma-4-e4b`: **INFO/FAIL** (returns 1 `tool_use` block not 3; non-gating — Gemma serializes rather than parallelizes, expected for a local 7B model).
+- `internal/qwen3-4b`: **NOT YET TESTED** (Qwen3.5 replaced Gemma 4 E4B 2026-05-15; tool-use validation pending).
 
 ### Remaining open item
 
-**Real claude-orchestra Actor session** — A synthetic harness cannot replicate actual Claude Code sub-agent traffic: the full tool catalogue (Read/Write/Edit/Bash/Glob/Grep/TodoWrite/Agent), deeply-nested JSON arguments, multi-turn tool chains, and 10K+ token system prompts. No real `/duo` or `/brain` session has been run with an ollama-cloud model as Actor.
+**Real claude-orchestra Actor session** — A synthetic harness cannot replicate actual Claude Code sub-agent traffic: the full tool catalogue (Read/Write/Edit/Bash/Glob/Grep/TodoWrite/Agent), deeply-nested JSON arguments, multi-turn tool chains, and 10K+ token system prompts. No real `/duo` or `/brain` session has been run with the local model (Qwen3.5-4B) or any ollama-cloud model as Actor.
 
 ### Goal
 
@@ -235,10 +235,9 @@ Run at least one real `/duo` or `/brain` session with an ollama-cloud model (e.g
 
 ### What needs to be done
 
-1. Configure a claude-orchestra sub-agent (actor or research-explore) with `model: ollama-cloud/qwen3-coder-next` in its frontmatter.
-2. Run a `/duo` or `/brain` session against a real task that requires Read/Glob/Grep/Bash (e.g. a small refactor or codebase exploration task).
-3. Record: (a) tool-call success rate, (b) any malformed `arguments` JSON, (c) latency per turn, (d) whether multi-turn tool chains complete correctly.
-4. If reliability ≥ 95 %: update `docs/Model-routing.md §4.3` to remove the "remaining open item" note and mark this entry complete. If reliability < 95 %: document failure classes and open a targeted follow-up.
+1. Configure a claude-orchestra sub-agent (actor or research-explore) with `model: internal/qwen3-4b` in its frontmatter. Run a full `/duo` or `/brain` session against a real task that requires Read/Glob/Grep/Bash (e.g. a small refactor or codebase exploration task).
+2. Record: (a) tool-call success rate, (b) any malformed `arguments` JSON, (c) latency per turn, (d) whether multi-turn tool chains complete correctly.
+3. If reliability ≥ 95 %: update `docs/Model-routing.md §4.3` to remove the "remaining open item" note and mark this entry complete. If reliability < 95 %: document failure classes and open a targeted follow-up.
 
 ---
 
@@ -251,7 +250,7 @@ Run at least one real `/duo` or `/brain` session with an ollama-cloud model (e.g
 - `{"type":"image","source":{"type":"url","url":"<url>"}}` → `{"type":"image_url","image_url":{"url":"<url>"}}`
 
 However, no vision-capable model is available in the current stack:
-- `internal/gemma-4-e4b`: text-only, no mmproj or vision encoder
+- `internal/qwen3-4b`: text-only, no mmproj or vision encoder
 - `ollama-cloud/*`: currently text-only SKUs; Ollama may offer vision SKUs in the future
 - `anthropic/claude-*`: not on the LiteLLM path, so not affected by this conversion
 
@@ -263,7 +262,7 @@ Validate that image-block conversion and forwarding work correctly when a vision
 
 ### What needs to be done
 
-1. Provision Gemma 4 with multimodal support (e.g. llama.cpp with a compatible CLIP/SigLIP mmproj and Server 2 GPU)
+1. Provision Qwen3.5 or similar with multimodal support (e.g. llama.cpp with a compatible CLIP/SigLIP mmproj and Server 2 GPU)
    or wait for an Ollama cloud vision SKU.
 2. Add a smoke leg to `tool_use_smoke_test.py` that sends a small test image (e.g. a 32×32 PNG with a recognizable pattern)
    and a prompt asking the model to describe its contents.
@@ -272,26 +271,26 @@ Validate that image-block conversion and forwarding work correctly when a vision
 
 ---
 
-## Tool-use deferred: grammar-constrained generation fallback for Gemma
+## Tool-use deferred: grammar-constrained generation fallback for Qwen3.5
 
-**Status (2026-05-10):** **likely unnecessary**, gated on the broader reliability check above. The synthetic smoke (single tool, one argument) passed on Gemma without any grammar constraint. Only revisit if Step (a)'s broader workload validation shows malformed `arguments` JSON or wrong tool selection. Keeping the entry for traceability.
+**Status (2026-05-15):** **likely unnecessary**, gated on the broader reliability check above. Predecessor (Gemma 4 E4B) passed synthetic smoke without any grammar constraint. Only revisit if Qwen3.5's broader workload validation (Step 13 in this section above) shows malformed `arguments` JSON or wrong tool selection. Keeping the entry for traceability.
 
 ### Background / rationale
 
-If Step (a)'s broader validation shows Gemma 4 E4B produces malformed tool-call JSON at Q8_0 on real workloads, grammar-constrained generation is a proven technique to enforce valid JSON output. LiteLLM and llama.cpp both support the `--grammar` parameter (GBNF format). This would be a targeted fallback: only applied to `internal/gemma-4-e4b` when the request includes `tools`.
+If Qwen3.5's broader validation shows malformed tool-call JSON on real workloads, grammar-constrained generation is a proven technique to enforce valid JSON output. LiteLLM and llama.cpp both support the `--grammar` parameter (GBNF format). This would be a targeted fallback: only applied to `internal/qwen3-4b` when the request includes `tools`.
 
 Implementation cost: ~15–20 lines in the `kv_cache.py` native llama-server path to inject a grammar parameter into the `/completion` request; ~10 lines to define or fetch the JSON grammar spec.
 
 ### Goal
 
-ONLY if Step (a) shows real-workload failures, implement grammar-constrained generation to bring Gemma to ≥ 95 % tool-call reliability. Skip this work entirely if Step (a) passes.
+ONLY if Qwen3.5's real-workload validation shows failures, implement grammar-constrained generation to bring it to ≥ 95 % tool-call reliability. Skip this work entirely if validation passes.
 
 ### What needs to be done
 
-1. Confirm from Step (a) above that broader-workload Gemma reliability is < 95 % (synthetic-smoke pass alone is NOT a trigger).
+1. Confirm from the broader workload validation above that Qwen3.5 reliability is < 95 % (synthetic-smoke pass alone is NOT a trigger).
 2. Obtain or generate a GBNF grammar for the OpenAI function-calling JSON schema (tools + arguments structure).
 3. Modify `kv_cache.py` `_call_native_llama()` to inject `grammar: <spec>` into the llama-server `/completion` request when `model.startswith("internal/")` and the request includes `tools`.
-4. Re-run the broader workload validation from Step (a); assert Gemma now produces valid JSON on all tool calls.
+4. Re-run the broader workload validation; assert Qwen3.5 now produces valid JSON on all tool calls.
 5. Measure inference latency impact (grammar can add 5–20% overhead); document findings.
 
 ---
@@ -333,7 +332,7 @@ injecting `[ERROR]` prefix into the text.
 
 Different providers may respond differently to this `[ERROR]` prefix. For example:
 - Ollama cloud models may recognize the prefix and adjust their error recovery behavior.
-- llama-server (Gemma) may not have special handling and just treats it as literal text.
+- llama-server (Qwen3.5) may not have special handling and just treats it as literal text.
 
 Currently the behavior is undocumented.
 
@@ -345,7 +344,7 @@ Validate that the `[ERROR]` prefix is handled sensibly by each provider and docu
 
 1. Craft a two-turn scenario: Turn 1 calls a hypothetical tool; Turn 2 returns an error result marked with `is_error: true`
    (which becomes `[ERROR] tool failed` in the content string).
-2. Send to each target model (`ollama-cloud/qwen3-coder-next`, `ollama-cloud/deepseek-v4-pro`, `internal/gemma-4-e4b`).
+2. Send to each target model (`ollama-cloud/qwen3-coder-next`, `ollama-cloud/deepseek-v4-pro`, `internal/qwen3-4b`).
 3. Observe and document: does the model recognize the error flag? Does it retry the tool call or adjust its response?
 4. If a model completely ignores error signals, consider injecting a more verbose error message in the system prompt
    or as a separate user message context.

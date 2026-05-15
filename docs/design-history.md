@@ -3,7 +3,7 @@ title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-15--13-30
+updated_at: 2026-05-15--19-54
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -439,6 +439,39 @@ Changed `_backoff_timeouts = [30, 60, 90]` → `[60, 90, 120]` in `router.py`.
 |------|--------|
 | `router.py` | `_backoff_timeouts = [60, 90, 120]`; updated comment |
 | `docs/Model-routing.md` | §2.3 timeout table updated; note added explaining the correction |
+
+---
+
+## 2026-05-15 — Local inference model swap: Gemma 4 E4B → Qwen3.5-4B
+
+### Motivation
+
+Qwen3.5-4B-UD-Q6_K_XL targeted as drop-in local replacement for Haiku-4.5 in Claude Orchestra actor sub-agent role. Gemma4 E4B tool-use reliability was unvalidated; Qwen3.5 offers stronger instruction-following and standardized ChatML format compatible with llama.cpp `--jinja`.
+
+### Changes
+
+**Model file**: `google_gemma-4-E4B-it-Q8_0.gguf` → `Qwen3.5-4B-UD-Q6_K_XL.gguf`
+
+**llama-server**:
+- Added `--jinja` (ChatML template parsing)
+- Changed `--cache-type-k/v f16` → `q8_0` (8-bit KV quantization)
+- Removed `--cache-ram 0` (allows offload to system RAM if needed)
+
+**Chat template**: `apply_gemma_template()` (Gemma `<|turn>` markers) → `apply_qwen3_template()` (ChatML `<|im_start|>/<|im_end|>`)
+
+**Stop token**: `<|turn>` → `<|im_end|>`
+
+**Model aliases**:
+- `internal/gemma-4-e4b` → `internal/qwen3-4b`
+- `openai/gemma4` → `openai/qwen3-4b`
+
+**KV cache**: `.bin` files purged (format incompatible across models)
+
+**VRAM**: ~9.3 GB (Gemma4 f16) → ~6 GB estimated (Qwen3.5 q8_0, not yet measured)
+
+### Tool-use validation
+
+Pending smoke test against live server.
 
 ---
 

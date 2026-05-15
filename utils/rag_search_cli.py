@@ -38,7 +38,7 @@ async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
                     "http://192.168.1.95:8000/v1/chat/completions",
-                    json={"model": "gemma4", "messages": [{"role": "user", "content": prompt}],
+                    json={"model": "qwen3-4b", "messages": [{"role": "user", "content": prompt}],
                           "max_tokens": 150, "temperature": 0.4},
                 )
                 resp.raise_for_status()
@@ -112,7 +112,7 @@ def main() -> None:
     parser.add_argument("--score-threshold", type=float, default=0.0, metavar="FLOAT",
                         help="Minimum cosine score to include (0=no filter, e.g. 0.50)")
     parser.add_argument("--multi-query", action="store_true",
-                        help="Enable multi-query expansion + MMR reranking (uses internal Gemma)")
+                        help="Enable multi-query expansion + MMR reranking (uses internal Qwen3.5)")
     parser.add_argument("--no-rerank", action="store_true",
                         help="Disable cross-encoder reranking (use Qdrant cosine order only)")
     args = parser.parse_args()

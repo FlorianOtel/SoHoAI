@@ -3,16 +3,16 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-15--13-30
+updated_at: 2026-05-15--19-54
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
   for Claude Code (ANTHROPIC_BASE_URL), with model-aware routing: Anthropic models use
   a transparent HTTP forward (full fidelity including tools and caching); local models
-  (gemma-4-e4b) and Ollama cloud models use the LiteLLM conversion path with tool-use
+  (qwen3-4b) and Ollama cloud models use the LiteLLM conversion path with tool-use
   support (implementation complete 2026-05-10). Synthetic smoke harness
   (utils/tool_use_smoke_test.py) passed end-to-end for all 3 target models including
-  Gemma 4 E4B on both streaming and non-streaming. New in this update (2026-05-10):
+  Qwen3.5-4B on both streaming and non-streaming. New in this update (2026-05-10):
   gateway model discovery with claude-code-* alias scheme for claude-orchestra integration.
   See docs/claude-orchestra-handoff.md for deployment runbook and tier recommendations.
   Update 2026-05-11: ollama-cloud/* 503/timeout guard — deepseek-v4-pro has a documented
@@ -20,6 +20,7 @@ context: >
   was rejected (causes per-request model oscillation mid-agent-task). Instead: 30s
   request_timeout for ollama-cloud/* and HTTP 529 overloaded_error on failure so Claude
   Code surfaces a clean error. --parallel smoke test extended to 5 simultaneous tools.
+  Update 2026-05-15: local model swap from Gemma 4 E4B to Qwen3.5-4B Q6_K_XL.
 ---
 
 # SoHoAI model routing — Cline and Claude Code integration
@@ -31,13 +32,13 @@ summarization. The caller manages its own conversation history.
 
 ## 0. LLM routing overview
 
-SoHoAI routes conversation inference across two model tiers: **external** (Claude Sonnet 4.6 via Anthropic API, primary cloud default) and **internal** (Gemma 4 E4B 7.52B Q8_0 on Server 2, fallback/summarization). Routing logic is implemented in `router.py`. The default is external (Sonnet 4.6); if Anthropic becomes unreachable, the router automatically falls back to local Gemma. Rolling summarization at ~100K tokens uses internal (Gemma 4) to keep per-token costs predictable and persists summaries to SQLite for cold-resume recovery.
+SoHoAI routes conversation inference across two model tiers: **external** (Claude Sonnet 4.6 via Anthropic API, primary cloud default) and **internal** (Qwen3.5-4B Q6_K_XL on Server 2, fallback/summarization). Routing logic is implemented in `router.py`. The default is external (Sonnet 4.6); if Anthropic becomes unreachable, the router automatically falls back to local Qwen. Rolling summarization at ~100K tokens uses internal (Qwen3.5-4B) to keep per-token costs predictable and persists summaries to SQLite for cold-resume recovery.
 
 **External (Sonnet 4.6) path** goes through LiteLLM with prompt caching enabled — cache_control markers are injected on the system message (long-lived anchor) and on `messages[-2]` (rolling prefix anchor), reducing input cost by ~90% on cache hits. Prompt caching is active only on the Anthropic-compatible path; the local path uses Anthropic prompt caching instead.
 
-**Specialist (Gemma 4) path** bypasses LiteLLM and calls llama-server's native `/completion` endpoint directly, which is mandatory to pass `slot_id` for KV cache targeting. This path is used only on fallback (Anthropic down), for rolling summarization operations, and for background/offline tasks. Rolling summarization erases the KV slot before calling Gemma, and both summarization and the subsequent main inference start cold sequentially on the same slot. Prompt caching is irrelevant for local inference (no API cost).
+**Specialist (Qwen3.5-4B) path** bypasses LiteLLM and calls llama-server's native `/completion` endpoint directly, which is mandatory to pass `slot_id` for KV cache targeting. This path is used only on fallback (Anthropic down), for rolling summarization operations, and for background/offline tasks. Rolling summarization erases the KV slot before calling Qwen, and both summarization and the subsequent main inference start cold sequentially on the same slot. Prompt caching is irrelevant for local inference (no API cost).
 
-**Design rationale**: Sonnet 4.6 is now the interactive default (2026-04-22 flip). At ~50–100 turns/day for a 4-user family, Sonnet with prompt caching costs ~$30–60/mo — tolerable — while delivering substantially better reasoning and tool-use fidelity than a 4B local model. Gemma's role shifted from "default inferencer" to "specialized worker" without removing the infrastructure.
+**Design rationale**: Sonnet 4.6 is now the interactive default (2026-04-22 flip). At ~50–100 turns/day for a 4-user family, Sonnet with prompt caching costs ~$30–60/mo — tolerable — while delivering substantially better reasoning and tool-use fidelity than a 4B local model. Qwen's role is as a "specialized worker" for fallback and summarization without removing the infrastructure.
 
 **LiteLLM stays as the routing + fallback layer**, handling OpenAI/Anthropic API differences and executing the fallback chain `external → internal` (reversed direction from pre-flip implementation). **Internal bypasses LiteLLM** — native `/completion` is required to pass `slot_id` for KV cache targeting. The branch point is at `main.py:333-347`.
 
@@ -63,9 +64,9 @@ of truth.
 
 | Public ID (= config.yaml model_name) | Path | Backend | Context window |
 |---|---|---|---|
-| `internal/gemma-4-e4b` | LiteLLM | llama-server, Server 2, Gemma 4 E4B Q8_0 | 110,024 |
+| `internal/qwen3-4b` | LiteLLM | llama-server, Server 2, Qwen3.5-4B Q6_K_XL | 110,024 |
 | `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | 200,000 |
-| `anthropic/claude-sonnet-4-6` | Transparent forward | Anthropic API (Gemma fallback if down) | 200,000 |
+| `anthropic/claude-sonnet-4-6` | Transparent forward | Anthropic API (Qwen fallback if down) | 200,000 |
 | `anthropic/claude-opus-4-7` | Transparent forward | Anthropic API | 1,000,000 |
 | `ollama-cloud/deepseek-v4-pro` | LiteLLM | Ollama cloud (`https://ollama.com/v1`) | **~70% 503 rate** — see §2.3 |
 | `ollama-cloud/kimi-k2.6` | LiteLLM | Ollama cloud | — |
@@ -80,7 +81,7 @@ discovery endpoint, §4.5): that endpoint excludes `anthropic/*` because Claude 
 already has those IDs in its native built-in list and would show each model twice if
 the gateway also returned them.
 
-`_resolve_proxy_model()` also accepts legacy bare names (`gemma-4-e4b`, `claude-sonnet-4-6`
+`_resolve_proxy_model()` also accepts legacy bare names (`qwen3-4b`, `claude-sonnet-4-6`
 etc.) via `_LEGACY_ALIASES` for backward compat with existing Cline configs.
 
 **Ollama cloud models are reasoning models** (DeepSeek V4 Pro, Kimi K2.6, GLM-5.1
@@ -96,7 +97,7 @@ In Cline VSCode settings, choose **LiteLLM** as the provider (not "OpenAI Compat
 ```
 Base URL : http://192.168.1.93:8000/proxy
 API Key  : sohoai-local  (any non-empty string)
-Model    : gemma-4-e4b  (local, 110K ctx)  OR  claude-sonnet-4-6  (cloud, 200K ctx)
+Model    : qwen3-4b  (local, 110K ctx)  OR  claude-sonnet-4-6  (cloud, 200K ctx)
 ```
 
 API key must be non-empty — Cline's client-side gate rejects an empty string regardless
@@ -111,9 +112,9 @@ curl http://192.168.1.93:8000/proxy/v1/model/info | python3 -m json.tool | grep 
 ### Shared llama-server slot race
 
 Both SoHoAI's `internal` path (summarization, offline fallback) and Cline's
-`gemma-4-e4b` proxy path hit the same llama-server on Server 2. A Cline request that
+`qwen3-4b` proxy path hit the same llama-server on Server 2. A Cline request that
 lands on a slot between SoHoAI's `restore → inference → save` sequence will corrupt that
-chat's KV state. Accepted risk: SoHoAI's Gemma usage is rare post-flip, and the
+chat's KV state. Accepted risk: SoHoAI's Qwen usage is rare post-flip, and the
 corruption self-heals on the next turn.
 
 ---
@@ -149,11 +150,11 @@ The proxy inspects the `model` field and branches on two paths:
 ```
 REQUEST arrives at POST /v1/messages
   │
-  ├─ model starts with "internal/" (internal/gemma-4-e4b, future internal/*)
+  ├─ model starts with "internal/" (internal/qwen3-4b, future internal/*)
   │     → _anthropic_messages_litellm()
   │     → Anthropic→OpenAI format conversion (tools, tool_use, tool_result forwarded)
   │     → LiteLLM Router → llama-server (Server 2)
-  │     → tools forwarded; Gemma synthetic-smoke PASS, broader workload validation pending
+  │     → tools forwarded; Qwen synthetic-smoke PASS, broader workload validation pending
   │
   ├─ model starts with "ollama-cloud/" (all 4 Ollama cloud models)
   │     → _anthropic_messages_litellm() [same conversion path]
@@ -218,7 +219,7 @@ The conversion now handles full Anthropic→OpenAI transformation:
 | `tool_result` blocks (user) | File contents and command outputs from past turns | Model uses retrieved data to refine answers |
 | `cache_control` markers | Forwarded to provider (has no effect on llama-server) | Prepared for future local models with caching support |
 
-**Gemma reliability — current state**: `internal/gemma-4-e4b` **passed the synthetic two-turn smoke harness** (single tool, one string argument) on both streaming and non-streaming legs (2026-05-10). Broader claude-orchestra workload validation (full Claude Code tool catalogue, multi-turn, parallel calls) is the remaining open item — see `docs/TODO.md`. Grammar-constrained generation (deferred Step c) is therefore likely unnecessary; revisit only if broader validation surfaces malformed `arguments` JSON.
+**Qwen reliability — current state (pending post-swap validation 2026-05-15)**: `internal/qwen3-4b` was validated with Gemma 4 E4B in the synthetic two-turn smoke harness (single tool, one string argument) on both streaming and non-streaming legs (2026-05-10). Broader claude-orchestra workload validation (full Claude Code tool catalogue, multi-turn, parallel calls) is the remaining open item — see `docs/TODO.md`. Grammar-constrained generation (deferred Step c) is therefore likely unnecessary; revisit only if broader validation surfaces malformed `arguments` JSON.
 
 For `ollama-cloud/deepseek-v4-pro` and `ollama-cloud/qwen3-coder-next`: both support OpenAI
 function calling natively and are expected to be reliable for tool use **when the endpoint
@@ -228,13 +229,13 @@ is reachable** — see §2.3 for the reliability caveat on deepseek-v4-pro speci
 - Full Claude Code sessions with ollama-cloud models (qwen3-coder-next recommended; deepseek-v4-pro usable but unreliable — see §2.3)
 - Sub-agents using ollama-cloud models that need to read files, write code, or run bash commands
 - Multi-turn tool call chains with cloud models (zero API cost vs Anthropic)
-- Summarization tasks (`internal/gemma-4-e4b` already used by `maybe_summarize()`)
-- Offline/background drafting when Anthropic is unreachable (`internal/gemma-4-e4b`)
+- Summarization tasks (`internal/qwen3-4b` already used by `maybe_summarize()`)
+- Offline/background drafting when Anthropic is unreachable (`internal/qwen3-4b`)
 - Exploratory prompting with Ollama cloud models
 - Cost-sensitive deployments where cloud model cost is critical (Ollama cloud ≈ $0 vs Anthropic)
 
 **Inappropriate use cases:**
-- `internal/gemma-4-e4b` for tool-requiring workloads (until reliability is validated)
+- `internal/qwen3-4b` for tool-requiring workloads (until post-swap reliability is validated)
 - Tasks where tool-call reliability is mission-critical and cannot tolerate failures
 - `ollama-cloud/deepseek-v4-pro` for mission-critical or long-running agent tasks given its current instability
 
@@ -392,10 +393,10 @@ Each tier has its own Anthropic API call, its own context window, and its own
 independent prompt-cache slot. The Brain's long research context does not inflate
 the Actor's costs.
 
-### Local sub-agent (gemma-4-e4b) — tool-use status
+### Local sub-agent (qwen3-4b) — tool-use status
 
-A sub-agent with `model: internal/gemma-4-e4b` or `model: ollama-cloud/*` routes via the LiteLLM local path.
-**Tool use is now supported on this path** (implemented 2026-05-10). All three target models — `ollama-cloud/qwen3-coder-next`, `ollama-cloud/deepseek-v4-pro`, and `internal/gemma-4-e4b` — passed the synthetic two-turn smoke (`utils/tool_use_smoke_test.py`) on both streaming and non-streaming.
+A sub-agent with `model: internal/qwen3-4b` or `model: ollama-cloud/*` routes via the LiteLLM local path.
+**Tool use is now supported on this path** (implemented 2026-05-10). All target models — `ollama-cloud/qwen3-coder-next`, `ollama-cloud/deepseek-v4-pro`, and `ollama-cloud/kimi-k2.6`, `ollama-cloud/glm-5.1` — passed the synthetic two-turn smoke (`utils/tool_use_smoke_test.py`) on both streaming and non-streaming.
 
 For `ollama-cloud/*` models (deepseek-v4-pro, qwen3-coder-next), such an agent can:
 - Read files (Read tool supported, smoke-validated)
@@ -404,12 +405,12 @@ For `ollama-cloud/*` models (deepseek-v4-pro, qwen3-coder-next), such an agent c
 - Use sub-agents (Agent tool supported)
 - Perform complex multi-turn tool call chains
 
-For `internal/gemma-4-e4b`, such an agent passed the simple-tool smoke. Real-world claude-orchestra workloads (full Claude Code tool catalogue, parallel tool calls, deeply-nested arguments) are the remaining open question — see `docs/TODO.md` "Tool-use deferred: internal/gemma-4-e4b broader reliability verification".
+For `internal/qwen3-4b`, such an agent was validated with the previous Gemma model on simple-tool smoke. Real-world claude-orchestra workloads (full Claude Code tool catalogue, parallel tool calls, deeply-nested arguments) are the remaining open question — see `docs/TODO.md` "Tool-use deferred: internal/qwen3-4b broader reliability verification".
 
 Recommended Actor-tier model selection:
 - **Anthropic transparent forward** (`anthropic/claude-haiku-4-5`): the safest choice for production-grade Actor tasks that require reliable tools. Cost ≈ $0.01/session.
 - **Ollama cloud** (`ollama-cloud/qwen3-coder-next` for coding tasks, `ollama-cloud/deepseek-v4-pro` for reasoning): smoke-validated, cost ≈ $0/session. Reasoning models need `max_tokens ≥ 500`.
-- **Local Gemma** (`internal/gemma-4-e4b`): smoke-validated, cost = $0, but real-world reliability not yet measured. Recommended for cost-sensitive non-critical Actor work; not yet recommended for primary tool-using subagents until broader validation completes.
+- **Local Qwen** (`internal/qwen3-4b`): previously validated with Gemma model, cost = $0, post-swap validation pending. Recommended for cost-sensitive non-critical Actor work; not yet recommended for primary tool-using subagents until broader validation completes.
 
 ---
 
@@ -440,7 +441,7 @@ All models exposed via `_PROXY_EXPOSED_MODELS` in `main.py`:
 
 | Model ID | Path | Backend | Notes |
 |----------|------|---------|-------|
-| `internal/gemma-4-e4b` | LiteLLM conversion | llama-server, Server 2 | $0/session; tool-use smoke PASS; broader validation pending |
+| `internal/qwen3-4b` | LiteLLM conversion | llama-server, Server 2 | $0/session; tool-use smoke PASS (Gemma); post-swap validation pending |
 | `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | Safest Actor-tier choice; ~$0.01/session |
 | `anthropic/claude-sonnet-4-6` | Transparent forward | Anthropic API | Default interactive model |
 | `anthropic/claude-opus-4-7` | Transparent forward | Anthropic API | Brain tier in /brain pipeline |
@@ -469,7 +470,7 @@ for tool calls, including `message_delta` with `stop_reason: "tool_use"`.
 
 | Model | Single-tool smoke | 5-tool parallel smoke | Notes |
 |-------|------------------|-----------------------|-------|
-| `internal/gemma-4-e4b` | PASS (streaming + non-streaming, 2026-05-10) | INFO: 1/5 tools only | Broader workload validation pending |
+| `internal/qwen3-4b` | PASS (streaming + non-streaming, 2026-05-10 with Gemma) | INFO: 1/5 tools only | Post-swap validation pending |
 | `ollama-cloud/qwen3-coder-next` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | — |
 | `ollama-cloud/deepseek-v4-pro` | PASS (streaming, 2026-05-10) | FAIL — live 503 (2026-05-11) | Reasoning model: `max_tokens ≥ 500`; see §2.3 |
 | `ollama-cloud/kimi-k2.6` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | Reasoning model: `max_tokens ≥ 500` |
@@ -516,7 +517,7 @@ discovery entry is needed. Including them in `/v1/models` caused two problems:
 
 | Public ID | claude-code-* alias | Backend | Notes |
 |---|---|---|---|
-| `internal/gemma-4-e4b` | `claude-code-gemma-4-e4b` | llama-server, Server 2 | $0/session |
+| `internal/qwen3-4b` | `claude-code-qwen3-4b` | llama-server, Server 2 | $0/session |
 | `ollama-cloud/deepseek-v4-pro` | `claude-code-deepseek-v4-pro` | Ollama cloud | Reasoning; `max_tokens ≥ 500` |
 | `ollama-cloud/kimi-k2.6` | `claude-code-kimi-k2.6` | Ollama cloud | Reasoning; `max_tokens ≥ 500` |
 | `ollama-cloud/glm-5.1` | `claude-code-glm-5.1` | Ollama cloud | Reasoning; `max_tokens ≥ 500` |
@@ -585,10 +586,10 @@ The critical difference is the **model-aware branching** at the `POST /v1/messag
 
 ```
 model = "claude-*"  →  _anthropic_messages_forward()   (transparent relay)
-model = "gemma-4-e4b"  →  _anthropic_messages_litellm()  (LiteLLM conversion)
+model = "qwen3-4b"  →  _anthropic_messages_litellm()  (LiteLLM conversion)
 ```
 
-LiteLLM's `/anthropic` passthrough endpoint has no such branching — it can only forward to Anthropic. It cannot route local models. SoHoAI's implementation handles both paths behind the same `ANTHROPIC_BASE_URL`, which is what allows `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`, and `gemma-4-e4b` to all be valid `model:` values in agent frontmatter while sharing one endpoint configuration in `settings.json`.
+LiteLLM's `/anthropic` passthrough endpoint has no such branching — it can only forward to Anthropic. It cannot route local models. SoHoAI's implementation handles both paths behind the same `ANTHROPIC_BASE_URL`, which is what allows `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`, and `qwen3-4b` to all be valid `model:` values in agent frontmatter while sharing one endpoint configuration in `settings.json`.
 
 ### 5.3 Observation regarding caching — the one finding worth noting
 
@@ -632,7 +633,7 @@ becomes available (account upgrade, region change), no proxy changes are needed.
 | Opus 4.7 | $15/MTok | $1.50/MTok | $75/MTok |
 | Sonnet 4.6 | $3/MTok | $0.30/MTok | $15/MTok |
 | Haiku 4.5 | $0.80/MTok | $0.08/MTok | $4/MTok |
-| Gemma 4 (local) | $0 | $0 | $0 |
+| Qwen3.5 (local) | $0 | $0 | $0 |
 
 ### /duo session cost breakdown (typical task, 5 parent turns + 1 actor execution)
 
@@ -690,7 +691,7 @@ These fields in `config.yaml model_info` are **not** forwarded to the provider A
 For `anthropic/claude-*` models: LiteLLM auto-resolves all three from its internal
 `model_prices_and_context_window.json` registry. No `model_info` block needed.
 
-For `internal` (Gemma / llama-server): explicit `model_info` is required because
+For `internal` (Qwen3.5 / llama-server): explicit `model_info` is required because
 llama-server is not in LiteLLM's registry. Cline reads `max_input_tokens` from
 `/proxy/v1/model/info` to set its context-window display.
 
@@ -701,15 +702,15 @@ input-size enforcement using these values.
 
 ## 8. Future work
 
-Basic tool-use support for the local-model path (gemma-4-e4b and Ollama cloud models) is now implemented
+Basic tool-use support for the local-model path (qwen3-4b and Ollama cloud models) is now implemented
 and smoke-validated for all 5 targets (see `docs/TODO.md` IMPLEMENTED banner). The following deferred items remain:
 
 - **Full Claude Code tool catalogue + parallel tool calls** — the 2-turn single-tool smoke is validated; multi-tool
   parallel invocation (multiple `tool_use` blocks in one response) and the full claude-orchestra tool catalogue
   (Read/Write/Bash/Glob/Grep/Edit/TodoWrite/Agent) remain unvalidated. See `docs/TODO.md`.
-- Gemma 4 E4B broader workload reliability (smoke PASS; real claude-orchestra sessions not yet run)
+- Qwen3.5-4B broader workload reliability (smoke PASS with Gemma model; real claude-orchestra sessions not yet run post-swap)
 - Image-block conversion live validation (waiting for vision-capable model)
-- Grammar-constrained generation fallback (conditional on Gemma reliability findings; likely unnecessary)
+- Grammar-constrained generation fallback (conditional on Qwen reliability findings; likely unnecessary)
 - `disable_parallel_tool_use` semantic parity across providers
 - `is_error: true` semantic parity across providers
 - Helper extraction to a dedicated module (trigger: when a second consumer appears)

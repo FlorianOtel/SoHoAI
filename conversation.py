@@ -13,7 +13,7 @@ KV cache integration (optional):
 
 Rolling summarization:
 - maybe_summarize(chat_id, summarize_fn, store=None) → if conversation exceeds threshold,
-  summarizes older turns via internal LLM (Gemma) and rebuilds Redis with condensed
+  summarizes older turns via internal LLM (Qwen3.5) and rebuilds Redis with condensed
   context. If store is provided, persists summary + boundary message_id to SQLite for
   cold-resume recovery. Summarization failure is tolerated (turn proceeds with oversized
   context). Also erases KV cache (prompt changed, cached tokens are stale).
@@ -292,7 +292,7 @@ class ConversationCache:
         try:
             summary_text = await summarize_fn(old_text)
         except Exception as e:
-            # If summarization fails (e.g., Gemma down), log but don't fail the turn.
+            # If summarization fails (e.g., Qwen3.5 down), log but don't fail the turn.
             # The context will remain oversized but the conversation continues.
             logger.warning(
                 f"Summarization failed for chat {chat_id[:8]}: {e}. Skipping, turn proceeds."

@@ -57,7 +57,7 @@ from rag_engine.state import StateDB
 from rag_engine.tool_use import build_tool_spec, format_tool_result, parse_tool_call
 from prompts.rag_system_prompts import build_system_prompt
 from router import SmartRouter
-from kv_cache import KVCacheManager, apply_gemma_template
+from kv_cache import KVCacheManager, apply_qwen3_template
 
 load_dotenv()
 
@@ -189,7 +189,7 @@ async def lifespan(app: FastAPI):
             "preserving all key facts, decisions, and context needed to continue:\n\n"
             + text
         )
-        summarization_model = config.get("routing", {}).get("summarization_model", "internal/gemma-4-e4b")
+        summarization_model = config.get("routing", {}).get("summarization_model", "internal/qwen3-4b")
         resp = await app.state.router.complete(
             messages=[{"role": "user", "content": prompt}],
             model=summarization_model,
@@ -212,7 +212,7 @@ async def lifespan(app: FastAPI):
 
     # Variant LLM function for multi-query expansion (§8.3).
     # Uses the internal model via LiteLLM's OpenAI-compat endpoint — no KV slot involved.
-    _variant_model = app.state.rag_cfg.get("multi_query", {}).get("variant_model", "internal/gemma-4-e4b")
+    _variant_model = app.state.rag_cfg.get("multi_query", {}).get("variant_model", "internal/qwen3-4b")
 
     async def variant_llm_fn(prompt: str) -> str:
         resp = await app.state.router.complete(
@@ -281,7 +281,7 @@ def _apply_system_prompt(messages: list[dict], system_prompt: str) -> list[dict]
 def _fold_tool_messages(messages: list[dict]) -> list[dict]:
     """Fold role=tool messages into role=user for models without native tool support.
 
-    Both the internal (Gemma chat template) and the external path (plain text
+    Both the internal (Qwen3.5 ChatML path) and the external path (plain text
     conversation via LiteLLM) use this transformation so tool results are always
     readable by the model.
     """
@@ -394,7 +394,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
     rag_sources: list[str] | None = None
     rag_chunks_used: list[dict] = []
     assistant_content = ""
-    model_used = "internal/gemma-4-e4b"
+    model_used = "internal/qwen3-4b"
     used_internal = False
     inference_ok = False
 
@@ -411,7 +411,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
             llm_messages = _fold_tool_messages(messages)
 
             if used_internal:
-                prompt = apply_gemma_template(llm_messages)
+                prompt = apply_qwen3_template(llm_messages)
                 result = await cache.kv_cache.inference(slot_id=slot_id, prompt=prompt)
                 raw_text = result["content"].strip()
                 model_used = target_model
@@ -1020,16 +1020,16 @@ def _display_name_for(public_id: str, info: dict) -> str:
 
 # Extract _LITELLM_ROUTED to module level to avoid drift
 _LITELLM_ROUTED = frozenset(
-    {"internal/gemma-4-e4b", "ollama-cloud/deepseek-v4-pro", "ollama-cloud/kimi-k2.6",
+    {"internal/qwen3-4b", "ollama-cloud/deepseek-v4-pro", "ollama-cloud/kimi-k2.6",
      "ollama-cloud/glm-5.1", "ollama-cloud/qwen3-coder-next"}
 )
 
 # Public-facing model name → internal router alias.
 # Both paths reach the same LiteLLM Router, so prompt caching on external
-# applies here too; Gemma routing still lands on the shared llama-server.
+# applies here too; Qwen3.5 routing still lands on the shared llama-server.
 _PROXY_EXPOSED_MODELS: dict[str, str] = {
     # Local inference
-    "internal/gemma-4-e4b": "internal/gemma-4-e4b",
+    "internal/qwen3-4b": "internal/qwen3-4b",
     # Anthropic cloud
     "anthropic/claude-haiku-4-5": "claude-haiku-4-5",
     "anthropic/claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
@@ -1054,7 +1054,7 @@ def _build_proxy_model_entry(config: dict, public_name: str, internal_name: str)
     # OpenAI-compatible /proxy/v1/chat/completions endpoint. Cline's LiteLLM
     # provider filters the model dropdown to entries with an `openai/` prefix,
     # so advertise both models that way — the proxy itself handles the internal
-    # routing (Gemma → llama-server, Sonnet → Anthropic).
+    # routing (Qwen3.5 → llama-server, Sonnet → Anthropic).
     litellm_params = {
         "model": f"openai/{public_name}",
         # api_base points at this proxy; any tool that uses it will loop back
@@ -1069,7 +1069,7 @@ def _build_proxy_model_entry(config: dict, public_name: str, internal_name: str)
 
 
 _LEGACY_ALIASES: dict[str, str] = {
-    "gemma-4-e4b":       "internal/gemma-4-e4b",
+    "qwen3-4b":          "internal/qwen3-4b",
     "claude-haiku-4-5":  "claude-haiku-4-5",
     "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
     "claude-opus-4-7":   "claude-opus-4-7",
@@ -1080,8 +1080,8 @@ def _resolve_proxy_model(name: str | None) -> str | None:
     """Resolve a proxy client's model name to the internal router alias.
 
     Accepts any of:
-      - bare public name:   "gemma-4-e4b", "ollama-cloud/deepseek-v4-pro"
-      - provider-prefixed:  "openai/gemma-4-e4b", "anthropic/claude-sonnet-4-6", "ollama-cloud/deepseek-v4-pro"
+      - bare public name:   "qwen3-4b", "ollama-cloud/deepseek-v4-pro"
+      - provider-prefixed:  "openai/qwen3-4b", "anthropic/claude-sonnet-4-6", "ollama-cloud/deepseek-v4-pro"
       - legacy bare names:  "claude-sonnet-4-6" (backward compat)
       - internal aliases:   "internal", "external"  (for direct testing)
     Returns the internal router alias or None if unknown.
@@ -1294,19 +1294,19 @@ def _anthropic_stop_reason(openai_finish_reason: str | None) -> str | None:
 async def anthropic_messages(req: Request):
     """Anthropic Messages API — model-aware routing.
 
-    Local model (gemma-4-e4b → internal alias) and Ollama cloud models:
+    Local model (qwen3-4b → internal alias) and Ollama cloud models:
     routes via LiteLLM with Anthropic→OpenAI format conversion.
     Tool use is now forwarded on the LiteLLM path (implemented 2026-05-10).
     cache_control markers are also forwarded but have no effect on non-Anthropic
     providers. See docs/TODO.md §[2026-05-04] for implementation notes and
-    outstanding items (Gemma reliability, image-block live validation, etc.).
+    outstanding items (model reliability, image-block live validation, etc.).
 
     Anthropic models (claude-*) or unresolved models: transparent HTTP forward
     to api.anthropic.com. Preserves tools, tool_use/tool_result history,
     cache_control, anthropic-beta headers, and native SSE streaming exactly.
     Full Claude Code tool loop and prompt caching work correctly on this path.
     For ollama-cloud models, tool use now also works on the LiteLLM path, but
-    internal/gemma-4-e4b tool reliability remains unvalidated.
+    internal/qwen3-4b tool reliability remains unvalidated.
     """
     body_bytes = await req.body()
     body = json.loads(body_bytes)
@@ -1734,7 +1734,7 @@ async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResp
     - `ollama-cloud/qwen3-coder-next` and `ollama-cloud/deepseek-v4-pro`: native
       OpenAI function calling, expected reliable.
     - `ollama-cloud/kimi-k2.6` and `ollama-cloud/glm-5.1`: untested.
-    - `internal/gemma-4-e4b`: tool-call JSON reliability at Q8_0 is unvalidated;
+    - `internal/qwen3-4b`: tool-call JSON reliability at Q6_K_XL is unvalidated;
       may need grammar-constrained generation as a fallback. See docs/TODO.md.
 
     Validation harness: `utils/tool_use_smoke_test.py`.

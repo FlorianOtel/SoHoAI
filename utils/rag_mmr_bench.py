@@ -99,7 +99,7 @@ def _bar(n: int, total: int, width: int = 5) -> str:
 # ---------------------------------------------------------------------------
 
 def _make_internal_llm_fn(server2_ip: str, model: str) -> callable:
-    """Calls Gemma 4 on Server 2 via llama-server /v1/chat/completions."""
+    """Calls Qwen3.5 on Server 2 via llama-server /v1/chat/completions."""
     url = f"http://{server2_ip}:8000/v1/chat/completions"
 
     async def llm_fn(prompt: str) -> str:
@@ -145,7 +145,7 @@ def _make_llm_fn(variant_model: str, config: dict) -> callable:
         return _make_external_llm_fn(f"http://{server1_ip}:8000")
     # default: internal
     server2_ip = config.get("server2_ip", "192.168.1.95")
-    model      = config.get("model_list", [{}])[0].get("litellm_params", {}).get("model", "gemma4")
+    model      = config.get("model_list", [{}])[0].get("litellm_params", {}).get("model", "qwen3-4b")
     return _make_internal_llm_fn(server2_ip, model)
 
 
@@ -305,7 +305,7 @@ def main() -> int:
                    help="Override rag.multi_query.n_variants")
     p.add_argument("--mode",          choices=["single", "multi", "both"], default="both")
     p.add_argument("--variant-model", choices=["internal", "external"], default="internal",
-                   help="LLM used for query expansion (internal=Gemma4, external=Sonnet)")
+                   help="LLM used for query expansion (internal=Qwen3.5, external=Sonnet)")
     p.add_argument("--show-variants", action="store_true",
                    help="Print the LLM-generated query variants for each query")
     p.add_argument("--compare",       action="store_true",

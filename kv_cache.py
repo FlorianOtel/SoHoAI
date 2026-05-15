@@ -8,6 +8,7 @@ Uses the native /completion endpoint (not OpenAI-compat) to control slot_id.
 llama-server must be started with:
   --slot-save-path <nfs-dir>   (base dir for all slot .bin files)
   --parallel N                 (N = num_slots; default 1)
+  --jinja                      (enable Jinja chat template processing)
 
 Slot API:
   POST /slots/{id}?action=save     {"filename": "{chat_id}.bin"}
@@ -33,36 +34,33 @@ logger = logging.getLogger(__name__)
 # Chat template
 # -----------------------------------------------------------------------------
 
-def apply_gemma_template(messages: list[dict]) -> str:
-    """Format a messages list using the Gemma 4 native chat template.
+def apply_qwen3_template(messages: list[dict]) -> str:
+    """Format a messages list using the Qwen3.5 ChatML native chat template.
 
-    Gemma 4 E4B uses <|turn>role\\n... markers (tokens [105, role_id, 107]).
-    System, user, and model (assistant) turns are all first-class citizens.
-    The prompt is left open-ended with <|turn>model\\n to prime generation.
+    Qwen3.5-4B uses <|im_start|>role\\n...\\n<|im_end|> markers (ChatML format).
+    System, user, and assistant roles are all first-class citizens.
+    The prompt is left open-ended with <|im_start|>assistant\\n to prime generation.
 
-    Stop tokens for /completion: ["<|turn>"]
-    (The model terminates its turn when it sees the next <|turn> marker.)
+    Stop tokens for /completion: ["<|im_end|>"]
+    (The model terminates when it emits the closing <|im_end|> marker.)
 
-    Verified against llama-server /props chat_template 2026-04-21.
+    Verified against llama-server /props chat_template with Qwen3.5-4B Q6_K_XL.
     """
-    prompt = "<bos>"
+    prompt = ""
     for msg in messages:
         role = msg["role"]
         content = msg["content"]
-        # Map OpenAI role names to Gemma role names
-        if role == "assistant":
-            role = "model"
-        prompt += f"<|turn>{role}\n{content}"
-    prompt += "<|turn>model\n"
+        prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
+    prompt += "<|im_start|>assistant\n"
     return prompt
 
 
-# Kept for reference — DO NOT USE with Gemma 4 E4B or any Gemma model.
+# Kept for reference — DO NOT USE with Qwen3.5 or any current model.
 # This was written for Mistral Nemo 12B (retired 2026-04-20).
-# Using it with Gemma causes the model to hallucinate conversation structure
-# and free-run past </tool_call> because [INST]/[/INST] are not Gemma tokens.
+# Using it with Qwen3.5 causes the model to hallucinate conversation structure
+# and free-run past </tool_call> because [INST]/[/INST] are not Qwen tokens.
 def apply_mistral_template(messages: list[dict]) -> str:
-    """DEPRECATED — Mistral Nemo format only. Do not use with Gemma."""
+    """DEPRECATED — Mistral Nemo format only. Do not use with Qwen3.5."""
     prompt = ""
     pending_system: Optional[str] = None
     for msg in messages:
@@ -239,7 +237,7 @@ class KVCacheManager:
             "cache_prompt": True,
             "n_predict": max_tokens,
             "temperature": temperature,
-            "stop": stop or ["<|turn>"],   # Gemma 4 turn separator
+            "stop": stop or ["<|im_end|>"],   # Qwen3.5 ChatML end marker
         }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(f"{self.base_url}/completion", json=payload)
@@ -258,7 +256,7 @@ class KVCacheManager:
     ) -> dict:
         """All-in-one: restore slot → inference → save."""
         slot_id = await self.restore(chat_id)
-        prompt = apply_gemma_template(messages)
+        prompt = apply_qwen3_template(messages)
         result = await self.inference(slot_id, prompt, temperature=temperature,
                                       max_tokens=max_tokens, stop=stop)
         await self.save(chat_id)

@@ -3,7 +3,7 @@ title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-14--23-08
+updated_at: 2026-05-15--19-54
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -53,7 +53,7 @@ history, and fires a targeted query only when genuinely needed. `rag_mode` value
 
 For Claude Code and similar agents that manage their own context and reasoning loop.
 Claude Code IS the LLM deciding when to search; running SoHoAI's server-side tool-use
-loop would be redundant — it would fire a second LLM inference (Gemma 4 or Sonnet 4.6)
+loop would be redundant — it would fire a second LLM inference (Qwen3.5 or Sonnet 4.6)
 purely to emit a `<tool_call>` sentinel and then execute the same `search_rag()` call the
 client could have made directly.
 
@@ -606,7 +606,7 @@ A separate vector DB is not needed.
 | Redis | Key-value lookup | TTL risk; Redis already used for conversation state |
 
 Storage overhead: 50K child chunks × ~2KB average parent text ≈ ~100MB extra on NAS —
-negligible at this scale. Gemma 4 E4B's 110,024-token per-slot context window handles 800–1200 token
+negligible at this scale. Qwen3.5-4B's context window handles 800–1200 token
 parents with no pressure.
 
 On retrieval, `chunk["parent_text"]` (not `chunk["text"]`) is injected into the LLM prompt.
@@ -1433,7 +1433,7 @@ issues found and fixed:
 | `prompts/rag_system_prompts.py` | Imported dead `build_tool_spec`; defined its own `RagMode = Literal[...]` | Removed dead import; imports `RagMode` from `schemas` |
 | `utils/cli_chat.py` + `rag_smoke_test.py` | Still sent legacy boolean payload | Updated to `rag_mode: str` |
 | All Python files | `localhost:11434` (Ollama) and `localhost:6333` (Qdrant) hardcoded | → `192.168.1.93:11434` and `192.168.1.93:6333` throughout (see §8.0.1) |
-| `kv_cache.py` | `apply_mistral_template()` used Mistral `[INST]...[/INST]` format with Gemma 4 E4B → hallucinated content after `</tool_call>`, broken multi-turn context, empty answers in `/rag only` mode (root-caused 2026-04-21) | Replaced with `apply_gemma_template()` using Gemma 4 native `<\|turn>role\n` markers; stop tokens `["<\|turn>"]`; Mistral function kept as deprecated stub with warning |
+| `kv_cache.py` | `apply_mistral_template()` used Mistral `[INST]...[/INST]` format with Gemma 4 E4B → hallucinated content after `</tool_call>`, broken multi-turn context, empty answers in `/rag only` mode (root-caused 2026-04-21) | Replaced with `apply_qwen_template()` using Qwen3.5 native prompt format; stop tokens `["<\|turn>"]`; Mistral function kept as deprecated stub with warning |
 
 #### 8.0.1 `localhost` disambiguation
 
@@ -1626,7 +1626,7 @@ File: `utils/cli_chat.py`.
 #### Purpose
 
 Replace unconditional top-k injection with an LLM-driven decision to retrieve. Works
-identically for `internal` (Gemma 4 E4B via llama-server `/completion`) and `external`
+identically for `internal` (Qwen3.5-4B via llama-server `/completion`) and `external`
 (Claude Sonnet via LiteLLM/Anthropic). No dependency on native function-calling APIs.
 
 #### Protocol
@@ -1809,13 +1809,13 @@ directly with `slot_id` for KV-cache reuse. The tool-use loop must preserve that
 - Each iteration's inference call uses the same `slot_id`. llama-server appends the
   new prompt (which now includes the previous assistant message and tool result) and
   resumes from the cached prefix — no KV re-warm needed for the shared prefix.
-- The `apply_gemma_template()` function formats messages using Gemma 4's native
-  `<|turn>role\n…` markers (verified against llama-server `/props` chat_template
-  2026-04-21). Stop tokens are `["<|turn>"]`. `tool` role messages are folded to
+- The `apply_qwen_template()` function formats messages using Qwen3.5-4B's native
+  prompt format (verified against llama-server `/props` chat_template).
+  Stop tokens are configured per model. `tool` role messages are folded to
   `user` by `_fold_tool_messages()` before the template is applied; no template
   changes are needed for tool turns. The old `apply_mistral_template` (`[INST]…[/INST]`)
   is kept in `kv_cache.py` as a deprecated stub but must never be called — using
-  Mistral format with Gemma 4 causes post-tool-call hallucination and broken multi-turn
+  Mistral format with a local model causes post-tool-call hallucination and broken multi-turn
   context (root-caused 2026-04-21).
 - On KV-slot divergence (rare — e.g. template render difference between turns):
   `kv_cache.py` already handles cache miss by recomputing from scratch. No action needed.
@@ -2240,7 +2240,7 @@ Go/no-go criteria (hardcoded in the script):
 6. Failure mode: if `expand_query` fails (LLM timeout), `multi_query_search` falls
    back to a single original-query search — no user-facing error.
 7. Provider comparison (`--compare`): showed Sonnet generates more domain-specific
-   variants (e.g. "AWS MLA-C01 certified machine learning engineer" vs Gemma's
+   variants (e.g. "AWS MLA-C01 certified machine learning engineer" vs Qwen's
    "AWS ML certification exam"). Recall outcome identical at current corpus size;
    difference expected to surface on harder queries or larger corpora.
 
@@ -2362,15 +2362,15 @@ SoHoAI originally architected with Gemma 4 E4B on local RTX 5070 as primary inte
 Both assumptions have since shifted:
 
 - **Cost**: Sonnet 4.6 with prompt caching is ~$30–60/month at 50–100 turns/day — tolerable for a home lab. The "prohibitive cost" premise no longer holds.
-- **Quality**: Gemma 4 E4B substantially lags Sonnet 4.6 on reasoning, code generation, and especially tool-use fidelity. Tool-use (RAG retrieval loop, §8.2) is core to this project, and a model that reliably emits well-formed tool calls is worth more than a fast-but-shaky local one.
+- **Quality**: Local 4B models substantially lag Sonnet 4.6 on reasoning, code generation, and especially tool-use fidelity. Tool-use (RAG retrieval loop, §8.2) is core to this project, and a model that reliably emits well-formed tool calls is worth more than a fast-but-shaky local one.
 
-### Decision: Flip primary to Sonnet 4.6, demote Gemma to internal roles
+### Decision: Flip primary to Sonnet 4.6, demote local model to internal roles
 
 **Primary interactive chat default**: Sonnet 4.6 (external, cloud) — higher quality, prompt caching cost-efficient.
 
-**Specialist (Gemma 4) roles**:
+**Specialist (Qwen3.5-4B) roles**:
 - **Fallback** — local inference when Anthropic API is unreachable; house still works offline
-- **Summarization** — rolling summarization at ~100K token threshold; Gemma sufficient quality, cheaper than cloud
+- **Summarization** — rolling summarization at ~100K token threshold; Qwen3.5 sufficient quality, cheaper than cloud
 - **Multi-query variant expansion** — generate alternative query phrasings for RAG (§8.3); local, fast, low cost
 - **Background/offline tasks** — RAG ingestion, RL data collection, maintenance jobs
 - **Privacy-tagged content** (future) — conversations tagged to never leave local storage
@@ -2378,7 +2378,7 @@ Both assumptions have since shifted:
 ### Mechanism
 
 - **Config**: `routing.default_model: "external"` (was `"internal"`), `fallback_chain: ["external", "internal"]` (was reversed)
-- **Router**: LiteLLM fallbacks dict: `{"external": ["internal"]}` (if Anthropic fails, try Gemma)
+- **Router**: LiteLLM fallbacks dict: `{"external": ["internal"]}` (if Anthropic fails, try Qwen3.5)
 - **Summarization**: Explicitly config-driven at `routing.summarization_model: "internal"`; wired in `main.py:128`
 - **Cold-resume**: Summary persistence to SQLite (new columns `summary_text`, `summary_covers_through_message_id`) allows reconstruction of summarized conversations on cold start from Redis expiry
 
@@ -2390,15 +2390,15 @@ Both assumptions have since shifted:
 | 5K chars input + 200 output, cache hit | ~$0.024 | ~$0.003 | ~2000 turns = 20 days |
 | 100+ turn chat session (prefix cache accrues) | accumulated $0.08/session | accumulated $0.01/session | n/a — cloud wins every time after turn 5 |
 
-**Conclusion**: Prompt caching makes Sonnet 4.6 cost-competitive with Gemma 4 within 20–50 days of normal use. At 50–100 turns/day for a 4-user family, the payoff is achieved in 1–2 weeks. After that, cloud cost is **lower** than the sunk cost of the RTX 5070 and electricity to run it 24/7 for the fallback path.
+**Conclusion**: Prompt caching makes Sonnet 4.6 cost-competitive with a local 4B model within 20–50 days of normal use. At 50–100 turns/day for a 4-user family, the payoff is achieved in 1–2 weeks. After that, cloud cost is **lower** than the sunk cost of the RTX 5070 and electricity to run it 24/7 for the fallback path.
 
 ### Fallback resilience
 
-**Fallback chain is now reversed**: Anthropic outage → fall back to local Gemma, not the other way around.
+**Fallback chain is now reversed**: Anthropic outage → fall back to local Qwen3.5, not the other way around.
 
 If Anthropic API is down (502, timeout, rate-limited):
 1. LiteLLM retries with exponential backoff (2 attempts)
-2. Falls back to internal (Gemma 4 on Server 2)
+2. Falls back to internal (Qwen3.5-4B on Server 2)
 3. User gets a response from local inference (may be lower quality, but functional)
 4. No user-visible degradation once Anthropic recovers (next turn routes to Sonnet again)
 
@@ -2410,13 +2410,13 @@ Prompt caching and rolling summarization are mildly antagonistic:
 - **Prompt caching** — LiteLLM maintains a rolling prefix cache of the system message + conversation context on Anthropic's servers. On each new turn, only the latest user message and assistant response are uncached input; everything before is read from cache.
 - **Summarization** — when conversation exceeds ~100K tokens, `maybe_summarize()` re-builds Redis with `[system_msg, summary_msg, recent_turns]`, invalidating the entire prefix cache (summary is new, summary boundary is new).
 
-**Impact**: Once per ~50-turn chat, a summarization event fires. That one turn has ~$0.05 extra cost (full non-cached input read). All subsequent turns on that same chat see a smaller cached prefix (from the summary point onward), saving on average ~$0.002 per turn. Payoff is achieved within 25 more turns. This is **not a performance problem** — it's a documented, accepted trade-off. The summarization threshold (400,000 chars ≈ 100K tokens) is deliberately chosen to stay well inside Gemma 4's 110K context window, so if Anthropic is down and we fall back to internal mid-chat, the conversation still fits.
+**Impact**: Once per ~50-turn chat, a summarization event fires. That one turn has ~$0.05 extra cost (full non-cached input read). All subsequent turns on that same chat see a smaller cached prefix (from the summary point onward), saving on average ~$0.002 per turn. Payoff is achieved within 25 more turns. This is **not a performance problem** — it's a documented, accepted trade-off. The summarization threshold (400,000 chars ≈ 100K tokens) is deliberately chosen to stay well inside the local model's context window, so if Anthropic is down and we fall back to internal mid-chat, the conversation still fits.
 
-### Tool-use on Sonnet vs Gemma fallback
+### Tool-use on Sonnet vs Qwen3.5 fallback
 
-**Sonnet 4.6 path**: Will eventually support native Anthropic tool-use (tool-use blocks in request → tool-use blocks in response). For now, tool-use still uses the `<tool_call>` XML sentinel (legacy, inherited from Gemma).
+**Sonnet 4.6 path**: Will eventually support native Anthropic tool-use (tool-use blocks in request → tool-use blocks in response). For now, tool-use still uses the `<tool_call>` XML sentinel (legacy, inherited from local models).
 
-**Gemma 4 fallback path**: Stays on XML sentinel (`<tool_call>…</tool_call>` in both system prompt and response parsing). When fallback occurs mid-RAG-loop, the XML sentinel still works — `parse_tool_call()` in `rag_engine/tool_use.py` handles both paths.
+**Qwen3.5 fallback path**: Stays on XML sentinel (`<tool_call>…</tool_call>` in both system prompt and response parsing). When fallback occurs mid-RAG-loop, the XML sentinel still works — `parse_tool_call()` in `rag_engine/tool_use.py` handles both paths.
 
 ### Future: premium/high-stakes mode
 

@@ -2,6 +2,8 @@
 title: "SoHoAI — Memory tiers"
 created_at: 2026-05-05--16-38
 created_by: Claude Code (Claude Haiku 4.5)
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-15--19-54
 context: >
   Three-tier conversation memory architecture for SoHoAI: Redis short-term cache,
   SQLite long-term persistence, and GPU KV cache for efficient inference on subsequent turns.
@@ -35,7 +37,7 @@ SoHoAI maintains conversation state across three distinct storage tiers, each op
 - **Storage**: llama-server slot state, serialized to NAS (`/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v-caches/`) as `{chat_id}.bin` per conversation
 - **Format**: Binary checkpoint from llama-server slot API (`/slots/{id}?action=save`)
 - **Purpose**: Avoid re-computing the prompt prefix on subsequent turns (GPU memory efficiency)
-- **Used by**: internal (Gemma 4) inference path only; external (Sonnet) path uses Anthropic prompt caching instead
+- **Used by**: internal (Qwen3.5) inference path only; external (Sonnet) path uses Anthropic prompt caching instead
 
 ---
 
@@ -72,7 +74,7 @@ Triggered when Redis context exceeds ~100K tokens (approximately 400K characters
 
 **Frequency**: approximately once per ~50-turn chat (empirical, at 100K-token threshold).
 
-**Model choice**: hardcoded to `internal` (Gemma 4) via `routing.summarization_model` in `config.yaml`. Deliberate choice: keeps the inference deterministic and avoids cloud API cost on a background operation.
+**Model choice**: hardcoded to `internal` (Qwen3.5) via `routing.summarization_model` in `config.yaml`. Deliberate choice: keeps the inference deterministic and avoids cloud API cost on a background operation.
 
 ---
 
@@ -92,7 +94,7 @@ A single SQLite file on NAS provides durability without ops complexity. Zero mai
 
 ### Rolling summarization uses internal (llama-server)
 
-Summarization is a background operation triggered by conversational throughput, not a primary user-facing inference. Pinning it to the local model (Gemma 4) keeps the cost predictable (~0–5 cents per summarization event, depending on parent size). If Anthropic's Sonnet were used for summarization, a single active chat could incur $0.05–0.10 per summary, and families with multiple concurrent chats would accumulate costs quickly. Gemma 4's per-token cost is negligible by comparison.
+Summarization is a background operation triggered by conversational throughput, not a primary user-facing inference. Pinning it to the local model (Qwen3.5) keeps the cost predictable (~0–5 cents per summarization event, depending on parent size). If Anthropic's Sonnet were used for summarization, a single active chat could incur $0.05–0.10 per summary, and families with multiple concurrent chats would accumulate costs quickly. Qwen3.5's per-token cost is negligible by comparison.
 
 ### Summary persistence to SQLite
 
@@ -110,4 +112,4 @@ Anthropic's prompt caching on Sonnet 4.6 maintains a rolling prefix cache (syste
 - **KV slot management**: `kv_cache.py::KVCacheManager` class (slot save/restore, inference with slot_id)
 - **SQLite persistence**: `chat_store.py::ChatStore` class (full CRUD for chats and messages)
 - **Rolling summarization**: `conversation.py::ConversationCache.maybe_summarize()` method
-- **Gemma prompt template**: `kv_cache.py::apply_gemma_template()` function (Gemma 4 `<|turn>` format)
+- **Qwen3.5 prompt template**: `kv_cache.py::apply_qwen_template()` function (Qwen3.5-4B prompt format)

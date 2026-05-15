@@ -3,7 +3,7 @@ title: "SoHoAI — Project Context & Design Reference"
 created_at: 20260407-000000
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-14--21-10
+updated_at: 2026-05-15--19-54
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   Project instructions and design decisions for Claude Code;
@@ -29,7 +29,7 @@ for family photos and RL training data collection from chat interactions.
 | Server | IP | Role | Hardware |
 |--------|------|------|----------|
 | Server 1 | 192.168.1.93 | Orchestrator, front-end, Redis cache, RAG, MCP server | 32GB RAM, AMD iGPU Radeon 680M |
-| Server 2 | 192.168.1.95 | LLM inference engine | 16GB RAM, Nvidia RTX 5070 12GB, llama-server |
+| Server 2 | 192.168.1.95 | LLM inference engine | 16GB RAM, Nvidia RTX 5070 12GB, llama-server (Qwen3.5-4B) |
 | NAS | NFS-mounted | Persistent storage for everything | 27TB |
 
 ### Storage paths
@@ -63,7 +63,7 @@ for family photos and RL training data collection from chat interactions.
 Server 1 (192.168.1.93)             │          Server 2 (192.168.1.95)
 ┌──────────────────────────┐  fallback/       ┌──────────────────────────┐
 │ FastAPI orchestrator:8000│──summarize/────→ │ llama-server :8000       │
-│  SmartRouter (LiteLLM)   │  variants →      │  Gemma 4 E4B 7.52B Q8_0  │
+│  SmartRouter (LiteLLM)   │  variants →      │  Qwen3.5-4B Q6_K_XL     │
 │  ConversationCache       │─── /slots ─────→ │  2×110024 ctx (2 slots)  │
 │    Redis (short-term)    │                  │  KV slot save/restore    │
 │    KV cache mgr          │                  │  CLIP (Phase 4)          │
@@ -107,7 +107,7 @@ SoHoAI/
 ├── router.py                   # SmartRouter — LiteLLM wrapper with routing logic
 ├── usage_tracker.py            # UsageTracker — LiteLLM CustomLogger callback; records usage_events to telemetry.db
 ├── conversation.py             # ConversationCache — Redis + KV cache coordinator
-├── kv_cache.py                 # KVCacheManager — llama-server slot save/restore + inference; apply_gemma_template() (Gemma 4 <|turn> format)
+├── kv_cache.py                 # KVCacheManager — llama-server slot save/restore + inference; apply_qwen3_template() (Qwen3.5 ChatML format)
 ├── chat_store.py               # ChatStore — SQLite long-term persistence
 ├── mcp_gateway.py              # MCP tool gateway (Phase 3 stub, interface defined)
 ├── pyproject.toml              # Python dependencies (uv-managed)
@@ -229,18 +229,14 @@ Managed via `pyproject.toml` (uv). Key packages:
 source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
 
 # Server 2 — llama-server (GPU inference + KV cache)
-# Gemma 4 E4B 7.52B Q8_0 — hybrid SWA+global attention (42 layers, 2 KV heads)
-# New llama.cpp SWA-aware KV: 4 global KV layers (110024-ctx) + 20 SWA layers (512-window)
-# VRAM: ~4.8 GB model weights + 2×1,760 MiB KV (f16, 2 slots × 110024 ctx) + ~1 GB overhead = ~9.3 GB / 12 GB (estimated)
-# --cache-ram 0: KV pre-allocated in VRAM (no RAM offload); --parallel 2 matches config.yaml num_slots: 2
-# NOTE: existing .bin KV slot files are incompatible when switching quantizations — erase k-v-caches/*.bin first
+# Qwen3.5-4B Q6_K_XL — ChatML format, --jinja for template, q8_0 KV
+# VRAM: ~3.4 GB model weights + 2×~1,320 MiB KV (q8_0, 2 slots × 110024 ctx) ≈ 6 GB estimated / 12 GB
+# NOTE: existing .bin KV slot files are incompatible when switching models — erase k-v-caches/*.bin first
 llama-server \
-  -m ~/Gin-AI/LLMs-cache/llama-server/google_gemma-4-E4B-it-Q8_0.gguf \
-  -c 220048 -ngl 99 \
-  --flash-attn on \
-  --cache-type-k f16 --cache-type-v f16 \
-  --cache-ram 0 \
-  --parallel 2 \
+  -m ~/Gin-AI/LLMs-cache/llama-server/Qwen3.5-4B-UD-Q6_K_XL.gguf \
+  --jinja --flash-attn on \
+  --cache-type-k q8_0 --cache-type-v q8_0 \
+  -ngl 99 --ctx-size 220048 --parallel 2 \
   --slot-save-path ~/Gin-AI/LLMs-cache/llama-server/k-v-caches/ \
   --host 0.0.0.0 --port 8000
 
@@ -296,7 +292,7 @@ python utils/rag_sparse_migrate.py status                       # check migratio
 python utils/rag_sparse_migrate.py migrate                      # phase 1: migrate data (live)
 python utils/rag_sparse_migrate.py swap --confirm               # phase 2: swap (stop uvicorn first)
 
-# Tool-use smoke test — validates LiteLLM path for ollama-cloud/* and internal/gemma-4-e4b
+# Tool-use smoke test — validates LiteLLM path for ollama-cloud/* and internal/qwen3-4b
 # Run against worktree port 8001 (or 8000 after merge)
 python utils/tool_use_smoke_test.py --server http://192.168.1.93:8001
 python utils/tool_use_smoke_test.py --server http://192.168.1.93:8001 --no-stream
@@ -325,4 +321,4 @@ After modifying any orchestrator code:
 
 ### Performance benchmarks
 
-Gemma 4 Q6_K→Q8_0 comparison (2026-04-20): decode −12%, prefill +16%. See [docs/design-history.md](docs/design-history.md).
+Gemma 4 E4B replaced by Qwen3.5-4B Q6_K_XL on 2026-05-15. See [docs/design-history.md](docs/design-history.md).
