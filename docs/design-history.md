@@ -3,7 +3,7 @@ title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-15--11-49
+updated_at: 2026-05-15--13-30
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -404,6 +404,41 @@ Added `_sanitize_tool_use_id()` helper and `_TOOL_ID_VALID = re.compile(r'^[a-zA
 | `config.yaml` | New `proxy.blocked_models` key |
 | `main.py` | Blocklist check in `anthropic_messages()`; `_TOOL_ID_VALID` + `_sanitize_tool_use_id()` helper; both tool_use ID sites updated |
 | `router.py` | `import litellm`; 3-step timeout backoff for `ollama-cloud/*` |
+
+---
+
+## 2026-05-15 — Backoff threshold correction: 30s→60s→90s → 60s→90s→120s
+
+### Problem
+
+Production logs (`/var/tmp/SoHoAI-gateway-timeout.log`) showed that the 30s initial
+timeout introduced in the proxy hardening commit was too aggressive for kimi-k2.6.
+kimi-k2.6 is a large reasoning model that regularly takes 30–60 s for complex coding
+tasks. As a result, every non-trivial request was guaranteed to fail attempt 1, then
+succeed on the 60s retry — adding +30s latency to every complex request and filling
+logs with spurious timeout errors.
+
+Two representative events from the log (confirmed the code was loaded — no race condition):
+- `12:08:01` call → `12:08:23` timeout at exactly 30.0s → `12:08:23` retry at 60s → `12:08:54` 200 OK (31s)
+- `12:09:25` call → `12:09:55` timeout at exactly 30.0s → `12:09:55` retry at 60s starts
+
+The backoff loop was functionally correct; only the starting threshold was wrong.
+
+### Solution
+
+Changed `_backoff_timeouts = [30, 60, 90]` → `[60, 90, 120]` in `router.py`.
+
+- **60s first attempt** covers both fast (<10s) and normal-slow (30–60s) responses without failing
+- **90s** covers unusually slow responses (60–90s) — second attempt
+- **120s** covers extreme cases — third attempt
+- Worst case: 270s (within CC's 300s httpx limit)
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `router.py` | `_backoff_timeouts = [60, 90, 120]`; updated comment |
+| `docs/Model-routing.md` | §2.3 timeout table updated; note added explaining the correction |
 
 ---
 

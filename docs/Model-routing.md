@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-15--11-49
+updated_at: 2026-05-15--13-30
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -257,18 +257,22 @@ models mid-task — worse than a clean failure. It also incurs unexpected cost w
 explicitly chose a $0 model.
 
 **Timeout and backoff (updated 2026-05-15):** Instead of a single 30s timeout that immediately
-surfaces as HTTP 529, the proxy now uses a **3-step increasing-timeout backoff** in
+surfaces as HTTP 529, the proxy uses a **3-step increasing-timeout backoff** in
 `SmartRouter.complete()` (`router.py`):
 
 | Attempt | Timeout | Log |
 |---------|---------|-----|
-| 1 | 30 s | (silent) |
-| 2 | 60 s | WARNING: `ollama-cloud … timed out on attempt 1/3, retrying (timeout=60s)…` |
-| 3 | 90 s | WARNING: `ollama-cloud … timed out on attempt 2/3, retrying (timeout=90s)…` |
+| 1 | 60 s | (silent) |
+| 2 | 90 s | WARNING: `ollama-cloud … timed out on attempt 1/3, retrying (timeout=90s)…` |
+| 3 | 120 s | WARNING: `ollama-cloud … timed out on attempt 2/3, retrying (timeout=120s)…` |
 | exhausted | — | ERROR: `ollama-cloud … all 3 attempts timed out` → HTTP 529 |
 
-Worst-case total: 30+60+90 = 180 s — within CC's 300 s httpx limit. Only `litellm.Timeout`
+Worst-case total: 60+90+120 = 270 s — within CC's 300 s httpx limit. Only `litellm.Timeout`
 triggers a retry; auth errors and 4xx responses propagate immediately.
+
+> **Note (2026-05-15):** Initial implementation used 30s→60s→90s (180s worst-case). Production
+> logs showed kimi-k2.6 regularly needs 30–60s for complex coding tasks, so every non-trivial
+> request failed attempt 1 and incurred an unnecessary 30s penalty. Raised to 60s→90s→120s.
 
 **How final failures are reported:**
 

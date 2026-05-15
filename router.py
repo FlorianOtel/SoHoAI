@@ -147,9 +147,11 @@ class SmartRouter:
 
         if target.startswith("ollama-cloud/"):
             # 3-step geometric backoff: each successive attempt allows more time.
-            # Timeouts: 30s → 60s → 90s. Worst case: 180s total (within CC's 300s httpx limit).
+            # Timeouts: 60s → 90s → 120s. Worst case: 270s total (within CC's 300s httpx limit).
+            # Starting at 60s covers both fast (<10s) and normal-slow (30-60s) responses in one attempt;
+            # the old 30s floor caused every non-trivial kimi-k2.6 request to fail attempt 1 needlessly.
             # Only litellm.Timeout triggers a retry; other exceptions (auth, 4xx) propagate immediately.
-            _backoff_timeouts = [30, 60, 90]
+            _backoff_timeouts = [60, 90, 120]
             last_exc: Exception | None = None
             for attempt, timeout in enumerate(_backoff_timeouts, start=1):
                 if attempt > 1:
