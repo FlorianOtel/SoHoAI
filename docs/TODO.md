@@ -187,6 +187,12 @@ Once the conversion was implemented, reliability per model is now being validate
   has instruction-following capability but complex multi-tool JSON output reliability is
   **informational-only in this session**. May need grammar-constrained generation (`--grammar`)
   or prompt engineering if unreliable in practice. See deferred entry (a) below.
+  **Known limitation (2026-05-15):** parallel tool calls fail on both stream and no-stream
+  legs — model emits 1 `tool_use` block instead of all requested blocks. Raw llama-server
+  response confirms this is a model-capacity issue: `reasoning_content` correctly reasons
+  "I'll call all 5 in parallel" but `tool_calls` array contains only 1 entry. Sequential
+  (single-tool) calls PASS on both legs. Use `internal/qwen3-4b` for single-tool-per-turn
+  tasks only; parallel tool dispatch requires an ollama-cloud or Anthropic model.
 - **`ollama-cloud/deepseek-v4-pro`** and **`ollama-cloud/qwen3-coder-next`**: both
   support OpenAI function calling natively and are expected to be reliable for tool use.
 - **`ollama-cloud/kimi-k2.6`**: gating target in `utils/tool_use_smoke_test.py`; **PASS (streaming, 2026-05-10)**.
@@ -223,7 +229,14 @@ Validate Qwen3.5's tool-call reliability on representative claude-orchestra work
 
 **Parallel tool calls — DONE.** `utils/tool_use_smoke_test.py --parallel` added and run successfully with 3 simultaneous tools (`get_file_size`, `get_file_owner`, `get_file_permissions`). Results:
 - All 4 ollama-cloud models (`qwen3-coder-next`, `deepseek-v4-pro`, `kimi-k2.6`, `glm-5.1`): **PASS** on both streaming and non-streaming legs.
-- `internal/qwen3-4b`: **INFO FAIL** parallel (2026-05-15) — single-tool PASS (both stream/no-stream); parallel test gets 1 tool_use block instead of 5. Expected 4B-class model limitation, not a proxy bug.
+- `internal/qwen3-4b`: **INFO FAIL** parallel on both stream and no-stream (2026-05-15).
+  - Single-tool sequential: **PASS** (stream + no-stream).
+  - Parallel (5 tools): **FAIL** (stream + no-stream) — gets 1 `tool_use` block instead of 5.
+  - Root cause confirmed from raw llama-server response: `reasoning_content` correctly
+    says "I'll make all five function calls at the same time" but `tool_calls` array
+    contains only `get_file_size`. Model capacity limitation at 4B scale, not a proxy
+    or template issue. `--no-stream` produces the identical result, ruling out any
+    streaming/parsing artifact.
 
 ### Remaining open item
 

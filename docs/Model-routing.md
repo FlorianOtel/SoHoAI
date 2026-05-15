@@ -219,7 +219,10 @@ The conversion now handles full Anthropic→OpenAI transformation:
 | `tool_result` blocks (user) | File contents and command outputs from past turns | Model uses retrieved data to refine answers |
 | `cache_control` markers | Forwarded to provider (has no effect on llama-server) | Prepared for future local models with caching support |
 
-**Qwen reliability — current state (pending post-swap validation 2026-05-15)**: `internal/qwen3-4b` was validated with Gemma 4 E4B in the synthetic two-turn smoke harness (single tool, one string argument) on both streaming and non-streaming legs (2026-05-10). Broader claude-orchestra workload validation (full Claude Code tool catalogue, multi-turn, parallel calls) is the remaining open item — see `docs/TODO.md`. Grammar-constrained generation (deferred Step c) is therefore likely unnecessary; revisit only if broader validation surfaces malformed `arguments` JSON.
+**Qwen reliability — validated 2026-05-15:**
+- **Sequential (single tool):** `internal/qwen3-4b` PASS on both stream and no-stream. Proxy conversion is correct.
+- **Parallel (5 simultaneous tools):** FAIL on both stream and no-stream. Model emits 1 `tool_use` block instead of all requested. Root cause confirmed from raw llama-server response: `reasoning_content` correctly reasons "I'll make all five function calls at the same time" but `tool_calls` array contains only the first call. This is a 4B-scale model-capacity limitation — not a proxy, template, or streaming-parsing issue. `--no-stream` produces the identical result.
+- **Verdict:** Use `internal/qwen3-4b` for single-tool-per-turn tasks (sequentially chained tool calls are fine). Parallel tool dispatch requires an ollama-cloud or Anthropic model. Grammar-constrained generation (`--grammar`) is unlikely to help since the failure is in generation scope, not argument formatting. See `docs/TODO.md` for the remaining real-orchestra validation open item.
 
 For `ollama-cloud/deepseek-v4-pro` and `ollama-cloud/qwen3-coder-next`: both support OpenAI
 function calling natively and are expected to be reliable for tool use **when the endpoint
