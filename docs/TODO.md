@@ -223,7 +223,7 @@ Validate Qwen3.5's tool-call reliability on representative claude-orchestra work
 
 **Parallel tool calls — DONE.** `utils/tool_use_smoke_test.py --parallel` added and run successfully with 3 simultaneous tools (`get_file_size`, `get_file_owner`, `get_file_permissions`). Results:
 - All 4 ollama-cloud models (`qwen3-coder-next`, `deepseek-v4-pro`, `kimi-k2.6`, `glm-5.1`): **PASS** on both streaming and non-streaming legs.
-- `internal/qwen3-4b`: **NOT YET TESTED** (Qwen3.5 replaced Gemma 4 E4B 2026-05-15; tool-use validation pending).
+- `internal/qwen3-4b`: **INFO FAIL** parallel (2026-05-15) — single-tool PASS (both stream/no-stream); parallel test gets 1 tool_use block instead of 5. Expected 4B-class model limitation, not a proxy bug.
 
 ### Remaining open item
 
