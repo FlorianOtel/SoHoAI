@@ -189,7 +189,7 @@ async def lifespan(app: FastAPI):
             "preserving all key facts, decisions, and context needed to continue:\n\n"
             + text
         )
-        summarization_model = config.get("routing", {}).get("summarization_model", "internal/qwen3-4b")
+        summarization_model = config.get("routing", {}).get("summarization_model", "local/qwen3-9b-q4")
         resp = await app.state.router.complete(
             messages=[{"role": "user", "content": prompt}],
             model=summarization_model,
@@ -212,7 +212,7 @@ async def lifespan(app: FastAPI):
 
     # Variant LLM function for multi-query expansion (§8.3).
     # Uses the internal model via LiteLLM's OpenAI-compat endpoint — no KV slot involved.
-    _variant_model = app.state.rag_cfg.get("multi_query", {}).get("variant_model", "internal/qwen3-4b")
+    _variant_model = app.state.rag_cfg.get("multi_query", {}).get("variant_model", "local/qwen3-4b-q6")
 
     async def variant_llm_fn(prompt: str) -> str:
         resp = await app.state.router.complete(
@@ -394,7 +394,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
     rag_sources: list[str] | None = None
     rag_chunks_used: list[dict] = []
     assistant_content = ""
-    model_used = "internal/qwen3-4b"
+    model_used = "local/qwen3-4b-q6"
     used_internal = False
     inference_ok = False
 
@@ -403,7 +403,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
             # 5a. Select model and run inference
             target_model = router.select_model(messages, req.model, req.force_cloud)
             used_internal = (
-                target_model.startswith("internal/")
+                target_model.startswith("local/")
                 and cache.kv_cache is not None
                 and slot_id is not None
             )
@@ -1009,7 +1009,7 @@ def _display_name_for(public_id: str, info: dict) -> str:
         suffix = public_id.split("/", 1)[1]
         pretty = suffix.replace("-", " ").title()
         return f"{pretty} (Ollama Cloud, {ctx_k}k ctx)"
-    elif public_id.startswith("internal/"):
+    elif public_id.startswith("local/"):
         suffix = public_id.split("/", 1)[1]
         pretty = suffix.replace("-", " ").title()
         return f"{pretty} (local, {ctx_k}k ctx)"
@@ -1020,8 +1020,8 @@ def _display_name_for(public_id: str, info: dict) -> str:
 
 # Extract _LITELLM_ROUTED to module level to avoid drift
 _LITELLM_ROUTED = frozenset(
-    {"internal/qwen3-4b", "ollama-cloud/deepseek-v4-pro", "ollama-cloud/kimi-k2.6",
-     "ollama-cloud/glm-5.1", "ollama-cloud/qwen3-coder-next"}
+    {"local/qwen3-4b-q6", "local/qwen3-9b-q4", "ollama-cloud/deepseek-v4-pro",
+     "ollama-cloud/kimi-k2.6", "ollama-cloud/glm-5.1", "ollama-cloud/qwen3-coder-next"}
 )
 
 # Public-facing model name → internal router alias.
@@ -1029,7 +1029,8 @@ _LITELLM_ROUTED = frozenset(
 # applies here too; Qwen3.5 routing still lands on the shared llama-server.
 _PROXY_EXPOSED_MODELS: dict[str, str] = {
     # Local inference
-    "internal/qwen3-4b": "internal/qwen3-4b",
+    "local/qwen3-4b-q6": "local/qwen3-4b-q6",
+    "local/qwen3-9b-q4": "local/qwen3-9b-q4",
     # Anthropic cloud
     "anthropic/claude-haiku-4-5": "claude-haiku-4-5",
     "anthropic/claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
@@ -1069,7 +1070,7 @@ def _build_proxy_model_entry(config: dict, public_name: str, internal_name: str)
 
 
 _LEGACY_ALIASES: dict[str, str] = {
-    "qwen3-4b":          "internal/qwen3-4b",
+    "qwen3-4b":          "local/qwen3-4b-q6",
     "claude-haiku-4-5":  "claude-haiku-4-5",
     "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
     "claude-opus-4-7":   "claude-opus-4-7",
@@ -1083,11 +1084,16 @@ def _resolve_proxy_model(name: str | None) -> str | None:
       - bare public name:   "qwen3-4b", "ollama-cloud/deepseek-v4-pro"
       - provider-prefixed:  "openai/qwen3-4b", "anthropic/claude-sonnet-4-6", "ollama-cloud/deepseek-v4-pro"
       - legacy bare names:  "claude-sonnet-4-6" (backward compat)
-      - internal aliases:   "internal", "external"  (for direct testing)
+      - local aliases:      "local", "auto"  (for direct testing)
     Returns the internal router alias or None if unknown.
     """
     if not name:
         return None
+    # Special aliases for direct testing
+    if name == "auto":
+        return None
+    if name == "local":
+        return "local/qwen3-4b-q6"
     # Direct match on public name
     if name in _PROXY_EXPOSED_MODELS:
         return _PROXY_EXPOSED_MODELS[name]
@@ -1100,7 +1106,9 @@ def _resolve_proxy_model(name: str | None) -> str | None:
         return _PROXY_EXPOSED_MODELS[bare]
     if bare in _LEGACY_ALIASES:
         return _LEGACY_ALIASES[bare]
-    # Allow the raw internal alias to pass through
+    if bare == "local":
+        return "local/qwen3-4b-q6"
+    # Allow the raw local alias to pass through
     all_aliases = set(_PROXY_EXPOSED_MODELS.values()) | set(_LEGACY_ALIASES.values())
     if name in all_aliases:
         return name
@@ -1294,7 +1302,7 @@ def _anthropic_stop_reason(openai_finish_reason: str | None) -> str | None:
 async def anthropic_messages(req: Request):
     """Anthropic Messages API — model-aware routing.
 
-    Local model (qwen3-4b → internal alias) and Ollama cloud models:
+    Local model (qwen3-4b-q6 → local alias) and Ollama cloud models:
     routes via LiteLLM with Anthropic→OpenAI format conversion.
     Tool use is now forwarded on the LiteLLM path (implemented 2026-05-10).
     cache_control markers are also forwarded but have no effect on non-Anthropic
@@ -1306,7 +1314,7 @@ async def anthropic_messages(req: Request):
     cache_control, anthropic-beta headers, and native SSE streaming exactly.
     Full Claude Code tool loop and prompt caching work correctly on this path.
     For ollama-cloud models, tool use now also works on the LiteLLM path, but
-    internal/qwen3-4b tool reliability remains unvalidated.
+    local/qwen3-4b-q6 tool reliability remains unvalidated.
     """
     body_bytes = await req.body()
     body = json.loads(body_bytes)
@@ -1723,7 +1731,7 @@ def _convert_user_message(msg: dict) -> list[dict]:
 
 
 async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResponse | JSONResponse:
-    """LiteLLM conversion path for non-Anthropic models (`internal/*` and `ollama-cloud/*`).
+    """LiteLLM conversion path for non-Anthropic models (`local/*` and `ollama-cloud/*`).
 
     Converts Anthropic-format requests to OpenAI format and routes through LiteLLM.
     As of 2026-05-10 the conversion forwards: `tools` array, `tool_use` blocks in
@@ -1737,7 +1745,7 @@ async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResp
     - `ollama-cloud/qwen3-coder-next` and `ollama-cloud/deepseek-v4-pro`: native
       OpenAI function calling, expected reliable.
     - `ollama-cloud/kimi-k2.6` and `ollama-cloud/glm-5.1`: untested.
-    - `internal/qwen3-4b`: tool-call JSON reliability at Q6_K_XL is unvalidated;
+    - `local/qwen3-4b-q6`: tool-call JSON reliability at Q6_K_XL is unvalidated;
       may need grammar-constrained generation as a fallback. See docs/TODO.md.
 
     Validation harness: `utils/tool_use_smoke_test.py`.
@@ -1984,7 +1992,7 @@ async def count_tokens_endpoint(req: Request):
 
     Routes based on model type:
     - Anthropic-native models: forward to api.anthropic.com/v1/messages/count_tokens
-    - LiteLLM-path models (internal/*, ollama-cloud/*): convert to OpenAI format
+    - LiteLLM-path models (local/*, ollama-cloud/*): convert to OpenAI format
       and use litellm.token_counter()
     - Unresolved models: return HTTP 400
     """

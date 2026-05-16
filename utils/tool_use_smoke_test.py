@@ -20,7 +20,7 @@ Turn 2: POST with 5 tool_result blocks in a single user message.
 
 Targets: ollama-cloud/qwen3-coder-next, ollama-cloud/deepseek-v4-pro,
          ollama-cloud/kimi-k2.6, ollama-cloud/glm-5.1,
-         internal/qwen3-4b (informational, non-gating).
+         local/qwen3-4b-q6 (informational, non-gating).
 
 Exit code: 0 if all ollama-cloud targets PASS, non-zero if any fail.
            Qwen3 failure is printed but does not affect exit code.
@@ -638,7 +638,7 @@ def main():
         ("ollama-cloud/deepseek-v4-pro", False),
         ("ollama-cloud/kimi-k2.6", False),
         ("ollama-cloud/glm-5.1", False),
-        ("internal/qwen3-4b", True),
+        ("local/qwen3-4b-q6", True),
     ]
 
     # Filter by --model if specified

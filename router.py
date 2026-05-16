@@ -60,10 +60,10 @@ class SmartRouter:
         self.litellm_router = Router(
             model_list=self.config["model_list"],
             routing_strategy="simple-shuffle",
-            # Fallback: if external (cloud) fails, go to internal (local)
+            # Fallback: if external (cloud) fails, go to local (llama-server)
             fallbacks=[
                 {
-                    "anthropic/claude-sonnet-4-6": ["internal/qwen3-4b"],
+                    "anthropic/claude-sonnet-4-6": ["local/qwen3-4b-q6"],
                 }
             ],
             # Retry config
@@ -83,7 +83,7 @@ class SmartRouter:
                 _litellm.callbacks.append(self._usage_tracker)
 
         self.routing_config = self.config.get("routing", {})
-        self.default_model = self.routing_config.get("default_model", "internal/qwen3-4b")
+        self.default_model = self.routing_config.get("default_model", "local/qwen3-4b-q6")
         self.cloud_model = self.routing_config.get("cloud_model", "anthropic/claude-sonnet-4-6")
         self.complexity_threshold = self.routing_config.get(
             "complexity_threshold_tokens", 2000
@@ -145,18 +145,21 @@ class SmartRouter:
             self._apply_cache_control(messages) if self._uses_anthropic(target) else messages
         )
 
-        if target.startswith("ollama-cloud/"):
-            # 3-step geometric backoff: each successive attempt allows more time.
-            # Timeouts: 60s → 90s → 120s. Worst case: 270s total (within CC's 300s httpx limit).
-            # Starting at 60s covers both fast (<10s) and normal-slow (30-60s) responses in one attempt;
-            # the old 30s floor caused every non-trivial kimi-k2.6 request to fail attempt 1 needlessly.
+        if not self._uses_anthropic(target):
+            # 3-step geometric backoff for all non-Anthropic models. Timeouts: 60s → 90s → 120s.
+            # Covers:
+            #   - ollama-cloud/*  (Ollama API cold-start / queuing delays)
+            #   - local/*         (llama-swap hot-swapping delays on Server 2)
+            #   - Any future non-Anthropic provider (Gemini, OpenAI, etc.)
+            # Worst case: 270s total (within CC's 300s httpx limit).
+            # Starting at 60s covers both fast (<10s) and normal-slow (30-60s) responses in one attempt.
             # Only litellm.Timeout triggers a retry; other exceptions (auth, 4xx) propagate immediately.
             _backoff_timeouts = [60, 90, 120]
             last_exc: Exception | None = None
             for attempt, timeout in enumerate(_backoff_timeouts, start=1):
                 if attempt > 1:
                     logger.warning(
-                        "ollama-cloud %s timed out on attempt %d/3, retrying (timeout=%ds)...",
+                        "%s timed out on attempt %d/3, retrying (timeout=%ds)...",
                         target, attempt - 1, timeout,
                     )
                 kw = {**kwargs, "request_timeout": timeout}
@@ -174,7 +177,7 @@ class SmartRouter:
                     continue
                 except Exception:
                     raise
-            logger.error("ollama-cloud %s: all 3 attempts timed out", target)
+            logger.error("%s: all 3 attempts timed out", target)
             raise last_exc  # type: ignore[misc]
         else:
             try:

@@ -58,7 +58,7 @@ Commands:
   /help                 Show this help
   /new                  Start a new chat
   /model [name]         Show/switch external model (e.g., gpt4, claude; auto=default)
-  /internal             Switch to internal LLM (Qwen3.5-4B on GPU)
+  /local                Switch to local LLM (default: Qwen3.5-4B Q6)
   /cloud                Force next message to use cloud model
   /rag [on|off|only]    Set RAG mode (default: off)
   /rag status           Show RAG config (mode, user, top_k, Qdrant points)
@@ -219,23 +219,24 @@ class CLIChat:
             if not arg:
                 if self.model is None:
                     mode_info = "AUTO (router default: external/Sonnet)"
-                elif self.model in ("internal", "internal/qwen3-4b"):
-                    mode_info = "INTERNAL (Qwen3.5-4B on GPU)"
+                elif self.model and self.model.startswith("local/"):
+                    mode_info = f"LOCAL ({self.model})"
                 else:
                     mode_info = f"EXTERNAL ({self.model})"
                 return f"  Current LLM mode: {mode_info}"
 
-            if arg.lower() == "internal":
-                self.model = "internal/qwen3-4b"
-                return "  Switched to internal LLM (Qwen3.5-4B on GPU)."
+            if arg.lower() == "local":
+                # Use the router default local model from config
+                self.model = _CONFIG.get("routing", {}).get("default_model", "local/qwen3-4b-q6")
+                return f"  Switched to local LLM ({self.model})."
             else:
                 # Assume any other argument is an external model name
                 self.model = arg if arg != "auto" else None
                 return f"  External model set to: {self.model or 'auto'}."
 
-        elif command == "/internal":
-            self.model = "internal/qwen3-4b"
-            return "  Switched to internal LLM (Qwen3.5-4B on GPU)."
+        elif command == "/local":
+            self.model = _CONFIG.get("routing", {}).get("default_model", "local/qwen3-4b-q6")
+            return f"  Switched to local LLM ({self.model})."
 
         elif command == "/cloud":
             self.force_cloud = True

@@ -31,25 +31,41 @@ router_settings:
 litellm_settings: {}
 
 # LiteLLM Model Routing ----------------------------------------------------
-# Default: internal (local Qwen3.5) if cloud unreachable. Fallback: external (Sonnet 4.6)
 model_list:
-  ### First use-case: interactive chat
-
-  # --- Primary LLM: GPU inference on Server 2 ---
-  - model_name: "internal/qwen3-4b"
+  #### First use-case: interactive chat -- local LLM on GPU inference on Server 2
+  #### Note, this is loaded via llama-swap by default -- TTL 0sec (always resident unless evicted) 
+  - model_name: "local/qwen3-4b-q6"
     litellm_params:
-      model: openai/qwen3-4b
+      model: openai/qwen3.5-4b-q6
       api_base: "http://${server2_ip}:8000/v1"
       api_key: "dummy-key"
     model_info:
-      id: "internal/qwen3-4b"
-      description: "Qwen3.5-4B Q6_K_XL — summarization, offline fallback, background"
-      # Advertised context window: per-slot capacity with `-c 220048 --parallel 2`.
-      # 220048 / 2 = 110024. This is what external clients (Cline, Claude Code) read via
+      id: "local/qwen3-4b-q6"
+      description: "Qwen3.5-4B-UD-Q6_K_XL -- local implementer model "
+      # Advertised context window: per-slot capacity with "--ctx-size 262144 --parallel 2"
+      # 262144 / 2 = 131072. This is what external clients (Cline, Claude Code) read via
       # /proxy/v1/model/info for their contextWindow setting.
-      max_tokens: 110024
-      max_input_tokens: 110024
-      context_window: 110024
+      max_tokens: 131072
+      max_input_tokens: 128024
+      context_window: 128024
+
+
+  #### Second use-case: interactive chat -- local LLM on GPU inference on Server 2
+  #### Note, this is loaded via llama-swap only when needed, TTL of 300sec
+  - model_name: "local/qwen3-9b-q4"
+    litellm_params:
+      model: openai/qwen3.5-9b-q4
+      api_base: "http://${server2_ip}:8000/v1"
+      api_key: "dummy-key"
+    model_info:
+      id: "local/qwen3-9b-q4"
+      description: "Qwen3.5-9B-UD-Q4_K_XL -- local chat model "
+      # Advertised context window: per-slot capacity with "--ctx-size 262144 --parallel 2"
+      # 262144 / 2 = 131072. This is what external clients (Cline, Claude Code) read via
+      # /proxy/v1/model/info for their contextWindow setting.
+      max_tokens: 131072
+      max_input_tokens: 128024
+      context_window: 128024
 
   - model_name: "anthropic/claude-sonnet-4-6"
     litellm_params:
@@ -132,14 +148,14 @@ model_list:
 
 # -- Routing Policy ------------------------------------------------------------
 routing:
-  default_model: "anthropic/claude-sonnet-4-6"
-  fallback_chain: ["internal/qwen3-4b", "anthropic/claude-sonnet-4-6"]
+  default_model: "local/qwen3-4b-q6"
+  fallback_chain: ["local/qwen3-4b-q6", "ollama-cloud/qwen3-coder-next"]
   # Route to cloud when context exceeds threshold.
   # Hard limit: -c 220048 / 2 = 110024 tokens per slot. At 100K we route to cloud,
   # leaving ~10K headroom for output (default max_tokens=1024 + safety margin).
   complexity_threshold_tokens: 100000
-  cloud_model: "anthropic/claude-sonnet-4-6"
-  summarization_model: "internal/qwen3-4b"
+  cloud_model: "ollama-cloud/kimi-k2.6"
+  summarization_model: "local/qwen3-9b-q4"
 
 
 #### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
@@ -175,7 +191,7 @@ rag:
     n_variants: 3
     lambda: 0.5
     pool_multiplier: 4
-    variant_model: "internal/qwen3-4b"
+    variant_model: "local/qwen3-4b"
 
   # -- Cross-encoder reranking (§13) -----------------------------------------
   rerank:

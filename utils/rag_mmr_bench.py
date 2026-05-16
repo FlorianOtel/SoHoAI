@@ -143,7 +143,7 @@ def _make_llm_fn(variant_model: str, config: dict) -> callable:
     if variant_model == "external":
         server1_ip = config.get("server1_ip", "192.168.1.93")
         return _make_external_llm_fn(f"http://{server1_ip}:8000")
-    # default: internal
+    # default: local
     server2_ip = config.get("server2_ip", "192.168.1.95")
     model      = config.get("model_list", [{}])[0].get("litellm_params", {}).get("model", "qwen3-4b")
     return _make_internal_llm_fn(server2_ip, model)
@@ -304,8 +304,8 @@ def main() -> int:
     p.add_argument("--variants", type=int, default=None,
                    help="Override rag.multi_query.n_variants")
     p.add_argument("--mode",          choices=["single", "multi", "both"], default="both")
-    p.add_argument("--variant-model", choices=["internal", "external"], default="internal",
-                   help="LLM used for query expansion (internal=Qwen3.5, external=Sonnet)")
+    p.add_argument("--variant-model", choices=["local", "external"], default="local",
+                   help="LLM used for query expansion (local=Qwen3.5, external=Sonnet)")
     p.add_argument("--show-variants", action="store_true",
                    help="Print the LLM-generated query variants for each query")
     p.add_argument("--compare",       action="store_true",
@@ -336,7 +336,7 @@ def main() -> int:
 
     # ── compare mode: internal vs external side-by-side ──────────────────
     if args.compare:
-        spec_fn = _make_llm_fn("internal", config)
+        spec_fn = _make_llm_fn("local", config)
         ext_fn  = _make_llm_fn("external", config)
 
         async def run_compare():
