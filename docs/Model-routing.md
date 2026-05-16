@@ -2,8 +2,8 @@
 title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (claude-code-kimi-k2.6)
-updated_at: 2026-05-16--15-05
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-16--23-12
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -67,8 +67,8 @@ of truth.
 
 | Public ID (= SoHoAI-config.yaml model_name) | Path | Backend | Context window |
 |---|---|---|---|
-| `local/qwen3-4b-q6` | LiteLLM | llama-server, Server 2, Qwen3.5-4B Q6_K_XL (default resident) | 128,024 |
-| `local/qwen3-9b-q4` | LiteLLM | llama-server, Server 2, Qwen3.5-9B Q4_K_XL (hot-swap, TTL 300s) | 128,024 |
+| `local/qwen3-4b-q6` | LiteLLM | llama-server, Server 2, Qwen3.5-4B Q6_K_XL (default resident) | 131,072 |
+| `local/qwen3-9b-q4` | LiteLLM | llama-server, Server 2, Qwen3.5-9B Q4_K_XL (hot-swap, TTL 300s) | 262,144 |
 | `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | 200,000 |
 | `anthropic/claude-sonnet-4-6` | Transparent forward | Anthropic API (Qwen fallback if down) | 200,000 |
 | `anthropic/claude-opus-4-7` | Transparent forward | Anthropic API | 1,000,000 |
@@ -101,7 +101,7 @@ In Cline VSCode settings, choose **LiteLLM** as the provider (not "OpenAI Compat
 ```
 Base URL : http://192.168.1.93:8000/proxy
 API Key  : sohoai-local  (any non-empty string)
-Model    : qwen3-4b  (local, 128K ctx)  OR  claude-sonnet-4-6  (cloud, 200K ctx)
+Model    : qwen3-4b  (local, 131K ctx)  OR  claude-sonnet-4-6  (cloud, 200K ctx)
 ```
 
 API key must be non-empty — Cline's client-side gate rejects an empty string regardless
@@ -532,7 +532,8 @@ discovery entry is needed. Including them in `/v1/models` caused two problems:
 
 | Public ID | claude-code-* alias | Backend | Notes |
 |---|---|---|---|
-| `local/qwen3-4b-q6` | `claude-code-qwen3-4b-q6` | llama-server, Server 2 | $0/session |
+| `local/qwen3-4b-q6` | `claude-code-qwen3-4b-q6` | llama-server, Server 2 | $0/session; 131k ctx |
+| `local/qwen3-9b-q4` | `claude-code-qwen3-9b-q4` | llama-server, Server 2 | $0/session; 262k ctx; hot-swap via llama-swap |
 | `ollama-cloud/deepseek-v4-pro` | `claude-code-deepseek-v4-pro` | Ollama cloud | Reasoning; `max_tokens ≥ 500` |
 | `ollama-cloud/kimi-k2.6` | `claude-code-kimi-k2.6` | Ollama cloud | Reasoning; `max_tokens ≥ 500` |
 | `ollama-cloud/glm-5.1` | `claude-code-glm-5.1` | Ollama cloud | Reasoning; `max_tokens ≥ 500` |

@@ -842,6 +842,7 @@ async def list_models():
             "id": model_id,
             "display_name": display_name,
             "context_window": model_info.get("context_window", 0),
+            "max_input_tokens": model_info.get("max_input_tokens", model_info.get("context_window", 0)),
             "max_tokens": model_info.get("max_tokens", 0),
             "created_at": "2025-01-01T00:00:00Z",
         })

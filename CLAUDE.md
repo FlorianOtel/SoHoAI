@@ -252,7 +252,7 @@ redis-server --appendonly yes --dir /mnt/nfs/__Backups/SoHoAI--databases/redis
 
 # Server 1 — orchestrator
 cd ~/Gin-AI/projects/SoHoAI
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload --reload-include "SoHoAI-config.yaml"
 
 # Server 1 — MCP server (HTTP mode for remote access)
 bash NFS-files--MCP-server/nfs_files_mcp_server.sh
