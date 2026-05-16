@@ -46,7 +46,7 @@ from rag_engine.search import search_rag
 
 # ---------------------------------------------------------------------------
 
-_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml"
 
 
 # ---------------------------------------------------------------------------

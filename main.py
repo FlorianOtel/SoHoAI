@@ -127,7 +127,7 @@ litellm.register_model({
 })
 
 # -- Load config ---------------------------------------------------------------
-with open("config.yaml") as f:
+with open("SoHoAI-config.yaml") as f:
     config = yaml.safe_load(f)
 
 _db_base = config.get("db_base_path", "/mnt/nfs/__Backups/SoHoAI--databases")
@@ -177,7 +177,7 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Chat store (SQLite) ✓")
 
-    app.state.router = SmartRouter(config_path="config.yaml", store=app.state.store)
+    app.state.router = SmartRouter(config_path="SoHoAI-config.yaml", store=app.state.store)
     logger.info(f"Router: {app.state.router.available_models}")
 
     async def summarize_fn(text: str) -> str:
@@ -373,7 +373,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
 
     # -- 4. RAG mode + system prompt (§8.1 / §8.2) ---------------------------
     # If the client sent rag_mode explicitly, honour it. Otherwise fall back to
-    # the server-side default from config.yaml (rag.default_mode).
+    # the server-side default from SoHoAI-config.yaml (rag.default_mode).
     if "rag_mode" in req.model_fields_set:
         rag_mode: RagMode = req.rag_mode
     else:
@@ -1043,7 +1043,7 @@ _PROXY_EXPOSED_MODELS: dict[str, str] = {
 
 
 def _build_proxy_model_entry(config: dict, public_name: str, internal_name: str) -> dict | None:
-    """Build one entry for /proxy/v1/model/info from the config.yaml model_list."""
+    """Build one entry for /proxy/v1/model/info from the SoHoAI-config.yaml model_list."""
     internal = next(
         (m for m in config.get("model_list", []) if m.get("model_name") == internal_name),
         None,

@@ -2,8 +2,8 @@
 title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-16--08-00
+updated_by: Claude Code (claude-code-kimi-k2.6)
+updated_at: 2026-05-16--08-41
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -83,7 +83,7 @@ Initial ingestion run produced **2891 files completed, 0 pending, 0 ignored**, y
 - Shared content under `/mnt/nfs/La-Familia` visible to all authenticated users
 - `owner` field in every Qdrant point; search filtered by `MatchAny(any=[user_owner, "la-familia"])`
 - `user_id` field added to `ChatRequest`, `SearchRequest`, and SQLite `chats` table
-- User→NFS root mapping in `config.yaml` (`users:` + `shared:` sections)
+- User→NFS root mapping in `SoHoAI-config.yaml` (`users:` + `shared:` sections)
 
 **Document ingestion**: `docling` (PDF, PPTX, DOCX) + dedicated ipynb cell extractor + `python-pptx` PPTX fallback + direct UTF-8 read (TXT, MD, YAML, CSV):
 - **ipynb NOT handled by docling** — Fix: `_parse_ipynb()` in `ingest.py` parses JSON directly, extracts markdown cells as prose and code cells as fenced blocks, skips outputs and empty cells.
@@ -108,7 +108,7 @@ Initial ingestion run produced **2891 files completed, 0 pending, 0 ignored**, y
 - **Multi-query + MMR** — `rag_engine/multi_query.py`; **permanently disabled** (`rag.multi_query.enabled: false`). Evaluated 2026-04-22: no-go verdict. Standard single-query retrieval is sufficient for this corpus.
 
 **Phase 2 implementation checklist** — all 14 items completed and strikethrough:
-~~1. Replace `unstructured` with `docling`~~ ~~2. Replace `sentence-transformers` with Ollama in `rag.py`~~ ~~3. Fix `config.yaml` RAG section (bge-m3, ollama_url)~~ ~~4. Add `owner` to Qdrant payload schema; `user_id` to `ChatRequest`/`SearchRequest`~~ ~~5. Add multi-user config (`users:` + `shared:` sections) to `config.yaml`~~ ~~6. Implement `rag_engine/` package (schema, collection, embeddings, state, scanner, ingest, search)~~ ~~7. Wire `rag_engine` into `main.py`; delete `rag.py`~~ ~~8. Implement standalone CLI utils (`utils/rag_*.py`)~~ ~~9. Add `POST /v1/rag/ingest/*` FastAPI endpoints~~ ~~10. Add `db_base_path` global config variable~~ ~~11. Configure `users:` section in `config.yaml` with real Google emails~~ ~~12. Run initial NFS scan and ingestion~~ ~~13. Implement `rag_mode` (off/on/only), system-prompt tool-use loop, `prompts/` module~~ ~~14. Implement multi-query + MMR reranking (`rag_engine/multi_query.py`)~~
+~~1. Replace `unstructured` with `docling`~~ ~~2. Replace `sentence-transformers` with Ollama in `rag.py`~~ ~~3. Fix `SoHoAI-config.yaml` RAG section (bge-m3, ollama_url)~~ ~~4. Add `owner` to Qdrant payload schema; `user_id` to `ChatRequest`/`SearchRequest`~~ ~~5. Add multi-user config (`users:` + `shared:` sections) to `SoHoAI-config.yaml`~~ ~~6. Implement `rag_engine/` package (schema, collection, embeddings, state, scanner, ingest, search)~~ ~~7. Wire `rag_engine` into `main.py`; delete `rag.py`~~ ~~8. Implement standalone CLI utils (`utils/rag_*.py`)~~ ~~9. Add `POST /v1/rag/ingest/*` FastAPI endpoints~~ ~~10. Add `db_base_path` global config variable~~ ~~11. Configure `users:` section in `SoHoAI-config.yaml` with real Google emails~~ ~~12. Run initial NFS scan and ingestion~~ ~~13. Implement `rag_mode` (off/on/only), system-prompt tool-use loop, `prompts/` module~~ ~~14. Implement multi-query + MMR reranking (`rag_engine/multi_query.py`)~~
 
 **→ NOW**: Phase 3 — Google OAuth2 middleware + OpenAI-compatible response format for Open WebUI (not blocking; RAG works end-to-end today via `--user florian`).
 
@@ -283,7 +283,7 @@ Clarification of a design pattern that was implicit in the code but not explicit
 
 #### Why `.claude/` appears in both `exclude_dir_names` and `claude_chats.roots`
 
-**In `config.yaml` `rag.scanner.exclude_dir_names`:**
+**In `SoHoAI-config.yaml` `rag.scanner.exclude_dir_names`:**
 ```yaml
 exclude_dir_names:
   - ".claude/"    # ← blocks the entire directory from the generic NFS scanner
@@ -294,7 +294,7 @@ This tells `scan_nfs_roots()` to completely skip the `.claude/` subtree when wal
 2. Picking up `.jsonl` session files incidentally through the wrong code path (they need special parsing to extract coherent dialogue)
 3. **Most critically**: ingesting the `.claude/chats/` symlink tree, which contains aliases to the same `.jsonl` files that live in `projects/`. Without exclusion, the same session would be ingested twice under different logical paths, producing duplicate Qdrant points.
 
-**In `config.yaml` `claude_chats.roots`:**
+**In `SoHoAI-config.yaml` `claude_chats.roots`:**
 ```yaml
 claude_chats:
   roots:
@@ -377,9 +377,9 @@ Three production issues surfaced during Claude Code sessions using `claude-code-
 
 ### Solutions
 
-**Fix 1 — Subagent blocklist** (`config.yaml` + `main.py`):
+**Fix 1 — Subagent blocklist** (`SoHoAI-config.yaml` + `main.py`):
 
-Added `proxy.blocked_models` list to `config.yaml`. In `anthropic_messages()`, before any routing logic, the model is checked against this list and rejected with HTTP 400 (`not_supported_error`) if it matches. Default list: `[claude-haiku-4-5-20251001]`.
+Added `proxy.blocked_models` list to `SoHoAI-config.yaml`. In `anthropic_messages()`, before any routing logic, the model is checked against this list and rejected with HTTP 400 (`not_supported_error`) if it matches. Default list: `[claude-haiku-4-5-20251001]`.
 
 ```yaml
 proxy:
@@ -407,7 +407,7 @@ Added `_sanitize_tool_use_id()` helper and `_TOOL_ID_VALID = re.compile(r'^[a-zA
 
 | File | Change |
 |------|--------|
-| `config.yaml` | New `proxy.blocked_models` key |
+| `SoHoAI-config.yaml` | New `proxy.blocked_models` key |
 | `main.py` | Blocklist check in `anthropic_messages()`; `_TOOL_ID_VALID` + `_sanitize_tool_use_id()` helper; both tool_use ID sites updated |
 | `router.py` | `import litellm`; 3-step timeout backoff for `ollama-cloud/*` |
 
@@ -530,7 +530,7 @@ Three code-quality issues accumulated during the `claude-code-*` alias scheme +
    buggy code is harder to remove safely later.
 
 3. **Hardcoded model_info fallbacks in `list_models()`** — all four `ollama-cloud/*`
-   models lacked `model_info:` blocks in `config.yaml`, so their context-window and
+   models lacked `model_info:` blocks in `SoHoAI-config.yaml`, so their context-window and
    max-token values were hardcoded in a Python fallback dict. The `internal/gemma-4-e4b`
    and `anthropic/claude-sonnet-4-6` entries already had proper `model_info:` blocks;
    the Ollama Cloud entries just weren't updated at introduction time.
@@ -545,11 +545,11 @@ Three code-quality issues accumulated during the `claude-code-*` alias scheme +
    exclusion rationale.
 
 3. **Config-driven model_info**: added `model_info:` blocks to all four `ollama-cloud/*`
-   entries in `config.yaml` (same structure as existing Anthropic/Gemma entries:
+   entries in `SoHoAI-config.yaml` (same structure as existing Anthropic/Gemma entries:
    `id`, `description`, `max_tokens`, `max_input_tokens`, `context_window`), then
    deleted the 9-line hardcoded fallback dict from `list_models()`.
 
-### Values recorded in config.yaml
+### Values recorded in SoHoAI-config.yaml
 
 | Model | context_window | max_tokens |
 |---|---|---|
@@ -570,4 +570,4 @@ etc.) without importing Python.
 
 - `main.py`: `_display_name_for()` (dead branch removed), `list_models()` (fallback removed),
   all six tab-indented functions (indentation normalized)
-- `config.yaml`: `ollama-cloud/*` entries (lines 83–125 after this change)
+- `SoHoAI-config.yaml`: `ollama-cloud/*` entries (lines 83–125 after this change)

@@ -2,8 +2,8 @@
 title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-15--19-54
+updated_by: Claude Code (claude-code-kimi-k2.6)
+updated_at: 2026-05-16--08-41
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -114,7 +114,7 @@ Other user directories not yet surveyed — ingestion will scan all configured r
 
 ### 1.2 Exclusion filters (updated 2026-04-23)
 
-Exclusion filters are configured in `config.yaml` under `rag.scanner` (required — no
+Exclusion filters are configured in `SoHoAI-config.yaml` under `rag.scanner` (required — no
 hardcoded fallback). `rag_engine/scanner.py` validates all four keys at startup and
 raises `ValueError` immediately if any are missing.
 
@@ -175,7 +175,7 @@ naturally with the same logic.
 path) using `dirname.endswith(suffix)` — kept separate because `.dist-info` is a name
 suffix, not a path pattern.
 
-To add or remove an exclusion, edit `config.yaml` and re-run `rag_sync_nfs.py`.
+To add or remove an exclusion, edit `SoHoAI-config.yaml` and re-run `rag_sync_nfs.py`.
 No code change is required. When a directory is newly excluded, `rag_sync_nfs.py`
 purges its files from the queue and Qdrant automatically (via `handle_deleted`).
 
@@ -282,7 +282,7 @@ To reduce search latency during ingestion in CPU mode, lower `--batch` (e.g. `--
 
 **Query latency (GPU mode)**: ~10–20ms/chunk. Search queries are not meaningfully blocked
 by ingestion since Ollama on Server 2 is not used for search (Server 1 search path uses
-Server 1's Ollama). Ensure `ollama_url` in `config.yaml` is set consistently for both
+Server 1's Ollama). Ensure `ollama_url` in `SoHoAI-config.yaml` is set consistently for both
 the daemon and the search path — mixing servers will produce wrong cosine distances.
 
 **Why Server 2 VRAM permits bge-m3 when llama-server is idle:**
@@ -321,7 +321,7 @@ bge-m3 is the practical optimum: near-top MTEB quality, 8192-token context, fits
 **Access**: REST API via `qdrant-client` Python library (`QdrantClient(url="http://192.168.1.93:6333")`).
 No LangChain wrapper.
 
-Config key: `rag.qdrant_url: "http://192.168.1.93:6333"` in `config.yaml`.
+Config key: `rag.qdrant_url: "http://192.168.1.93:6333"` in `SoHoAI-config.yaml`.
 
 **Why Qdrant?**
 Qdrant's payload system stores arbitrary JSON per vector point and returns it with every
@@ -655,7 +655,7 @@ Family Group but have separate Google accounts.
 3. **Authorization**: at every RAG search and chat operation, the `owner` value determines what
    the user can access
 
-#### User → NFS root mapping (in `config.yaml`)
+#### User → NFS root mapping (in `SoHoAI-config.yaml`)
 
 ```yaml
 users:
@@ -730,11 +730,11 @@ Google OAuth requires internet. For a home lab this means:
 | ------ | ------ |
 | Choose docling over unstructured | ✅ done |
 | Replace sentence-transformers with Ollama in rag.py | ✅ done (2026-04-08) |
-| Fix config.yaml RAG section (mxbai-embed-large, ollama_url) | ✅ done (2026-04-16) |
+| Fix SoHoAI-config.yaml RAG section (mxbai-embed-large, ollama_url) | ✅ done (2026-04-16) |
 | Fix stale collection defaults in rag.py and schemas.py (`"default"` → `"documents"`) | ✅ done (2026-04-16) |
 | Add `owner` field to Qdrant payload schema and search filter | ✅ designed (2026-04-16) |
 | Add `user_id` to ChatRequest, SearchRequest, SQLite chats table | ✅ designed (2026-04-16) |
-| Add multi-user config (`users:` + `shared:` sections in config.yaml) | ✅ done (2026-04-16) |
+| Add multi-user config (`users:` + `shared:` sections in SoHoAI-config.yaml) | ✅ done (2026-04-16) |
 | Define `rag_engine/` package layout + shared modules (`collection.py`, `schema.py`) | ✅ designed (2026-04-16) |
 | Define `ingestion_queue` schema with crash recovery + retry columns | ✅ designed (2026-04-16) |
 | Define worker loop with delete-before-insert idempotency | ✅ designed (2026-04-16) |
@@ -748,8 +748,8 @@ Google OAuth requires internet. For a home lab this means:
 | Implement standalone CLI utils (`utils/rag_*.py`) | ✅ done (2026-04-16) |
 | Add `POST /v1/rag/ingest/*` endpoints with user scoping | ✅ done (2026-04-16) |
 | Add `db_base_path` global config variable | ✅ done (2026-04-16) |
-| Configure `users:` section in `config.yaml` with real Google emails | ✅ done (2026-04-17) — `florian.otel@gmail.com` active; others commented out |
-| Move exclusion filters to config.yaml (`rag.scanner` subsection) | ✅ done (2026-04-19) |
+| Configure `users:` section in `SoHoAI-config.yaml` with real Google emails | ✅ done (2026-04-17) — `florian.otel@gmail.com` active; others commented out |
+| Move exclusion filters to SoHoAI-config.yaml (`rag.scanner` subsection) | ✅ done (2026-04-19) |
 | Incremental sync deletes orphaned Qdrant points (not just SQLite rows) | ✅ done (2026-04-19) |
 | Run initial NFS scan + data ingestion | ⏳ in progress — see §5 |
 | Implement Google OAuth2 middleware (Phase 3, not blocking for RAG) | ⏳ Phase 3 |
@@ -785,7 +785,7 @@ rag_engine/
 
 | Work stream | Files | Can proceed independently? |
 |-------------|-------|---------------------------|
-| NFS scanner + SQLite tracker | `state.py`, `utils/rag_sync_nfs.py` | Yes — only needs config.yaml + NFS |
+| NFS scanner + SQLite tracker | `state.py`, `utils/rag_sync_nfs.py` | Yes — only needs SoHoAI-config.yaml + NFS |
 | docling parsing + chunking | `ingest.py` (parse/chunk functions) | Yes — pure functions, no Qdrant |
 | Embedding integration | `embeddings.py` | Yes — only needs Ollama on Server 1 |
 | Qdrant upsert worker | `ingest.py` (upsert), `utils/rag_ingest_daemon.py` | Yes, after `collection.py` exists |
@@ -843,7 +843,7 @@ full incremental reconciliation on every run:
   (the worker loop handles Qdrant cleanup before re-ingestion — see §4.4 step 0)
 - **Deleted or excluded files:** if a previously `completed` file no longer appears in the
   scan results — whether because it was physically deleted from NFS, or because it is now
-  matched by an exclusion filter in `config.yaml` — its SQLite row is removed **and** all
+  matched by an exclusion filter in `SoHoAI-config.yaml` — its SQLite row is removed **and** all
   corresponding Qdrant points are deleted, filtered by `source_path`. Each delete uses
   `wait=False` (fire-and-forget) — Qdrant queues it and returns immediately, so the script
   never blocks on index re-optimization. Any exception (Qdrant unreachable) aborts the
@@ -905,7 +905,7 @@ chunking changes produce a different number of chunks.
 ### 4.5 Standalone Utilities (`utils/`)
 
 Standalone CLI scripts enable independent progress monitoring and RAG pipeline management without launching the FastAPI server:
-* `utils/rag_sync_nfs.py`: Scans all configured NFS roots (per-user + shared), derives `owner` per file, applies filters from `config.yaml`, and populates SQLite with `pending` files. New files → `pending`; modified files (mtime changed) → `pending`; `ignored` files (mtime unchanged) → no-op (permanent skip); `ignored` files (mtime changed, i.e. file replaced) → reset to `pending`. For files removed from NFS or newly excluded by config, removes the SQLite row and deletes the corresponding Qdrant points. Accepts `--user florian` to scan a single user's root only. Always run this before restarting the daemon after failures.
+* `utils/rag_sync_nfs.py`: Scans all configured NFS roots (per-user + shared), derives `owner` per file, applies filters from `SoHoAI-config.yaml`, and populates SQLite with `pending` files. New files → `pending`; modified files (mtime changed) → `pending`; `ignored` files (mtime unchanged) → no-op (permanent skip); `ignored` files (mtime changed, i.e. file replaced) → reset to `pending`. For files removed from NFS or newly excluded by config, removes the SQLite row and deletes the corresponding Qdrant points. Accepts `--user florian` to scan a single user's root only. Always run this before restarting the daemon after failures.
 * `utils/rag_ingest_daemon.py`: The worker loop executing the 7-step atomic embedding process (includes `owner` in every Qdrant payload). Both `--workers` and `--batch` are **required** flags — see §5.4 for operating points. `--workers` controls file-level concurrency (how many files parse+embed simultaneously, each in its own OS thread with a thread-local `DocumentConverter`); `--batch` controls chunk-level Ollama concurrency within each file.
 * `utils/rag_status.py`: Dashboard querying SQLite/Qdrant to output ingestion metrics (`pending`, `processing`, `completed`, `ignored`). `ignored` count always shown; `--ignored` for full detail listing with retry count and last error. Accepts `--user` to filter by owner. `--watch LOG_FILE` mode: refreshes every 2s, shows per-file chunk progress bar, elapsed time, chunk rate, and ETA (absolute clock + remaining duration) derived from log timestamps. `--list-pending [N]` prints pending file paths one per line (pipeable into `wc -l`, `head`, etc.); combinable with `--user`.
   `--watch` log parser (`parse_log`) tracks all in-flight files simultaneously (updated 2026-04-22). The original single-state machine reset on every `Processing` line and would lose any file whose `Chunked` line had already appeared before a later `Processing` line — i.e. it broke silently with `--workers > 1`. Fix: per-file state dict keyed by full NFS path; `name_to_path` lookup associates `Chunked`/`Embedding progress`/`Ingested` lines (filename only) back to their full-path entry. Display picks the file currently in `embedding` phase with the most recent progress timestamp.
@@ -969,10 +969,10 @@ ls /mnt/nfs/__Backups/SoHoAI--databases/
 ```
 
 All directories must exist and be writable. They are all under `db_base_path` in
-`config.yaml` — change that single key to relocate everything (also update `redis.dir`
+`SoHoAI-config.yaml` — change that single key to relocate everything (also update `redis.dir`
 manually, as it is not auto-derived in Python).
 
-### 5.2 Configure NFS roots in `config.yaml`
+### 5.2 Configure NFS roots in `SoHoAI-config.yaml`
 
 `florian.otel@gmail.com` is already active. The `shared:` section (`/mnt/nfs/La-Familia`)
 is already active. Other users (Eva, Annika, Laura) remain commented out until ready.
@@ -985,7 +985,7 @@ To add another user, uncomment their block and fill in the real Google email:
   #   nfs_roots: ["/mnt/nfs/Eva"]
 ```
 
-To adjust exclusion filters (add or remove paths), edit `config.yaml` under `rag.scanner`
+To adjust exclusion filters (add or remove paths), edit `SoHoAI-config.yaml` under `rag.scanner`
 (see §1.2). No code change required — the scanner reads these at runtime.
 
 ### 5.3 Populate the ingestion queue (NFS scan)
@@ -995,7 +995,7 @@ python utils/rag_sync_nfs.py
 ```
 
 This walks `/mnt/nfs/Florian` and `/mnt/nfs/La-Familia`, applies all exclusion filters
-from `config.yaml` (`rag.scanner`), and inserts discovered files into the SQLite ingestion
+from `SoHoAI-config.yaml` (`rag.scanner`), and inserts discovered files into the SQLite ingestion
 queue (`rag_state.db`) as `pending`. Takes 1–3 minutes — filesystem `stat()` calls only,
 no embedding yet.
 
@@ -1036,7 +1036,7 @@ embed are strictly sequential so they do not compete. `--workers 1` keeps doclin
 4 internal threads from crowding out Ollama.
 
 ```bash
-# config.yaml: ollama_url: http://192.168.1.93:11434/api/embeddings
+# SoHoAI-config.yaml: ollama_url: http://192.168.1.93:11434/api/embeddings
 screen -S rag-ingest
 python utils/rag_ingest_daemon.py --workers 1 --batch 5
 # Ctrl-A D to detach; screen -r rag-ingest to reattach
@@ -1077,7 +1077,7 @@ leaving only ~1GB headroom in the RTX 5070's 12GB — fine at low concurrency bu
 under a heavy `--batch 20` load.
 
 ```bash
-# config.yaml: ollama_url: http://192.168.1.95:11434/api/embeddings
+# SoHoAI-config.yaml: ollama_url: http://192.168.1.95:11434/api/embeddings
 screen -S rag-ingest
 python utils/rag_ingest_daemon.py --workers 3 --batch 20
 # Ctrl-A D to detach; screen -r rag-ingest to reattach
@@ -1348,7 +1348,7 @@ python utils/rag_reset.py --user florian
 | `.xlsx` | Skipped | Not supported by docling |
 | `.jpg` / `.png` / `.mp4` | Skipped | Phase 4 (CLIP embeddings) |
 
-Exclusion filters (directories and file patterns) are configured in `config.yaml` under
+Exclusion filters (directories and file patterns) are configured in `SoHoAI-config.yaml` under
 `rag.scanner` — see §1.2 for the full list and how to add new exclusions.
 
 ---
@@ -1409,7 +1409,7 @@ relevance-plus-diversity-optimised candidate set.
 - `rag_engine/tool_use.py` — new (tool-call protocol parser + formatter)
 - `prompts/rag_system_prompts.py` — new (system prompts for off/on/only modes)
 - `rag_engine/__init__.py` — simplified to clean re-export of `search_rag` + `multi_query_search`
-- `config.yaml` — single merged `rag:` block with `tool_use:` and `multi_query:` sub-sections
+- `SoHoAI-config.yaml` — single merged `rag:` block with `tool_use:` and `multi_query:` sub-sections
 - `utils/cli_chat.py` — `/rag on|off|only`, sends `rag_mode` field
 - `utils/rag_smoke_test.py` — updated to `rag_mode: "on"` payload
 
@@ -1424,7 +1424,7 @@ issues found and fixed:
 | File | Issue | Fix |
 |---|---|---|
 | `main.py` | Entire orchestrator replaced with a mock stub returning static strings | Restored from git; §8 changes applied surgically on top |
-| `config.yaml` | Duplicate `rag:` key — second block silently shadowed the first, destroying `qdrant_url`, `ollama_url`, `top_k`, `scanner` | Merged into one `rag:` block |
+| `SoHoAI-config.yaml` | Duplicate `rag:` key — second block silently shadowed the first, destroying `qdrant_url`, `ollama_url`, `top_k`, `scanner` | Merged into one `rag:` block |
 | `rag_engine/__init__.py` | `def search_rag()` shadowed its own import; `else` branch called itself → infinite recursion | Reduced to two-line re-export; dispatch lives in `main.py:_retrieve()` |
 | `rag_engine/__init__.py` | `multi_query_search(..., llm_fn=None)` — crash on first multi-query call | Removed from `__init__`; only `main.py:_retrieve()` calls it with a valid `llm_fn` |
 | `rag_engine/multi_query.py` | Missing `from typing import Any` | Added |
@@ -1443,10 +1443,10 @@ All service addresses in the codebase now use explicit IPs:
 |---|---|---|
 | Redis | `127.0.0.1:6379` | **Loopback required** — Redis runs in protected mode on Server 1; orchestrator is co-located. Config comment explains this. Do not change. |
 | Ollama | `192.168.1.93:11434` | Ollama runs on Server 1 CPU. Explicit IP for consistency and correctness if any util is ever run from Server 2. |
-| Qdrant | `192.168.1.93:6333` | Qdrant runs on Server 1 NVMe. Explicit IP in both `config.yaml` and all Python fallbacks. |
+| Qdrant | `192.168.1.93:6333` | Qdrant runs on Server 1 NVMe. Explicit IP in both `SoHoAI-config.yaml` and all Python fallbacks. |
 | llama-server | `192.168.1.95:8000` | Server 2 GPU. Always been explicit — unchanged. |
 
-`config.yaml` is the single source of truth for all non-Redis URLs. Python fallback defaults in source files match `config.yaml` exactly and are only reached if the config file fails to load.
+`SoHoAI-config.yaml` is the single source of truth for all non-Redis URLs. Python fallback defaults in source files match `SoHoAI-config.yaml` exactly and are only reached if the config file fails to load.
 
 ### 8.1 Three RAG modes: `off` / `on` / `only` ✅ implemented 2026-04-21
 
@@ -1468,7 +1468,7 @@ is §8.2. The two sections are meant to be implemented in the same change set.
 File: `schemas.py`.
 
 The legacy boolean toggle has been **removed entirely**. All clients send `rag_mode`
-explicitly; server falls back to `rag.default_mode` from `config.yaml` when omitted.
+explicitly; server falls back to `rag.default_mode` from `SoHoAI-config.yaml` when omitted.
 
 ```python
 from enum import Enum
@@ -1487,7 +1487,7 @@ class ChatRequest(BaseModel):
 
 #### Config changes
 
-File: `config.yaml`, under `rag:`:
+File: `SoHoAI-config.yaml`, under `rag:`:
 
 ```yaml
 rag:
@@ -1618,7 +1618,7 @@ File: `utils/cli_chat.py`.
    — tool is called (search returns low-relevance hits), assistant replies with the
    exact decline sentence and nothing else.
 5. Config default: `curl … -d '{"messages":[…]}'` (no `rag_mode`) uses
-   `rag.default_mode` from `config.yaml`; overriding `default_mode: "only"` and omitting
+   `rag.default_mode` from `SoHoAI-config.yaml`; overriding `default_mode: "only"` and omitting
    `rag_mode` in the request gives `only`-mode behaviour.
 
 ### 8.2 Tool-use via system prompt (provider-independent) ✅ implemented 2026-04-21
@@ -2464,7 +2464,7 @@ Key design choices:
 
 ### 10.3 NFS distributed lock — `rag.ingest_lock`
 
-**Config** (`config.yaml`): `rag.ingest_lock: "/mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock"`
+**Config** (`SoHoAI-config.yaml`): `rag.ingest_lock: "/mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock"`
 
 The daemon (`utils/rag_ingest_daemon.py`) acquires an exclusive lock on this NFS file at
 startup, before any ingestion work begins. The lock prevents two daemon instances from
@@ -2966,7 +2966,7 @@ path as server-unreachable).
 
 ### 13.3 Configuration
 
-All settings are in the `rag.rerank` block of `config.yaml`:
+All settings are in the `rag.rerank` block of `SoHoAI-config.yaml`:
 
 ```yaml
 rag:
@@ -3102,7 +3102,7 @@ query
                                   cross-encoder rerank (bge-reranker-v2-m3) → top 5
 ```
 
-### 14.3 Configuration (config.yaml)
+### 14.3 Configuration (SoHoAI-config.yaml)
 
 ```yaml
 rag:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SoHoAI RAG ingestion wrapper.
 # Run by systemd rag-ingest.service or directly for manual/debug use.
-# The daemon acquires the NFS lock (rag.ingest_lock in config.yaml) internally;
+# The daemon acquires the NFS lock (rag.ingest_lock in SoHoAI-config.yaml) internally;
 # if another daemon is already running anywhere, it exits with a clear message.
 #
 # Env overrides:
@@ -38,7 +38,7 @@ for user in "${RAG_SYNC_USERS[@]}"; do
 done
 
 log "--- rag_ingest_daemon.py ---"
-# Daemon acquires the NFS lock (rag.ingest_lock in config.yaml) internally.
+# Daemon acquires the NFS lock (rag.ingest_lock in SoHoAI-config.yaml) internally.
 # If another daemon is running anywhere, it prints a message and exits cleanly.
 # Do NOT tee here: --log-file writes directly to $LOGFILE; tee would double log lines.
 # stderr goes to journald via StandardError=journal in the service unit.

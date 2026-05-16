@@ -117,7 +117,7 @@ Relative paths resolve from the Gin-AI root. Project files require the `projects
 
 Examples:
 - `projects/SoHoAI/main.py` → `/mnt/nfs/Florian/Gin-AI/projects/SoHoAI/main.py`
-- `projects/SoHoAI/config.yaml` → `/mnt/nfs/Florian/Gin-AI/projects/SoHoAI/config.yaml`
+- `projects/SoHoAI/SoHoAI-config.yaml` → `/mnt/nfs/Florian/Gin-AI/projects/SoHoAI/SoHoAI-config.yaml`
 - `Gin-AI/docs/` → `/mnt/nfs/Florian/Gin-AI/docs/`
 
 ---

@@ -122,7 +122,7 @@ def main() -> None:
 
     user_id = None if args.no_filter else args.user
 
-    with open(Path(__file__).resolve().parent.parent / "config.yaml") as f:
+    with open(Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml") as f:
         config = yaml.safe_load(f)
 
     rag_cfg = config.get("rag", {})

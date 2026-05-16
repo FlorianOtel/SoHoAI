@@ -52,10 +52,10 @@ DOCUMENTS_NEW_COLLECTION = "documents_new"
 
 
 def _load_config() -> dict:
-    """Load config.yaml from project root."""
-    config_path = Path(__file__).resolve().parent.parent / "config.yaml"
+    """Load SoHoAI-config.yaml from project root."""
+    config_path = Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml"
     if not config_path.exists():
-        raise FileNotFoundError(f"config.yaml not found at {config_path}")
+        raise FileNotFoundError(f"SoHoAI-config.yaml not found at {config_path}")
     with open(config_path) as f:
         return yaml.safe_load(f)
 
@@ -66,7 +66,7 @@ def _get_qdrant_url(cli_url: str | None, config: dict) -> str:
         return cli_url
     url = config.get("rag", {}).get("qdrant_url")
     if not url:
-        raise ValueError("qdrant_url not found in config.yaml[rag] and not provided via --qdrant-url")
+        raise ValueError("qdrant_url not found in SoHoAI-config.yaml[rag] and not provided via --qdrant-url")
     return url
 
 
@@ -349,7 +349,7 @@ def main() -> None:
     )
     migrate_parser.add_argument(
         "--qdrant-url",
-        help="Qdrant server URL (default from config.yaml)",
+        help="Qdrant server URL (default from SoHoAI-config.yaml)",
     )
     migrate_parser.add_argument(
         "--force",
@@ -364,7 +364,7 @@ def main() -> None:
     )
     swap_parser.add_argument(
         "--qdrant-url",
-        help="Qdrant server URL (default from config.yaml)",
+        help="Qdrant server URL (default from SoHoAI-config.yaml)",
     )
     swap_parser.add_argument(
         "--confirm",
@@ -379,7 +379,7 @@ def main() -> None:
     )
     status_parser.add_argument(
         "--qdrant-url",
-        help="Qdrant server URL (default from config.yaml)",
+        help="Qdrant server URL (default from SoHoAI-config.yaml)",
     )
 
     args = parser.parse_args()

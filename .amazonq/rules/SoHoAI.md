@@ -10,12 +10,12 @@ Distributed two-server AI orchestrator with:
 - Smart routing: local GPU → cloud fallback
 - RAG pipeline: docling + bge-m3 (Ollama) + Qdrant vector store
 
-Key files: main.py, config.yaml, router.py, conversation.py, kv_cache.py, chat_store.py
+Key files: main.py, SoHoAI-config.yaml, router.py, conversation.py, kv_cache.py, chat_store.py
 
 RAG package: rag_engine/ (schema, collection, embeddings, state, scanner, ingest, search)
 RAG CLI: utils/rag_sync_nfs.py, rag_ingest_daemon.py, rag_status.py, rag_search_cli.py, rag_reset.py
 
-Databases (SQLite under db_base_path in config.yaml; Qdrant active storage is local NVMe):
+Databases (SQLite under db_base_path in SoHoAI-config.yaml; Qdrant active storage is local NVMe):
 - /mnt/nfs/__Backups/SoHoAI--databases/sqlite/telemetry.db
 - /mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db
 - /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/ (Qdrant snapshots on NAS)

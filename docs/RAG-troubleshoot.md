@@ -2,8 +2,8 @@
 title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-14--23-08
+updated_by: Claude Code (claude-code-kimi-k2.6)
+updated_at: 2026-05-16--08-41
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -864,7 +864,7 @@ Effect on VRAM (measured before/after):
 The compute buffer dropped 22× from 1168 MiB to 53 MiB. bge-m3 now fits reliably alongside
 llama-server even with both KV slots active.
 
-**Immediate workaround applied in parallel:** `config.yaml` `ollama_url` temporarily reverted to
+**Immediate workaround applied in parallel:** `SoHoAI-config.yaml` `ollama_url` temporarily reverted to
 Server 1 CPU embed (`192.168.1.93:11434`) while Server 2 was being fixed.
 **Resolved 2026-05-04:** `ollama_url` restored to Server 2 GPU (`192.168.1.95:11434`) after
 `OLLAMA_CONTEXT_LENGTH=768` was deployed. GPU embed is now the active configuration.

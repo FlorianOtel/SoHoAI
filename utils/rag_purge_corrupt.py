@@ -202,7 +202,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Load config
-    config_path = Path(__file__).resolve().parent.parent / "config.yaml"
+    config_path = Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml"
     with open(config_path) as f:
         config = yaml.safe_load(f)
 

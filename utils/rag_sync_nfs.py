@@ -12,7 +12,7 @@ Handles all cases uniformly:
   - Ignored:     status = 'ignored', mtime unchanged → no-op (permanent skip).
   - Completed / pending / processing, mtime unchanged: no-op.
 
-Files removed from NFS (or newly matched by an exclusion filter in config.yaml)
+Files removed from NFS (or newly matched by an exclusion filter in SoHoAI-config.yaml)
 are deleted from SQLite and their Qdrant points purged.
 
 Usage (run from project root):
@@ -72,7 +72,7 @@ def main() -> None:
     parser.add_argument("--user", metavar="OWNER", help="Scan only this owner's roots (e.g. florian)")
     args = parser.parse_args()
 
-    with open(Path(__file__).resolve().parent.parent / "config.yaml") as f:
+    with open(Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml") as f:
         config = yaml.safe_load(f)
 
     db_base = config.get("db_base_path", "/mnt/nfs/__Backups/SoHoAI--databases")

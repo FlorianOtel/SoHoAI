@@ -2,8 +2,8 @@
 title: "SoHoAI Usage and Billing Telemetry Pipeline"
 created_at: 2026-05-06--00-00
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-15--19-54
+updated_by: Claude Code (claude-code-kimi-k2.6)
+updated_at: 2026-05-16--08-41
 context: >
   Cross-project design document for SoHoAI Stage 1 telemetry implementation.
   Goal: Add a complete usage and billing telemetry pipeline to SoHoAI so that
@@ -214,7 +214,7 @@ Google, etc.) and returns total cost in USD.
 
 For local models (Qwen3.5 / "internal"), `litellm.completion_cost()` returns 0.0
 (correct — no API charges). To shadow-cost local inference for internal
-accounting, add an optional `local_model_pricing` block to config.yaml:
+accounting, add an optional `local_model_pricing` block to SoHoAI-config.yaml:
 
 ```yaml
 local_model_pricing:

@@ -37,11 +37,11 @@ from rag_engine.search import search_rag  # noqa: E402
 
 # -- Config --------------------------------------------------------------------
 
-# Resolve config.yaml relative to this script's directory so the path is
+# Resolve SoHoAI-config.yaml relative to this script's directory so the path is
 # correct regardless of the working directory the caller uses.
-# ("../config.yaml" only works when run from utils/, but the documented
+# ("../SoHoAI-config.yaml" only works when run from utils/, but the documented
 # invocation is `python utils/cli_chat.py` from the project root.)
-_CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
+_CONFIG_PATH = Path(__file__).parent.parent / "SoHoAI-config.yaml"
 
 try:
     with open(_CONFIG_PATH) as f:

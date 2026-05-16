@@ -48,7 +48,7 @@ from rag_engine.search import search_rag  # noqa: E402
 # -- helpers ------------------------------------------------------------------
 
 def _load_config() -> dict:
-    with open(Path(__file__).resolve().parent.parent / "config.yaml") as f:
+    with open(Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml") as f:
         return yaml.safe_load(f)
 
 
@@ -189,7 +189,7 @@ def main() -> int:
                    help="Skip ownership filter (dev mode)")
     p.add_argument("--top-k", type=int, default=5)
     p.add_argument("--server", default=None,
-                   help="Orchestrator URL (default: http://<server1_ip>:8000 from config.yaml)")
+                   help="Orchestrator URL (default: http://<server1_ip>:8000 from SoHoAI-config.yaml)")
     p.add_argument("--timeout", type=float, default=180.0,
                    help="Chat endpoint timeout in seconds (default 180)")
     p.add_argument("--expect", metavar="SUBSTR", default=None,

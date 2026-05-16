@@ -90,7 +90,8 @@
       "Bash(boltctl list *)",
       "Bash(git *)",
       "Bash(journalctl *)",
-      "Bash(systemctl status *)"
+      "Bash(systemctl status *)",
+      "Bash(perl *)"
     ],
     "additionalDirectories": [
       "/home/florian/Gin-AI",

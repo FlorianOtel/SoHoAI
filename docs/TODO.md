@@ -2,8 +2,8 @@
 title: "SoHoAI — Future work and deferred tasks"
 created_at: 2026-05-04--17-30
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-15--19-54
+updated_by: Claude Code (claude-code-kimi-k2.6)
+updated_at: 2026-05-16--08-41
 context: >
   Tracks deferred implementation work that is understood, scoped, and intentionally
   left for a future session. Each entry includes the motivation, the known approach,
@@ -29,7 +29,7 @@ Required work in a future claude-orchestra branch:
 
 ## Phase 3 — MCP integration + Web UI + Auth (in progress)
 
-**Google OAuth2 (OIDC) authentication middleware** — family members authenticate with separate Google accounts within the same Google Family Group. User identity from JWT is mapped to `owner` via `config.yaml` `users:` section; Qdrant search filtered by ownership.
+**Google OAuth2 (OIDC) authentication middleware** — family members authenticate with separate Google accounts within the same Google Family Group. User identity from JWT is mapped to `owner` via `SoHoAI-config.yaml` `users:` section; Qdrant search filtered by ownership.
 
 **MCP gateway in orchestrator** — `mcp_gateway.py` stub ready. Plan: delegate tool calls to specialized MCP servers (filesystem, web search, calendar, weather).
 

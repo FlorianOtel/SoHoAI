@@ -32,7 +32,7 @@ INCLUDE_EXTENSIONS: set[str] = {".py", ".yaml", ".yml", ".toml", ".sh"}
 
 _SNAPSHOT_FILES_FALLBACK: list[str] = [
     "pyproject.toml",
-    "config.yaml",
+    "SoHoAI-config.yaml",
     "schemas.py",
     "main.py",
     "router.py",

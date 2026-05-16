@@ -13,7 +13,7 @@ the *starting point* and any pre-routing logic.
 
 Anthropic prompt caching is applied when the selected model is served by
 Anthropic (`_uses_anthropic()` checks the litellm_params.model prefix).
-This is provider-agnostic: swapping external to Gemini/OpenAI in config.yaml
+This is provider-agnostic: swapping external to Gemini/OpenAI in SoHoAI-config.yaml
 automatically disables the Anthropic-specific cache_control injection.
 """
 
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 class SmartRouter:
     """Wraps LiteLLM Router with SoHoAI-specific routing logic."""
 
-    def __init__(self, config_path: str = "config.yaml", store: ChatStore | None = None):
+    def __init__(self, config_path: str = "SoHoAI-config.yaml", store: ChatStore | None = None):
         with open(config_path) as f:
             self.config = yaml.safe_load(f)
 
@@ -69,7 +69,7 @@ class SmartRouter:
             # Retry config
             num_retries=2,
             timeout=60,
-            # From config.yaml router_settings / litellm_settings
+            # From SoHoAI-config.yaml router_settings / litellm_settings
             enable_pre_call_checks=router_settings.get("enable_pre_call_checks", False),
             # Usage tracking via custom logger
             **({"context_window_fallbacks": context_window_fallbacks} if context_window_fallbacks else {}),
@@ -199,9 +199,9 @@ class SmartRouter:
     def _uses_anthropic(self, target: str) -> bool:
         """Return True if the target model alias is served via Anthropic API.
 
-        Reads litellm_params.model from config.yaml for the given alias.
+        Reads litellm_params.model from SoHoAI-config.yaml for the given alias.
         Used to gate Anthropic-specific cache_control injection so that
-        swapping external to Gemini/OpenAI in config.yaml requires no code change.
+        swapping external to Gemini/OpenAI in SoHoAI-config.yaml requires no code change.
         """
         model_cfg = next(
             (m for m in self.config["model_list"] if m["model_name"] == target), {}

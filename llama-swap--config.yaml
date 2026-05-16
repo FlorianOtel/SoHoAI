@@ -1,0 +1,28 @@
+# llama-swap.yaml
+models:
+  qwen3.5-4b-q6:
+    cmd: |
+      llama-server -hf unsloth/Qwen3.5-4B-GGUF:UD-Q6_K_XL
+      --jinja --flash-attn on
+      --cache-type-k q8_0 --cache-type-v q8_0
+      --ctx-size 65536 -ngl 99 --port 8090
+      --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0
+    proxy: http://127.0.0.1:8090
+    ttl: 600
+
+  qwen3.5-9b-q4:
+    cmd: |
+      llama-server -hf unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL
+      --jinja --flash-attn on
+      --cache-type-k q8_0 --cache-type-v q8_0
+      --ctx-size 16384 -ngl 99 --port 8091
+      --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0
+    proxy: http://127.0.0.1:8091
+    ttl: 600
+
+groups:
+  - name: gpu-exclusive
+    members: [qwen3.5-4b-q6, qwen3.5-9b-q4]
+    swap: true       # unload the other when one is requested
+
+listen: ":8080"

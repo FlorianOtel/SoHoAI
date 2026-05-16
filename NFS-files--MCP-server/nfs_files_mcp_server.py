@@ -150,7 +150,7 @@ class PathInput(BaseModel):
         ...,
         description=(
             "File or directory path. Can be absolute or relative to project root. "
-            "Examples: 'main.py', 'orchestrator/router.py', '~/Gin-AI/config.yaml'"
+            "Examples: 'main.py', 'orchestrator/router.py', '~/Gin-AI/SoHoAI-config.yaml'"
         ),
         min_length=1,
         max_length=500,
@@ -703,7 +703,7 @@ async def delete_file(params: PathInput) -> str:
 @mcp.resource("file:///nfs_files/config")
 async def get_config() -> str:
     """Expose the project configuration file."""
-    config_path = ALLOWED_ROOTS[0] / "config.yaml"
+    config_path = ALLOWED_ROOTS[0] / "SoHoAI-config.yaml"
     if config_path.exists():
         return config_path.read_text(encoding="utf-8")
     return "Config file not found."

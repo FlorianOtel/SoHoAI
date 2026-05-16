@@ -2,8 +2,8 @@
 title: "SoHoAI — Project Context & Design Reference"
 created_at: 20260407-000000
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-15--19-54
+updated_by: Claude Code (claude-code-kimi-k2.6)
+updated_at: 2026-05-16--08-41
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   Project instructions and design decisions for Claude Code;
@@ -34,7 +34,7 @@ for family photos and RL training data collection from chat interactions.
 
 ### Storage paths
 
-> SQLite and Redis paths are derived from `db_base_path` in `config.yaml`. Qdrant active storage is local-only (see below).
+> SQLite and Redis paths are derived from `db_base_path` in `SoHoAI-config.yaml`. Qdrant active storage is local-only (see below).
 
 - Chat DB: `/mnt/nfs/__Backups/SoHoAI--databases/sqlite/telemetry.db` (SQLite, NAS)
 - RAG state DB: `/mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db` (SQLite, NAS)
@@ -100,7 +100,7 @@ Server 1 (192.168.1.93)             │          Server 2 (192.168.1.95)
 ```
 SoHoAI/
 ├── main.py                     # FastAPI app — the central orchestrator
-├── config.yaml                 # All configuration (models, Redis, RAG, routing, llama-server)
+├── SoHoAI-config.yaml                 # All configuration (models, Redis, RAG, routing, llama-server)
 ├── .env                        # ANTHROPIC_API_KEY (not committed)
 ├── .mcp.json                   # Claude Code auto-discovers this
 ├── schemas.py                  # Pydantic models (ChatRequest, ChatResponse, etc.)
@@ -119,7 +119,7 @@ SoHoAI/
 │   ├── collection.py           # Collection name, vector size, get_client(), ensure_collection()
 │   ├── embeddings.py           # embed_text(), embed_batch(progress_cb) via Ollama on Server 1
 │   ├── state.py                # StateDB — ingestion queue CRUD + crash recovery; find_deleted()/purge_deleted() are the crash-safe split of the old handle_deleted() — callers must Qdrant-clean before calling purge_deleted() so a kill leaves SQLite intact for retry
-│   ├── scanner.py              # NFS + claude chat scanner → populates StateDB; scan_nfs_roots() walks configured NFS roots (filters from config.yaml rag.scanner) and returns {scanned, existing_paths}; scan_claude_chats() walks config.yaml claude_chats.roots for .jsonl sessions and returns {scanned, existing_paths}; callers merge existing_paths sets and call state_db.find_deleted() once before Qdrant cleanup + purge_deleted(); followlinks=True with visited_real_dirs + visited_real_files global dedup sets; exclude_dir_names uses trailing-slash path-suffix matching
+│   ├── scanner.py              # NFS + claude chat scanner → populates StateDB; scan_nfs_roots() walks configured NFS roots (filters from SoHoAI-config.yaml rag.scanner) and returns {scanned, existing_paths}; scan_claude_chats() walks SoHoAI-config.yaml claude_chats.roots for .jsonl sessions and returns {scanned, existing_paths}; callers merge existing_paths sets and call state_db.find_deleted() once before Qdrant cleanup + purge_deleted(); followlinks=True with visited_real_dirs + visited_real_files global dedup sets; exclude_dir_names uses trailing-slash path-suffix matching
 │   ├── ingest.py               # docling parse + parent-child chunking + Qdrant upsert; _parse_claude_chat() extracts user/assistant text turns from .jsonl session files and returns (text, {session_id, project}) metadata for Qdrant payload
 │   ├── search.py               # query → embed → Qdrant query_points → parent_text + provenance
 │   ├── multi_query.py          # §8.3: expand_query() + parallel search + MMR reranking (permanently disabled — no-go 2026-04-22)
@@ -212,7 +212,7 @@ OpenAI-compatible response format is a Phase 3 requirement for Open WebUI integr
 - Python identifiers: `sohoai_*` (underscored)
 - MCP tool names: `sohoai_{action}_{resource}` (e.g. `sohoai_read_file`)
 - Env var prefix: `SOHOAI_`
-- Config file: `config.yaml` (single file, all settings)
+- Config file: `SoHoAI-config.yaml` (single file, all settings)
 
 ### Dependencies
 

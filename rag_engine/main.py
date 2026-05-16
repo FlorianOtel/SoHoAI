@@ -61,12 +61,12 @@ async def startup_event():
 
     # 1. Load configuration
     try:
-        with open("config.yaml", 'r') as f:
+        with open("SoHoAI-config.yaml", 'r') as f:
             global rag_cfg
             rag_cfg = yaml.safe_load(f)
         logger.info("Configuration loaded successfully.")
     except FileNotFoundError:
-        logger.error("config.yaml not found. RAG features will be disabled.")
+        logger.error("SoHoAI-config.yaml not found. RAG features will be disabled.")
         rag_cfg = {}
 
     # 2. Initialize external services

@@ -88,11 +88,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--collection", default=None,
-        help="Collection name (default: from config.yaml rag.qdrant_collection)",
+        help="Collection name (default: from SoHoAI-config.yaml rag.qdrant_collection)",
     )
     args = parser.parse_args()
 
-    config_path = Path(__file__).resolve().parent.parent / "config.yaml"
+    config_path = Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml"
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
