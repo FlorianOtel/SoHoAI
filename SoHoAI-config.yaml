@@ -24,9 +24,6 @@ redis:
   dir: "/mnt/nfs/__Backups/SoHoAI--databases/redis"
   default_ttl_seconds: 86400  # 24 hours
 
-#### --- LiteLLM  configuration ---
-router_settings:
-  enable_pre_call_checks: true
 
 litellm_settings: {}
 
@@ -149,13 +146,28 @@ model_list:
 # -- Routing Policy ------------------------------------------------------------
 routing:
   default_model: "local/qwen3-4b-q6"
-  fallback_chain: ["local/qwen3-4b-q6", "ollama-cloud/qwen3-coder-next"]
+  #### Fallback chains are now implemented via "router_settings" above. Leaving this commented anyway. 
+  # Fallback for local actor -> Ollama-cloud
+  # fallback_chain: ["local/qwen3-4b-q6", "ollama-cloud/qwen3-coder-next"]
+  # Fallback for Ollama-cloud when throttled 
+  # fallback_chain: ["ollama-cloud/kimi-k2.6", "local/qwen3-9b-q4"]
   # Route to cloud when context exceeds threshold.
   # Hard limit: -c 220048 / 2 = 110024 tokens per slot. At 100K we route to cloud,
   # leaving ~10K headroom for output (default max_tokens=1024 + safety margin).
   complexity_threshold_tokens: 100000
   cloud_model: "ollama-cloud/kimi-k2.6"
   summarization_model: "local/qwen3-9b-q4"
+
+
+#### --- LiteLLM  configuration --- 
+#### Implements fallbacks 
+router_settings:
+  routing_strategy: simple-shuffle
+  # Each item in this list is an independent fallback rule
+  fallbacks:
+    - "local/qwen3-4b-q6": ["ollama-cloud/qwen3-coder-next"]
+    - "ollama-cloud/kimi-k2.6": ["local/qwen3-9b-q4"]
+
 
 
 #### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------

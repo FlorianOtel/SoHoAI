@@ -57,15 +57,11 @@ class SmartRouter:
         # Instantiate usage tracker if store is provided
         self._usage_tracker = UsageTracker(store) if store is not None else None
 
+
         self.litellm_router = Router(
             model_list=self.config["model_list"],
-            routing_strategy="simple-shuffle",
-            # Fallback: if external (cloud) fails, go to local (llama-server)
-            fallbacks=[
-                {
-                    "anthropic/claude-sonnet-4-6": ["local/qwen3-4b-q6"],
-                }
-            ],
+            routing_strategy=router_settings.get("routing_strategy", "simple-shuffle"),
+            fallbacks=router_settings.get("fallbacks"),  # Pulls your clean list array directly from YAML instead of hardcoded defaults
             # Retry config
             num_retries=2,
             timeout=60,
@@ -74,6 +70,7 @@ class SmartRouter:
             # Usage tracking via custom logger
             **({"context_window_fallbacks": context_window_fallbacks} if context_window_fallbacks else {}),
         )
+
 
         # Register tracker with global litellm callbacks list
         # Guard prevents double-registration on hot-reload cycles
