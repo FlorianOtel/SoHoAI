@@ -3,7 +3,7 @@ title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (claude-code-kimi-k2.6)
-updated_at: 2026-05-16--08-41
+updated_at: 2026-05-16--15-52
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -565,6 +565,39 @@ bumps deepseek-v4-pro to 2M context, there are now two places to update and the
 fallback dict is not where a maintainer would look. Config-as-the-single-source also
 makes the values visible to any config-reading tool (health checks, docs generation,
 etc.) without importing Python.
+
+---
+
+## 2026-05-16 — KV cache native API port fix after llama-swap deployment
+
+### What changed
+
+Deployed llama-swap on Server 2 to manage dual-model serving. The orchestrator's internal `KVCacheManager` was still pointing at port 8000 (llama-swap's OpenAI proxy), which does NOT forward native llama-server endpoints (`/completion`, `/slots/*`). This broke `utils/cli_chat.py` with 400 Bad Request on `/completion` and 404 Not Found on `/slots/0`.
+
+**Three fixes:**
+
+1. **`SoHoAI-config.yaml`**: `llama_server.base_url` changed from `8000` to `8010`
+   — bypass llama-swap and hit the native 4B llama-server directly for KV operations.
+
+2. **`kv_cache.py`**: `num_slots` default changed from `2` to `1`
+   — cli_chat exclusively uses slot 0, leaving slot 1 free for OpenAI auto-assignment so LRU eviction for proxy requests does not collide with conversational KV.
+
+3. **`kv_cache.py`**: defensive slot verification in `inference()`
+   — queries `GET /slots` before inference. If the slot is empty or contains a different file, re-restores from NFS. Handles llama-server LRU eviction, restarts, and cross-path collisions.
+
+### What does NOT change
+
+- LiteLLM routing continues to use `http://192.168.1.95:8000/v1` for OpenAI-compatible inference via llama-swap
+- Claude Code proxy endpoints unaffected
+- llama-server on port 8002 (always-on)
+
+### Code locations
+
+- `SoHoAI-config.yaml`: `llama_server.base_url` (port 8000 → 8010)
+- `kv_cache.py`: `__init__` num_slots default, `inference()` defensive slot check with `GET /slots`
+- `main.py`: passes `chat_id` to `kv_cache.inference()`
+
+---
 
 ### Code locations
 

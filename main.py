@@ -412,7 +412,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
 
             if used_internal:
                 prompt = apply_qwen3_template(llm_messages)
-                result = await cache.kv_cache.inference(slot_id=slot_id, prompt=prompt)
+                result = await cache.kv_cache.inference(slot_id=slot_id, prompt=prompt, chat_id=chat_id)
                 raw_text = result["content"].strip()
                 model_used = target_model
             else:

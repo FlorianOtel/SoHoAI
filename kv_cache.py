@@ -221,6 +221,7 @@ class KVCacheManager:
         self,
         slot_id: int,
         prompt: str,
+        chat_id: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 1024,
         stop: Optional[list[str]] = None,
@@ -231,6 +232,37 @@ class KVCacheManager:
         Returns llama-server result dict:
           content, tokens_evaluated, tokens_predicted, stop_reason
         """
+        # -- Defensive slot check: verify slot still has our context ------------
+        if chat_id is not None:
+            async with httpx.AsyncClient(timeout=30) as client:
+                try:
+                    resp = await client.get(f"{self.base_url}/slots")
+                    resp.raise_for_status()
+                    slots_data = resp.json()
+                    expected_file = self._filename(chat_id)
+                    slot_info = next(
+                        (s for s in slots_data.get("slots", []) if s.get("id") == slot_id),
+                        None,
+                    )
+                    # Slot is empty or has a different file → restore from NFS
+                    if slot_info is None or slot_info.get("state", 0) == 0 or slot_info.get("filename") != expected_file:
+                        if slot_info is None or slot_info.get("state", 0) == 0:
+                            reason = "slot empty"
+                        else:
+                            reason = f"slot has other file ({slot_info.get('filename')})"
+                        if self._cache_exists(chat_id):
+                            await self._slot_action(client, slot_id, "restore", chat_id)
+                            logger.info(
+                                f"KV restored (defensive): chat {chat_id[:8]} → slot {slot_id} ({reason})"
+                            )
+                        else:
+                            logger.info(
+                                f"KV cold start: chat {chat_id[:8]} → slot {slot_id} ({reason}, no .bin on disk)"
+                            )
+                except Exception as e:
+                    # Defensive check is best-effort; log and continue
+                    logger.warning(f"KV slot verification failed for {chat_id[:8]}: {e}")
+
         payload = {
             "prompt": prompt,
             "slot_id": slot_id,
@@ -257,7 +289,7 @@ class KVCacheManager:
         """All-in-one: restore slot → inference → save."""
         slot_id = await self.restore(chat_id)
         prompt = apply_qwen3_template(messages)
-        result = await self.inference(slot_id, prompt, temperature=temperature,
-                                      max_tokens=max_tokens, stop=stop)
+        result = await self.inference(slot_id, prompt, chat_id=chat_id,
+                                      temperature=temperature, max_tokens=max_tokens, stop=stop)
         await self.save(chat_id)
         return result

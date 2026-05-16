@@ -91,7 +91,8 @@
       "Bash(git *)",
       "Bash(journalctl *)",
       "Bash(systemctl status *)",
-      "Bash(perl *)"
+      "Bash(perl *)",
+      "Bash(chmod 644 /mnt/nfs/Florian/Gin-AI/projects/SoHoAI/llama-swap--config.yaml)"
     ],
     "additionalDirectories": [
       "/home/florian/Gin-AI",

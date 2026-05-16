@@ -284,7 +284,7 @@ claude_chats:
 
 # -- llama-server native API (KV cache slot management) -----------------------
 llama_server:
-  base_url: "http://${server2_ip}:8000"
+  base_url: "http://${server2_ip}:8010"
   # Must match --slot-save-path passed to llama-server on Server 2
   slot_save_path: "/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v-caches/"
   # Number of parallel slots (must match --parallel N on llama-server).
