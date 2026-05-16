@@ -1,5 +1,9 @@
 # llama-swap--config.yaml
 
+# Explicit health-check timeout for slow NFS model loads with --no-mmap.
+# 5.97 GB (9B) at ~200-500 MB/s NFS → 12-30 s load time; 180 s gives ample headroom.
+healthCheckTimeout: 180
+
 models:
 
 #### Qwen3.5-4B-Q6
@@ -10,11 +14,14 @@ models:
     ttl: 0  # disable the idle timeout so it NEVER shuts down on its own
 
 #### Qwen3.5-9B-Q4
+# Hybrid attention (full_attention_interval=4): only 8/32 layers store KV for all tokens.
+# Effective KV/token (q8_0) = 2×8 layers×4 KV heads×256 head_dim×1.0625 = 17,408 bytes.
+# At 262144 ctx → ~4.25 GB KV + ~6.4 GB weights ≈ 10.8 GB total → fits in 12 GB (~1 GB headroom).
   qwen3.5-9b-q4:
     cmd: |
       llama-server -m /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/Qwen3.5-9B-UD-Q4_K_XL.gguf --jinja --flash-attn on --no-mmap --cache-type-k q8_0 --cache-type-v q8_0 -ngl 99 --ctx-size 262144 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0 --host 0.0.0.0 --port 8011
     proxy: http://127.0.0.1:8011
-    ttl: 60 # Evict after 1 minute of inactivity
+    ttl: 300 # Evict after 5 minutes of inactivity
 
 groups:
   gpu-exclusive:

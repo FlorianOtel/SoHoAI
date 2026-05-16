@@ -43,8 +43,8 @@ model_list:
       # 262144 / 2 = 131072. This is what external clients (Cline, Claude Code) read via
       # /proxy/v1/model/info for their contextWindow setting.
       max_tokens: 131072
-      max_input_tokens: 128024
-      context_window: 128024
+      max_input_tokens: 131072
+      context_window: 131072
 
 
   #### Second use-case: summarize, and emergency local fallback -- local LLM on GPU inference on Server 2
@@ -57,11 +57,12 @@ model_list:
     model_info:
       id: "local/qwen3-9b-q4"
       description: "Qwen3.5-9B-UD-Q4_K_XL -- local chat model "
-      # Advertised context window: "--ctx-size 262144"
-      # /proxy/v1/model/info for their contextWindow setting.
+      # Hybrid attention (full_attention_interval=4): 8/32 layers are full-attention.
+      # Effective KV/token (q8_0, full-attn layers only) = 2×8×4×256×1.0625 = 17,408 bytes.
+      # At 262144 ctx → ~4.25 GB KV + ~6.4 GB weights ≈ 10.8 GB total → fits in 12 GB.
       max_tokens: 262144
-      max_input_tokens: 259024
-      context_window: 259024
+      max_input_tokens: 262144
+      context_window: 262144
 
   - model_name: "anthropic/claude-sonnet-4-6"
     litellm_params:
@@ -166,7 +167,7 @@ router_settings:
   fallbacks:
     - "local/qwen3-4b-q6": ["ollama-cloud/qwen3-coder-next"]
     - "anthropic/claude-sonnet-4-6": ["ollama-cloud/kimi-k2.6"]
-
+    - "ollama-cloud/kimi-k2.6": ["local/qwen3-9b-q4"]
 
 
 #### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
