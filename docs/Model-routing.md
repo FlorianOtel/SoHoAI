@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-15--19-54
+updated_at: 2026-05-16--08-00
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -142,6 +142,12 @@ Set in `~/.claude/settings.json`:
 
 Claude Code sends the real API key in the `x-api-key` header on every request. The
 proxy extracts it and forwards it to `api.anthropic.com` on the transparent path.
+
+**OAuth mode (alternative)**: You can also use `claude login` for OAuth authentication
+instead of `ANTHROPIC_API_KEY`. When Claude Code uses OAuth, it sends `Authorization: Bearer <token>`
+instead of `x-api-key`. The gateway detects this automatically and forwards the Bearer token
+unchanged to Anthropic — no configuration change is needed. Both auth modes work alongside
+each other.
 
 ### Model-aware routing
 

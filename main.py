@@ -1359,14 +1359,17 @@ async def _anthropic_messages_forward(
 ) -> StreamingResponse | JSONResponse:
     """Transparent HTTP forward to api.anthropic.com/v1/messages.
 
-    Forwards the exact request body and Anthropic-specific headers.
-    x-api-key is taken from the incoming request first, then ANTHROPIC_API_KEY env.
+    Supports both auth modes:
+      - API key:  CC sends x-api-key → forwarded as-is (env fallback if absent)
+      - OAuth:    CC sends Authorization: Bearer <token> → forwarded as-is
     """
-    api_key = req.headers.get("x-api-key") or os.environ.get("ANTHROPIC_API_KEY", "")
-    forward_headers: dict[str, str] = {
-        "content-type": "application/json",
-        "x-api-key": api_key,
-    }
+    forward_headers: dict[str, str] = {"content-type": "application/json"}
+    if req.headers.get("authorization"):           # OAuth mode: Bearer token
+        forward_headers["authorization"] = req.headers["authorization"]
+    else:                                           # API key mode
+        api_key = req.headers.get("x-api-key") or os.environ.get("ANTHROPIC_API_KEY", "")
+        if api_key:
+            forward_headers["x-api-key"] = api_key
     for h in ("anthropic-version", "anthropic-beta"):
         if req.headers.get(h):
             forward_headers[h] = req.headers[h]
@@ -2011,11 +2014,13 @@ async def count_tokens_endpoint(req: Request):
         forward_body = {**body, "model": stripped_model}
         forward_body_bytes = json.dumps(forward_body).encode()
 
-        api_key = req.headers.get("x-api-key") or os.environ.get("ANTHROPIC_API_KEY", "")
-        forward_headers: dict[str, str] = {
-            "content-type": "application/json",
-            "x-api-key": api_key,
-        }
+        forward_headers: dict[str, str] = {"content-type": "application/json"}
+        if req.headers.get("authorization"):           # OAuth mode: Bearer token
+            forward_headers["authorization"] = req.headers["authorization"]
+        else:                                           # API key mode
+            api_key = req.headers.get("x-api-key") or os.environ.get("ANTHROPIC_API_KEY", "")
+            if api_key:
+                forward_headers["x-api-key"] = api_key
         for h in ("anthropic-version", "anthropic-beta"):
             if req.headers.get(h):
                 forward_headers[h] = req.headers[h]

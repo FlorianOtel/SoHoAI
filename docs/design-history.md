@@ -3,7 +3,7 @@ title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-15--19-54
+updated_at: 2026-05-16--08-00
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -12,6 +12,12 @@ context: >
 ---
 
 # SoHoAI Design History
+
+---
+
+## 2026-05-16 — OAuth Bearer auth support for Claude Code
+
+Added OAuth authentication support to the gateway's transparent Anthropic forward path. `_anthropic_messages_forward()` and `count_tokens_endpoint()` now detect `Authorization: Bearer <token>` and forward it unchanged, enabling `claude login` as an alternative to API-key mode. Both auth modes coexist and are detected at request time. No changes to LiteLLM path or proxy endpoints.
 
 ---
 
