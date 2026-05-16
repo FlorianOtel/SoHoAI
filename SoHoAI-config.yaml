@@ -29,7 +29,7 @@ litellm_settings: {}
 
 # LiteLLM Model Routing ----------------------------------------------------
 model_list:
-  #### First use-case: interactive chat -- local LLM on GPU inference on Server 2
+  #### First use-case: interactive chat, and local actor/implementer -- local LLM on GPU inference on Server 2
   #### Note, this is loaded via llama-swap by default -- TTL 0sec (always resident unless evicted) 
   - model_name: "local/qwen3-4b-q6"
     litellm_params:
@@ -47,7 +47,7 @@ model_list:
       context_window: 128024
 
 
-  #### Second use-case: interactive chat -- local LLM on GPU inference on Server 2
+  #### Second use-case: summarize, and emergency local fallback -- local LLM on GPU inference on Server 2
   #### Note, this is loaded via llama-swap only when needed, TTL of 300sec
   - model_name: "local/qwen3-9b-q4"
     litellm_params:
@@ -57,12 +57,11 @@ model_list:
     model_info:
       id: "local/qwen3-9b-q4"
       description: "Qwen3.5-9B-UD-Q4_K_XL -- local chat model "
-      # Advertised context window: per-slot capacity with "--ctx-size 262144 --parallel 2"
-      # 262144 / 2 = 131072. This is what external clients (Cline, Claude Code) read via
+      # Advertised context window: "--ctx-size 262144"
       # /proxy/v1/model/info for their contextWindow setting.
-      max_tokens: 131072
-      max_input_tokens: 128024
-      context_window: 128024
+      max_tokens: 262144
+      max_input_tokens: 259024
+      context_window: 259024
 
   - model_name: "anthropic/claude-sonnet-4-6"
     litellm_params:
@@ -150,7 +149,7 @@ routing:
   # Fallback for local actor -> Ollama-cloud
   # fallback_chain: ["local/qwen3-4b-q6", "ollama-cloud/qwen3-coder-next"]
   # Fallback for Ollama-cloud when throttled 
-  # fallback_chain: ["ollama-cloud/kimi-k2.6", "local/qwen3-9b-q4"]
+  # fallback_chain: ["anthropic/claude-sonnet-4-6", "ollama-cloud/kimi-k2.6"]
   # Route to cloud when context exceeds threshold.
   # Hard limit: -c 220048 / 2 = 110024 tokens per slot. At 100K we route to cloud,
   # leaving ~10K headroom for output (default max_tokens=1024 + safety margin).
@@ -166,7 +165,7 @@ router_settings:
   # Each item in this list is an independent fallback rule
   fallbacks:
     - "local/qwen3-4b-q6": ["ollama-cloud/qwen3-coder-next"]
-    - "ollama-cloud/kimi-k2.6": ["local/qwen3-9b-q4"]
+    - "anthropic/claude-sonnet-4-6": ["ollama-cloud/kimi-k2.6"]
 
 
 

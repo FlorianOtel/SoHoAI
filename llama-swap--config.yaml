@@ -12,7 +12,7 @@ models:
 #### Qwen3.5-9B-Q4
   qwen3.5-9b-q4:
     cmd: |
-      llama-server -m /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/Qwen3.5-9B-UD-Q4_K_XL.gguf --jinja --flash-attn on --no-mmap --cache-type-k q8_0 --cache-type-v q8_0 -ngl 99 --ctx-size 262144 --parallel 2 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0 --host 0.0.0.0 --port 8011
+      llama-server -m /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/Qwen3.5-9B-UD-Q4_K_XL.gguf --jinja --flash-attn on --no-mmap --cache-type-k q8_0 --cache-type-v q8_0 -ngl 99 --ctx-size 262144 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0 --host 0.0.0.0 --port 8011
     proxy: http://127.0.0.1:8011
     ttl: 60 # Evict after 1 minute of inactivity
 
