@@ -791,6 +791,12 @@ async def rag_search(
 #  SYSTEM ENDPOINTS
 # =============================================================================
 
+@app.api_route("/", methods=["GET", "HEAD"])
+async def root():
+    """Root liveness probe — CC uses HEAD / to check if the gateway is reachable."""
+    return {"status": "ok"}
+
+
 @app.get("/health")
 async def health():
     """System health check."""
@@ -842,7 +848,6 @@ async def list_models():
             "id": model_id,
             "display_name": display_name,
             "context_window": model_info.get("context_window", 0),
-            "max_input_tokens": model_info.get("max_input_tokens", model_info.get("context_window", 0)),
             "max_tokens": model_info.get("max_tokens", 0),
             "created_at": "2025-01-01T00:00:00Z",
         })
@@ -1297,6 +1302,17 @@ def _anthropic_stop_reason(openai_finish_reason: str | None) -> str | None:
         "tool_calls": "tool_use",
         "content_filter": "end_turn",
     }.get(openai_finish_reason, "end_turn")
+
+
+@app.post("/v1/messages/beta")
+async def anthropic_messages_beta(req: Request):
+    """Claude Code extended-thinking discovery endpoint.
+
+    CC calls POST /v1/messages/beta to check if the server supports interleaved
+    thinking (auto-mode). We forward identically to /v1/messages — the gateway
+    transparently relays to api.anthropic.com which handles the beta path.
+    """
+    return await anthropic_messages(req)
 
 
 @app.post("/v1/messages")

@@ -92,7 +92,13 @@
       "Bash(journalctl *)",
       "Bash(systemctl status *)",
       "Bash(perl *)",
-      "Bash(chmod 644 /mnt/nfs/Florian/Gin-AI/projects/SoHoAI/llama-swap--config.yaml)"
+      "Bash(chmod 644 /mnt/nfs/Florian/Gin-AI/projects/SoHoAI/llama-swap--config.yaml)",
+      "Bash(~/.claude/scripts/ctx-segment.sh 5 5000 200000 claude-code-qwen3-9b-q4)",
+      "Bash(~/.claude/scripts/ctx-segment.sh 5 5000 200000 claude-code-qwen3-4b-q6)",
+      "Bash(xargs -I{} git show {} -- SoHoAI-config.yaml)",
+      "Bash(claude --version)",
+      "Bash(grep -v \"^--$\")",
+      "Bash(node -e ' *)"
     ],
     "additionalDirectories": [
       "/home/florian/Gin-AI",

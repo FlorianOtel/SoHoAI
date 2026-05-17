@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-16--23-12
+updated_at: 2026-05-17--05-29
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -565,6 +565,52 @@ This closes a 404 that occurred before the endpoint was available — Claude Cod
 **Activation:**
 
 Enable gateway model discovery by setting `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` in `~/.claude/settings.json` (requires Claude Code v2.1.129+). See `docs/claude-orchestra-handoff.md` §5.2 for the exact settings.json snippet and §5 for the full post-merge deployment runbook.
+
+### §4.6 Gateway model cache — format, auth conflict, and workaround
+
+**How CC stores discovered models (from CC v2.1.143 binary analysis):**
+
+CC's model picker reads gateway models from `~/.claude/cache/gateway-models.json` via the
+synchronous `H14()` function at startup. The async `$14()` function writes this file by
+calling `GET /v1/models` on the gateway. The file must be in this exact format:
+
+```json
+{
+  "baseUrl": "http://192.168.1.93:8000",
+  "fetchedAt": 1748000000000,
+  "models": [
+    {"id": "claude-code-qwen3-4b-q6", "display_name": "Qwen3 4B Q6 (local, 131k ctx)"},
+    ...
+  ]
+}
+```
+
+`H14()` checks `baseUrl === process.env.ANTHROPIC_BASE_URL` before returning models. If the
+field is absent or mismatched, `H14()` returns `[]` and no gateway models appear in the picker.
+
+**The `ANTHROPIC_API_KEY` vs OAuth conflict:**
+
+`$14()` requires either `process.env.ANTHROPIC_AUTH_TOKEN` or an API key from `ML()`
+(`ANTHROPIC_API_KEY`) to run. It does not use the OAuth credentials stored in
+`~/.claude/.credentials.json`.
+
+Setting `ANTHROPIC_API_KEY` in `settings.json` `env` block would supply this, but **it
+unconditionally takes precedence over OAuth** in CC's auth priority chain (confirmed from
+the CC v2.1.143 binary: API key is checked before `~/.claude/.credentials.json`). The
+result: billing silently switches from the claude.ai subscription (OAuth) to API token
+billing. The two requirements are mutually exclusive.
+
+**Workaround — `start-sohoai.sh` writes the cache on every gateway start:**
+
+`start-sohoai.sh` runs a Python snippet that reads `SoHoAI-config.yaml`, derives the
+`claude-code-*` aliases for all non-Anthropic models, and writes `gateway-models.json`
+before uvicorn starts. This replicates what `$14()` would do without requiring an API key
+in the environment.
+
+The cache has **no TTL** — `H14()` does not check `fetchedAt`. The file persists across
+CC restarts and is only overwritten if `$14()` runs (which it won't in an OAuth-only
+setup) or by `start-sohoai.sh`. Re-run `start-sohoai.sh` (i.e., restart the gateway)
+whenever the non-Anthropic model list changes in `SoHoAI-config.yaml`.
 
 ---
 
