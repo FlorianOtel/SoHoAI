@@ -1076,10 +1076,18 @@ def _build_proxy_model_entry(config: dict, public_name: str, internal_name: str)
 
 
 _LEGACY_ALIASES: dict[str, str] = {
+    # CC bare names (backward compat)
     "qwen3-4b":          "local/qwen3-4b-q6",
     "claude-haiku-4-5":  "claude-haiku-4-5",
     "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
     "claude-opus-4-7":   "claude-opus-4-7",
+    # OpenCode flat names — model keys after OpenCode strips provider prefix
+    "deepseek-v4-pro":   "ollama-cloud/deepseek-v4-pro",
+    "kimi-k2.6":         "ollama-cloud/kimi-k2.6",
+    "glm-5.1":           "ollama-cloud/glm-5.1",
+    "qwen3-coder-next":  "ollama-cloud/qwen3-coder-next",
+    "qwen3-4b-q6":       "local/qwen3-4b-q6",
+    "qwen3-9b-q4":       "local/qwen3-9b-q4",
 }
 
 
