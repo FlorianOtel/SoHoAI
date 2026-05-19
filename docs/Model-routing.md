@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-17--05-29
+updated_at: 2026-05-19--00-00
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -61,21 +61,30 @@ SoHoAI routes conversation inference across two model tiers: **external** (Claud
 
 ### Model mapping (`_PROXY_EXPOSED_MODELS` in `main.py`)
 
-`_PROXY_EXPOSED_MODELS` is an **identity map** — every public ID equals its LiteLLM
-`model_name` in `SoHoAI-config.yaml`. No translation layer; `SoHoAI-config.yaml` is the single source
-of truth.
+`_PROXY_EXPOSED_MODELS` maps public IDs to internal LiteLLM `model_name` aliases in
+`SoHoAI-config.yaml`. For local and Ollama cloud models the mapping is an identity
+(public ID == model_name). For Anthropic models the public ID carries the `anthropic/`
+prefix while the internal alias is the bare name — this ensures the LiteLLM router
+picks the bare-name YAML entry that carries `ANTHROPIC_API_KEY` for authentication.
 
-| Public ID (= SoHoAI-config.yaml model_name) | Path | Backend | Context window |
-|---|---|---|---|
-| `local/qwen3-4b-q6` | LiteLLM | llama-server, Server 2, Qwen3.5-4B Q6_K_XL (default resident) | 131,072 |
-| `local/qwen3-9b-q4` | LiteLLM | llama-server, Server 2, Qwen3.5-9B Q4_K_XL (hot-swap, TTL 300s) | 262,144 |
-| `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | 200,000 |
-| `anthropic/claude-sonnet-4-6` | Transparent forward | Anthropic API (Qwen fallback if down) | 200,000 |
-| `anthropic/claude-opus-4-7` | Transparent forward | Anthropic API | 1,000,000 |
-| `ollama-cloud/deepseek-v4-pro` | LiteLLM | Ollama cloud (`https://ollama.com/v1`) | **~70% 503 rate** — see §2.3 |
-| `ollama-cloud/kimi-k2.6` | LiteLLM | Ollama cloud | — |
-| `ollama-cloud/glm-5.1` | LiteLLM | Ollama cloud | — |
-| `ollama-cloud/qwen3-coder-next` | LiteLLM | Ollama cloud | — |
+**Anthropic models have two distinct entries in `SoHoAI-config.yaml`:**
+- `anthropic/claude-*` — no `api_key`; consumed by Claude Code via transparent forward
+  (`POST /v1/messages`); authentication is client-side (OAuth or `x-api-key`).
+- `claude-*` (bare name) — carries `api_key: os.environ/ANTHROPIC_API_KEY`; consumed by
+  Cline / OpenCode via the LiteLLM proxy (`POST /proxy/v1/chat/completions`); SoHoAI
+  authenticates on behalf of the client.
+
+| Public ID | Internal alias | Path | Auth | Context window |
+|---|---|---|---|---|
+| `local/qwen3-4b-q6` | `local/qwen3-4b-q6` | LiteLLM | dummy key | 131,072 |
+| `local/qwen3-9b-q4` | `local/qwen3-9b-q4` | LiteLLM | dummy key | 262,144 |
+| `anthropic/claude-haiku-4-5` | `claude-haiku-4-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 200,000 |
+| `anthropic/claude-sonnet-4-6` | `claude-sonnet-4-6` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
+| `anthropic/claude-opus-4-7` | `claude-opus-4-7` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
+| `ollama-cloud/deepseek-v4-pro` | `ollama-cloud/deepseek-v4-pro` | LiteLLM | Ollama API key | **~70% 503 rate** — see §2.3 |
+| `ollama-cloud/kimi-k2.6` | `ollama-cloud/kimi-k2.6` | LiteLLM | Ollama API key | — |
+| `ollama-cloud/glm-5.1` | `ollama-cloud/glm-5.1` | LiteLLM | Ollama API key | — |
+| `ollama-cloud/qwen3-coder-next` | `ollama-cloud/qwen3-coder-next` | LiteLLM | Ollama API key | — |
 
 **Why `/proxy/v1/models` exposes all 10 — including `anthropic/*`:** Cline builds its
 model dropdown entirely from this endpoint; it has no hardcoded built-in model list.
@@ -750,8 +759,10 @@ These fields in `SoHoAI-config.yaml model_info` are **not** forwarded to the pro
 | `max_input_tokens` | Input size guard (pre-call check) | Only for models not in LiteLLM's registry (e.g. `internal`/llama-server) |
 | `context_window` | Router metadata for routing/cost | Only for models not in LiteLLM's registry |
 
-For `anthropic/claude-*` models: LiteLLM auto-resolves all three from its internal
-`model_prices_and_context_window.json` registry. No `model_info` block needed.
+For `anthropic/claude-*` models: LiteLLM can auto-resolve context windows from its
+internal registry, but `model_info` **is still required** on these entries — proxy
+consumers (Cline, OpenCode) read `max_input_tokens` and `context_window` from
+`/proxy/v1/model/info`, which is built from `model_info` in `SoHoAI-config.yaml`.
 
 For `internal` (Qwen3.5 / llama-server): explicit `model_info` is required because
 llama-server is not in LiteLLM's registry. Cline reads `max_input_tokens` from

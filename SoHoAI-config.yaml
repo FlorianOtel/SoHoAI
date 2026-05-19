@@ -72,35 +72,64 @@ model_list:
       max_input_tokens: 262144
       context_window: 262144
 
-  - model_name: "anthropic/claude-sonnet-4-6"
+  ####
+  #### Models consumed transparently by CC — auth is client-side (OAuth or x-api-key).
+  #### No api_key here: the gateway relays bytes unchanged via _anthropic_messages_forward().
+  #### model_info IS needed: proxy consumers (Cline, OpenCode) read it via /proxy/v1/model/info.
+  ####
+
+  - model_name: "anthropic/claude-haiku-4-5"
     litellm_params:
-      model: anthropic/claude-sonnet-4-6
-      api_key: os.environ/ANTHROPIC_API_KEY
+      model: anthropic/claude-haiku-4-5
     model_info:
-      id: "anthropic/claude-sonnet-4-6"
-      description: "Claude Sonnet 4.6 (primary) — interactive chat default"
-      # Advertised context window for any LiteLLM-style proxy consumer.
+      id: "anthropic/claude-haiku-4-5"
+      description: "Claude Haiku 4.5 — CC transparent forward. No API key configured."
       max_tokens: 200000
       max_input_tokens: 200000
       context_window: 200000
 
-  - model_name: claude-opus-4-7          #  This is used by SoHoAI chat -- not by CC or "claude-orchestra". These go transparently, via their own "x-api-key" header.
+  - model_name: "anthropic/claude-sonnet-4-6"
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+    model_info:
+      id: "anthropic/claude-sonnet-4-6"
+      description: "Claude Sonnet 4.6 — CC transparent forward. No API key configured."
+      max_tokens: 1000000
+      max_input_tokens: 999000
+      context_window: 1000000
+
+  - model_name: "anthropic/claude-opus-4-7"
+    litellm_params:
+      model: anthropic/claude-opus-4-7
+    model_info:
+      id: "anthropic/claude-opus-4-7"
+      description: "Claude Opus 4.7 — CC transparent forward. No API key configured."
+      max_tokens: 1000000
+      max_input_tokens: 999000
+      context_window: 1000000
+
+  ####
+  #### Models exposed to proxy clients (Cline, OpenCode) — auth via SoHoAI's ANTHROPIC_API_KEY.
+  #### Bare names (no provider prefix) so _PROXY_EXPOSED_MODELS can route anthropic/ → these.
+  ####
+
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: anthropic/claude-haiku-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-opus-4-7
     litellm_params:
       model: anthropic/claude-opus-4-7
       api_key: os.environ/ANTHROPIC_API_KEY
     model_info:
       context_window: 1000000
       max_input_tokens: 1000000
-
-  - model_name: claude-sonnet-4-6        #  This is used by SoHoAI chat -- not by CC or "claude-orchestra". These go transparently, via their own "x-api-key" header.
-    litellm_params:
-      model: anthropic/claude-sonnet-4-6
-      api_key: os.environ/ANTHROPIC_API_KEY
-
-  - model_name: claude-haiku-4-5         #  This is used by SoHoAI chat -- not by CC or "claude-orchestra". These go transparently, via their own "x-api-key" header.
-    litellm_params:
-      model: anthropic/claude-haiku-4-5
-      api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: "ollama-cloud/deepseek-v4-pro"
     litellm_params:

@@ -975,7 +975,6 @@ def _claude_code_alias_for(public_id: str) -> str:
 
     Rule: Anthropic-native IDs (starting with "anthropic/") are stripped and
     return bare (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6").
-    IDs already matching claude-* are returned as-is (e.g. "claude-haiku-4-5").
     Non-Anthropic IDs get claude-code- prefix (e.g. "ollama-cloud/deepseek-v4-pro"
     → "claude-code-deepseek-v4-pro").
     """
@@ -1037,9 +1036,10 @@ _PROXY_EXPOSED_MODELS: dict[str, str] = {
     # Local inference
     "local/qwen3-4b-q6": "local/qwen3-4b-q6",
     "local/qwen3-9b-q4": "local/qwen3-9b-q4",
-    # Anthropic cloud
+    # Anthropic cloud — public ID has anthropic/ prefix; internal alias is the bare
+    # name so LiteLLM routes through the proxy entry that carries ANTHROPIC_API_KEY.
     "anthropic/claude-haiku-4-5": "claude-haiku-4-5",
-    "anthropic/claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
+    "anthropic/claude-sonnet-4-6": "claude-sonnet-4-6",
     "anthropic/claude-opus-4-7": "claude-opus-4-7",
     # Ollama cloud
     "ollama-cloud/deepseek-v4-pro": "ollama-cloud/deepseek-v4-pro",
@@ -1079,7 +1079,7 @@ _LEGACY_ALIASES: dict[str, str] = {
     # CC bare names (backward compat)
     "qwen3-4b":          "local/qwen3-4b-q6",
     "claude-haiku-4-5":  "claude-haiku-4-5",
-    "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
+    "claude-sonnet-4-6": "claude-sonnet-4-6",
     "claude-opus-4-7":   "claude-opus-4-7",
     # OpenCode flat names — model keys after OpenCode strips provider prefix
     "deepseek-v4-pro":   "ollama-cloud/deepseek-v4-pro",
