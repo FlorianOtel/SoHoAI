@@ -2,8 +2,8 @@
 title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (claude-code-kimi-k2.6)
-updated_at: 2026-05-16--15-52
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-22--00-00
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -604,3 +604,52 @@ Deployed llama-swap on Server 2 to manage dual-model serving. The orchestrator's
 - `main.py`: `_display_name_for()` (dead branch removed), `list_models()` (fallback removed),
   all six tab-indented functions (indentation normalized)
 - `SoHoAI-config.yaml`: `ollama-cloud/*` entries (lines 83–125 after this change)
+
+---
+
+## 2026-05-22 — Fix gateway 404 / 400 for CC model annotations and Anthropic versioned IDs
+
+### Problem
+
+Two classes of HTTP errors were appearing in the gateway log:
+
+**404 on `POST /v1/messages`** — Claude Code sends `model: "claude-sonnet-4-6[1m]"` (its
+internal annotation for the 1M-context Sonnet variant). `_resolve_proxy_model` couldn't match
+it, so the gateway fell through to transparent forwarding — but forwarded the body unchanged,
+with the `[1m]` suffix intact. Anthropic's API doesn't recognise this model ID → 404.
+Side-effect: CC's auto-mode **Bash safety classifier** calls `/v1/messages` to decide if a
+shell command is safe; a 404 there causes `"claude-sonnet-4-6[1m] is temporarily unavailable"`
+and blocks all Bash execution in `auto` permission mode (seen in claude-orchestra sessions).
+
+**400 on `POST /v1/messages/count_tokens`** — CC sends `model: "claude-haiku-4-5-20251001"`
+(Anthropic's date-versioned ID format). The gateway's validation gate only knew the bare alias
+`claude-haiku-4-5`, so it returned HTTP 400 "model not exposed by this proxy".
+
+### Root cause
+
+`_resolve_proxy_model` normalised neither CC's `[…]` context-window annotations nor
+Anthropic's `-YYYYMMDD` date suffixes before performing alias lookups. Both forms are
+real, valid identifiers that resolve to a known model once stripped.
+
+### Fix (3 changes to `main.py`)
+
+1. **`_resolve_proxy_model`** — added a normalization fallback at the end: strip `[…]`
+   and `-YYYYMMDD` suffixes, then retry recursively. Handles both annotation types at the
+   single resolution point that all endpoints share.
+
+2. **`anthropic_messages`** — strip `[…]` from the model name in the request body before
+   forwarding to `api.anthropic.com`. Anthropic only accepts bare names; without this the
+   404 persists even if resolution succeeds.
+
+3. **`count_tokens_endpoint`** — same `[…]` stripping on the model name forwarded to
+   Anthropic's count_tokens API.
+
+### What does NOT change
+
+- Date-versioned IDs (`claude-haiku-4-5-20251001`) are forwarded to Anthropic as-is after
+  passing the resolution gate — Anthropic knows these natively.
+- No changes to routing logic, LiteLLM path, or streaming path.
+
+### Code locations
+
+- `main.py`: `_resolve_proxy_model()`, `anthropic_messages()`, `count_tokens_endpoint()`

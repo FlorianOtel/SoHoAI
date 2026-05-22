@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-19--00-00
+updated_at: 2026-05-22--00-00
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -96,6 +96,13 @@ the gateway also returned them.
 
 `_resolve_proxy_model()` also accepts legacy bare names (`qwen3-4b`, `claude-sonnet-4-6`
 etc.) via `_LEGACY_ALIASES` for backward compat with existing Cline configs.
+
+**Model name normalization** (2026-05-22): `_resolve_proxy_model()` now strips CC
+context-window annotations (`[1m]`) and Anthropic date suffixes (`-20251001`) before
+lookup, so `claude-sonnet-4-6[1m]` and `claude-haiku-4-5-20251001` both resolve
+correctly. The `anthropic_messages` and `count_tokens` endpoints also strip `[…]` from
+the model name before forwarding to `api.anthropic.com` (Anthropic only accepts bare
+names; the annotation caused a 404 that blocked CC's auto-mode Bash safety classifier).
 
 **Ollama cloud models are reasoning models** (DeepSeek V4 Pro, Kimi K2.6, GLM-5.1
 in particular). They spend a variable number of tokens on internal reasoning before

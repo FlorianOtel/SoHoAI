@@ -98,7 +98,8 @@
       "Bash(xargs -I{} git show {} -- SoHoAI-config.yaml)",
       "Bash(claude --version)",
       "Bash(grep -v \"^--$\")",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(grep -n \"\\\\[.*\\\\\\\\\\\\]\\\\\\\\$\\\\|normalize\\\\|strip.*\\\\[\" /mnt/nfs/Florian/Gin-AI/projects/SoHoAI/main.py)"
     ],
     "additionalDirectories": [
       "/home/florian/Gin-AI",

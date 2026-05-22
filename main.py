@@ -1130,6 +1130,14 @@ def _resolve_proxy_model(name: str | None) -> str | None:
     resolved_via_alias = _claude_code_alias_to_public(name)
     if resolved_via_alias is not None:
         return _PROXY_EXPOSED_MODELS[resolved_via_alias]
+    # Normalize CC context-window annotations ("[1m]") and Anthropic date suffixes
+    # ("-20251001"), then retry. This handles:
+    #   "claude-sonnet-4-6[1m]"      → "claude-sonnet-4-6"
+    #   "claude-haiku-4-5-20251001"  → "claude-haiku-4-5"
+    normalized = re.sub(r"\[.*?\]$", "", name)
+    normalized = re.sub(r"-\d{8}$", "", normalized)
+    if normalized != name:
+        return _resolve_proxy_model(normalized)
     return None
 
 
@@ -1376,11 +1384,16 @@ async def anthropic_messages(req: Request):
                 status_code=529,
             )
 
-    # Strip provider prefix (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6")
-    # before forwarding — the Anthropic API only accepts bare model names.
-    if public_model and "/" in public_model:
-        bare_model = public_model.split("/", 1)[-1]
-        body = {**body, "model": bare_model}
+    # Strip provider prefix and CC context-window annotations before forwarding.
+    # Anthropic API only accepts bare model names like "claude-sonnet-4-6".
+    # CC appends e.g. "[1m]" to distinguish 1M-context variants in its UI — that
+    # annotation is not a real model ID and causes a 404 from api.anthropic.com.
+    api_model = public_model or ""
+    if "/" in api_model:
+        api_model = api_model.split("/", 1)[-1]
+    api_model = re.sub(r"\[.*?\]$", "", api_model)
+    if api_model != body.get("model"):
+        body = {**body, "model": api_model}
         body_bytes = json.dumps(body).encode()
 
     logger.info("anthropic_messages: %r → transparent forward", public_model)
@@ -2042,8 +2055,10 @@ async def count_tokens_endpoint(req: Request):
 
     # Anthropic-native models: forward to Anthropic API
     if resolved not in _LITELLM_ROUTED:
-        # Strip provider prefix from model before forwarding to Anthropic
+        # Strip provider prefix and CC context-window annotations (e.g. "[1m]")
+        # before forwarding — Anthropic accepts bare/date-versioned IDs only.
         stripped_model = public_model.split("/", 1)[-1] if public_model and "/" in public_model else public_model
+        stripped_model = re.sub(r"\[.*?\]$", "", stripped_model)
         forward_body = {**body, "model": stripped_model}
         forward_body_bytes = json.dumps(forward_body).encode()
 
