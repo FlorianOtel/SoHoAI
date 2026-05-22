@@ -2,12 +2,15 @@
 title: "SoHoAI / LiteLLM Cost Attribution — Session Comparison & Handover"
 created_at: 2026-05-11--00-00
 created_by: Claude Code (Claude Sonnet 4.6)
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-22--15-30
 context: >
   Detailed analysis of a cost-reporting discrepancy between two /brain orchestra sessions
   on 2026-05-10. Session B (using SoHoAI models for subagents) reported $83.66 vs Session A's
   $18.73 despite comparable work. Investigation revealed the discrepancy was caused by a
-  LiteLLM client-side failure for claude-code-* model aliases, plus inaccurate cache-token
-  pricing in LiteLLM's model database. Fix applied in claude-orchestra. This document covers
+  LiteLLM client-side failure for Ollama Cloud model routing (formerly aliased as claude-code-*,
+  alias scheme removed 2026-05-22), plus inaccurate cache-token pricing in LiteLLM's model database.
+  Fix applied in claude-orchestra. This document covers
   the full comparative analysis and a SoHoAI handoff with what the SoHoAI proxy needs to
   implement for authoritative cost attribution.
 ---
@@ -29,9 +32,9 @@ context: >
 | Reported cost (original) | **$18.73** (`litellm`) | **$83.66** (`pricing_yaml`) |
 | Reported cost (after fix) | $18.73 (`litellm`) | **$30.09** (`litellm`) |
 | Parent model | claude-opus-4-7 | claude-opus-4-7 |
-| Planner | claude-sonnet-4-6 (native) | claude-code-deepseek-v4-pro (SoHoAI) |
-| Actor | claude-haiku-4-5-20251001 (native) | claude-code-qwen3-coder-next (SoHoAI) |
-| Actor-heavy | — | claude-code-kimi-k2.6 (SoHoAI) |
+| Planner | claude-sonnet-4-6 (native) | ollama-cloud/deepseek-v4-pro (SoHoAI) |
+| Actor | claude-haiku-4-5-20251001 (native) | ollama-cloud/qwen3-coder-next (SoHoAI) |
+| Actor-heavy | — | ollama-cloud/kimi-k2.6 (SoHoAI) |
 | Reviewer | claude-sonnet-4-6 (native) | claude-sonnet-4-6 (native) |
 
 Session A *implemented* the SoHoAI agent switch. Session B was the first real-world `/brain` run *after* deploying those changes — the first session where deepseek, qwen3, and kimi ran as actual subagents.
@@ -57,10 +60,10 @@ Session A *implemented* the SoHoAI agent switch. Session B was the first real-wo
 |---|---|---|---|---|
 | Brain (parent) | claude-opus-4-7 | Anthropic (via SoHoAI proxy) | 1 | 4,650 s (session) |
 | Explore | claude-haiku-4-5-20251001 | Anthropic (via SoHoAI proxy) | 3 | 149 s total |
-| Planner | claude-code-deepseek-v4-pro | SoHoAI → Ollama Cloud | 1 | 755 s |
+| Planner | ollama-cloud/deepseek-v4-pro | SoHoAI → Ollama Cloud | 1 | 755 s |
 | Planner-long | claude-sonnet-4-6 | Anthropic (via SoHoAI proxy) | 1 | 107 s |
-| Actor | claude-code-qwen3-coder-next | SoHoAI → Ollama Cloud | 3 | 1,177 s total (avg 392 s) |
-| Actor-heavy | claude-code-kimi-k2.6 | SoHoAI → Ollama Cloud | 2 | 1,007 s total |
+| Actor | ollama-cloud/qwen3-coder-next | SoHoAI → Ollama Cloud | 3 | 1,177 s total (avg 392 s) |
+| Actor-heavy | ollama-cloud/kimi-k2.6 | SoHoAI → Ollama Cloud | 2 | 1,007 s total |
 | Reviewer | claude-sonnet-4-6 | Anthropic (via SoHoAI proxy) | 2 | 360 s total |
 | **Total subagent dispatches** | | | **13** | **3,555 s** |
 
@@ -221,7 +224,7 @@ SoHoAI models contribute **$0** at list rates (Ollama Cloud Pro is a flat $20/mo
 
 **After fix, LiteLLM reported: $30.09**
 
-With the fix, `claude-code-*` models short-circuit to $0 and LiteLLM prices native models. The gap from pricing_yaml ($83.66) to LiteLLM ($30.09) = **$53.57** is almost entirely the missing Opus cache costs:
+With the fix, Ollama Cloud models short-circuit to $0 and LiteLLM prices native models. The gap from pricing_yaml ($83.66) to LiteLLM ($30.09) = **$53.57** is almost entirely the missing Opus cache costs:
 - Opus cache_creation: 3,008,135 × $18.75/M = $56.40 (not in LiteLLM)
 - Opus cache_read: 5,875,289 × $1.50/M = $8.81
 
@@ -266,7 +269,7 @@ In any long Brain session, the parent model (Opus) accumulates a large growing c
 
 `pricing_yaml` is the more accurate fallback for sessions where the Brain parent runs on Opus. `litellm` is systematically low by ~$29–$54 depending on session length, due to missing Opus cache rates.
 
-The fix committed to claude-orchestra prevents `claude-code-*` aliases from aborting the LiteLLM path, restoring `cost_source=litellm` for Session B. However, both sessions remain **under-reported via litellm** until LiteLLM's model database is updated with correct Opus 4.7 cache rates, or the `sohoai_api` tier becomes the authoritative source.
+The fix committed to claude-orchestra prevents Ollama Cloud model routing from aborting the LiteLLM path, restoring `cost_source=litellm` for Session B. However, both sessions remain **under-reported via litellm** until LiteLLM's model database is updated with correct Opus 4.7 cache rates, or the `sohoai_api` tier becomes the authoritative source.
 
 ---
 

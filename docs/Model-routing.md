@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-22--00-00
+updated_at: 2026-05-22--15-30
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -12,9 +12,7 @@ context: >
   (local/qwen3-4b-q6, local/qwen3-9b-q4 via llama-swap) and Ollama cloud models use the LiteLLM conversion path with tool-use
   support (implementation complete 2026-05-10). Synthetic smoke harness
   (utils/tool_use_smoke_test.py) passed end-to-end for all target models including
-  local/qwen3-4b-q6 on both streaming and non-streaming. New in this update (2026-05-10):
-  gateway model discovery with claude-code-* alias scheme for claude-orchestra integration.
-  See docs/claude-orchestra-handoff.md for deployment runbook and tier recommendations.
+  local/qwen3-4b-q6 on both streaming and non-streaming.
   Update 2026-05-11: ollama-cloud/* 503/timeout guard — deepseek-v4-pro has a documented
   ~70% failure rate on Ollama shared inference. Silent LiteLLM fallback to another model
   was rejected (causes per-request model oscillation mid-agent-task). Instead: 30s
@@ -89,8 +87,7 @@ picks the bare-name YAML entry that carries `ANTHROPIC_API_KEY` for authenticati
 **Why `/proxy/v1/models` exposes all 10 — including `anthropic/*`:** Cline builds its
 model dropdown entirely from this endpoint; it has no hardcoded built-in model list.
 Exposing `anthropic/*` here simply tells Cline those models are selectable — no
-duplication risk. This is the key difference from `GET /v1/models` (the Claude Code
-discovery endpoint, §4.5): that endpoint excludes `anthropic/*` because Claude Code
+duplication risk. This differs from the old `GET /v1/models` endpoint: that endpoint excluded `anthropic/*` because Claude Code
 already has those IDs in its native built-in list and would show each model twice if
 the gateway also returned them.
 
@@ -330,9 +327,9 @@ user-visible error rather than an opaque crash. The message includes a `/model` 
 `ollama-cloud/qwen3-coder-next` (coding) or an `anthropic/*` model. Reserve deepseek-v4-pro
 for exploratory/disposable sessions where occasional failures are acceptable.
 
-### §2.4 Subagent blocking for `claude-code-*` sessions
+### §2.4 Subagent blocking for Ollama Cloud sessions
 
-When Claude Code uses a `claude-code-*` (Ollama Cloud) model as its main model, it
+When Claude Code uses an Ollama Cloud model as its main model, it
 internally auto-spawns `claude-haiku-4-5-20251001` for lightweight background tasks.
 These would otherwise be transparently forwarded to Anthropic — incurring unexpected cost
 while the user expects a $0 Ollama session.
@@ -527,107 +524,6 @@ the persona and **self-identify as "Claude"**. The actual model is confirmed by:
 
 Model self-description is not a reliable indicator of which model is handling the request.
 
-### 4.5 Gateway model discovery and `claude-code-*` alias scheme
-
-SoHoAI's `GET /v1/models` endpoint publishes the models that Claude Code cannot discover
-on its own — non-Anthropic models only. The transformation is performed by
-`_claude_code_alias_for()` in `main.py` and reversed by `_claude_code_alias_to_public()`
-before routing to the backend. Bijection correctness is validated by `utils/alias_bijection_test.py`.
-
-**`GET /v1/models` does NOT include `anthropic/*` models.**
-
-Rationale: Claude Code already has `claude-haiku-4-5`, `claude-sonnet-4-6`, and
-`claude-opus-4-7` in its built-in native model list. When `ANTHROPIC_BASE_URL` points at
-the SoHoAI gateway, these are routed transparently through `POST /v1/messages` — no
-discovery entry is needed. Including them in `/v1/models` caused two problems:
-
-1. **Duplicate picker entries**: each Anthropic model appeared twice (once from the native list, once from gateway discovery).
-2. **Misleading metadata**: the gateway's copy carried hardcoded fallback values (`context_window`, `max_tokens`, display labels synthesized by `_display_name_for()`) rather than real Anthropic API metadata.
-
-**Models returned by `GET /v1/models` (6 total — non-Anthropic only):**
-
-| Public ID | claude-code-* alias | Backend | Notes |
-|---|---|---|---|
-| `local/qwen3-4b-q6` | `claude-code-qwen3-4b-q6` | llama-server, Server 2 | $0/session; 131k ctx |
-| `local/qwen3-9b-q4` | `claude-code-qwen3-9b-q4` | llama-server, Server 2 | $0/session; 262k ctx; hot-swap via llama-swap |
-| `ollama-cloud/deepseek-v4-pro` | `claude-code-deepseek-v4-pro` | Ollama cloud | Reasoning; `max_tokens ≥ 500` |
-| `ollama-cloud/kimi-k2.6` | `claude-code-kimi-k2.6` | Ollama cloud | Reasoning; `max_tokens ≥ 500` |
-| `ollama-cloud/glm-5.1` | `claude-code-glm-5.1` | Ollama cloud | Reasoning; `max_tokens ≥ 500` |
-| `ollama-cloud/qwen3-coder-next` | `claude-code-qwen3-coder-next` | Ollama cloud | Coding; standard `max_tokens` |
-
-Anthropic models (`claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`) are still
-fully accessible — they appear in the picker from Claude Code's native built-in list and
-route through the gateway transparently via `ANTHROPIC_BASE_URL`.
-
-**Contrast with `/proxy/v1/models` (Cline path):** that endpoint still returns all 10
-public IDs from `_PROXY_EXPOSED_MODELS` (including `anthropic/*`). The distinction matters
-because Cline manages its own model list and does not have a native built-in list that
-would conflict.
-
-Claude Code's model picker and subagent frontmatter read from `/v1/models`. Both the picker
-(when `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) and manual subagent `model:` fields
-accept the full `claude-code-*` identifier. The proxy's `_resolve_proxy_model()` function
-accepts both the legacy public_id forms (e.g., `ollama-cloud/deepseek-v4-pro`) and the
-new aliases for backward compatibility with existing configurations.
-
-**Token counting endpoint (`POST /v1/messages/count_tokens`):**
-
-Claude Code sends pre-flight token estimates before dispatching requests. The endpoint handles two cases:
-1. **Anthropic models** (`claude-*`): request is forwarded transparently to `api.anthropic.com/v1/messages/count_tokens`; response is returned as-is.
-2. **LiteLLM-routed models** (`claude-code-*` aliases): `litellm.token_counter()` estimates token count for the target model. Unknown tokenizers fall back to `len(text) // 4`. Both paths return `{input_tokens, output_tokens}` for consistency.
-
-This closes a 404 that occurred before the endpoint was available — Claude Code's pre-flight checks now succeed, enabling faster interactive feedback.
-
-**Activation:**
-
-Enable gateway model discovery by setting `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` in `~/.claude/settings.json` (requires Claude Code v2.1.129+). See `docs/claude-orchestra-handoff.md` §5.2 for the exact settings.json snippet and §5 for the full post-merge deployment runbook.
-
-### §4.6 Gateway model cache — format, auth conflict, and workaround
-
-**How CC stores discovered models (from CC v2.1.143 binary analysis):**
-
-CC's model picker reads gateway models from `~/.claude/cache/gateway-models.json` via the
-synchronous `H14()` function at startup. The async `$14()` function writes this file by
-calling `GET /v1/models` on the gateway. The file must be in this exact format:
-
-```json
-{
-  "baseUrl": "http://192.168.1.93:8000",
-  "fetchedAt": 1748000000000,
-  "models": [
-    {"id": "claude-code-qwen3-4b-q6", "display_name": "Qwen3 4B Q6 (local, 131k ctx)"},
-    ...
-  ]
-}
-```
-
-`H14()` checks `baseUrl === process.env.ANTHROPIC_BASE_URL` before returning models. If the
-field is absent or mismatched, `H14()` returns `[]` and no gateway models appear in the picker.
-
-**The `ANTHROPIC_API_KEY` vs OAuth conflict:**
-
-`$14()` requires either `process.env.ANTHROPIC_AUTH_TOKEN` or an API key from `ML()`
-(`ANTHROPIC_API_KEY`) to run. It does not use the OAuth credentials stored in
-`~/.claude/.credentials.json`.
-
-Setting `ANTHROPIC_API_KEY` in `settings.json` `env` block would supply this, but **it
-unconditionally takes precedence over OAuth** in CC's auth priority chain (confirmed from
-the CC v2.1.143 binary: API key is checked before `~/.claude/.credentials.json`). The
-result: billing silently switches from the claude.ai subscription (OAuth) to API token
-billing. The two requirements are mutually exclusive.
-
-**Workaround — `start-sohoai.sh` writes the cache on every gateway start:**
-
-`start-sohoai.sh` runs a Python snippet that reads `SoHoAI-config.yaml`, derives the
-`claude-code-*` aliases for all non-Anthropic models, and writes `gateway-models.json`
-before uvicorn starts. This replicates what `$14()` would do without requiring an API key
-in the environment.
-
-The cache has **no TTL** — `H14()` does not check `fetchedAt`. The file persists across
-CC restarts and is only overwritten if `$14()` runs (which it won't in an OAuth-only
-setup) or by `start-sohoai.sh`. Re-run `start-sohoai.sh` (i.e., restart the gateway)
-whenever the non-Anthropic model list changes in `SoHoAI-config.yaml`.
-
 ---
 
 ## 5. Alternative - Anthropic passthrough — and comparison
@@ -802,17 +698,14 @@ See `docs/TODO.md` for full detail on each deferred item.
 ## 9. Implementation reference
 
 - **`main.py`**: `_ANTHROPIC_API_BASE`, `_PROXY_EXPOSED_MODELS`, `_resolve_proxy_model()`,
-  `_build_proxy_model_entry()`, `proxy_model_info()`, `proxy_models()`,
-  `proxy_chat_completions()`, `anthropic_messages()` (with `proxy.blocked_models` check),
+  `_build_proxy_model_entry()`, `proxy_model_info()`, `proxy_chat_completions()`,
+  `anthropic_messages()` (with `proxy.blocked_models` check),
   `_anthropic_messages_forward()`, `_anthropic_messages_litellm()`,
   `_anthropic_stop_reason()`, `_TOOL_ID_VALID`, `_sanitize_tool_use_id()`,
-  `_claude_code_alias_for()`, `_claude_code_alias_to_public()`, `_display_name_for()`,
   `_LITELLM_ROUTED`, `anthropic_count_tokens()` (token counting endpoint)
 - **`router.py`**: `SmartRouter` — used by Cline path and LiteLLM local path;
   3-step timeout backoff for `ollama-cloud/*`; `enable_pre_call_checks` and
   `context_window_fallbacks` wired from `SoHoAI-config.yaml`
 - **`SoHoAI-config.yaml`**: `model_list` entries; `proxy.blocked_models`;
   `router_settings.enable_pre_call_checks: true`; `litellm_settings.context_window_fallbacks`
-- **`utils/alias_bijection_test.py`**: validates `_claude_code_alias_for()` ↔ `_claude_code_alias_to_public()` bijection
-- **`docs/claude-orchestra-handoff.md`**: deployment runbook, tier recommendations, and integration checklist for claude-orchestra
 - **`docs/TODO.md`**: deferred work — local-model tool-use implementation plan

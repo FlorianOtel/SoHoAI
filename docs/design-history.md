@@ -3,7 +3,7 @@ title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-22--00-00
+updated_at: 2026-05-22--15-30
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -653,3 +653,24 @@ real, valid identifiers that resolve to a known model once stripped.
 ### Code locations
 
 - `main.py`: `_resolve_proxy_model()`, `anthropic_messages()`, `count_tokens_endpoint()`
+
+---
+
+## 2026-05-22 — Remove `claude-code-*` alias scheme for Claude Code
+
+**Context**: CC's native model picker contains all Anthropic models natively. The `claude-code-*`
+alias scheme (exposing non-Anthropic models via `GET /v1/models` + `gateway-models.json` cache)
+added complexity with minimal benefit: CC's local inference use-case is served by sub-agents
+via the `/proxy/v1` path, not the CC model picker.
+
+**What was removed**:
+- `GET /v1/models` endpoint (`list_models()` in `main.py`)
+- `_claude_code_alias_for()`, `_claude_code_alias_to_public()`, `_display_name_for()` helpers
+- `claude-code-*` resolution branch in `_resolve_proxy_model()`
+- `gateway-models.json` writing block in `start-sohoai.sh`
+- `utils/alias_bijection_test.py`
+
+**What is unaffected**: Cline / OpenCode via `/proxy/v1/*`; the Anthropic passthrough `/v1/messages`;
+all telemetry. CC continues to use native Anthropic models via `ANTHROPIC_BASE_URL`.
+
+**Operator action**: delete `~/.claude/cache/gateway-models.json` once to clear stale picker entries.

@@ -808,58 +808,6 @@ async def health():
     }
 
 
-@app.get("/v1/models")
-async def list_models():
-    """List available models in Anthropic format.
-
-    Non-Anthropic models are returned with claude-code-* aliases.
-    Includes context_window and max_tokens for each model.
-    """
-    router: SmartRouter = app.state.router
-    models = []
-
-    for public_id in _PROXY_EXPOSED_MODELS:
-        # anthropic/* models are already known natively to Claude Code via ANTHROPIC_BASE_URL;
-        # skip them here to avoid duplicate /model picker entries with gateway-synthesized metadata.
-        if public_id.startswith("anthropic/"):
-            continue
-
-        # Determine the id to return: bare for claude-*, claude-code-* for everything else
-        if public_id.startswith("claude-"):
-            model_id = public_id
-        else:
-            model_id = _claude_code_alias_for(public_id)
-
-        # Get model info from router config
-        internal_alias = _PROXY_EXPOSED_MODELS[public_id]
-        model_info = None
-        for m in router.config.get("model_list", []):
-            if m.get("model_name") == internal_alias:
-                model_info = m.get("model_info", {})
-                break
-
-        if model_info is None:
-            model_info = {}
-
-        display_name = _display_name_for(public_id, model_info)
-
-        models.append({
-            "type": "model",
-            "id": model_id,
-            "display_name": display_name,
-            "context_window": model_info.get("context_window", 0),
-            "max_tokens": model_info.get("max_tokens", 0),
-            "created_at": "2025-01-01T00:00:00Z",
-        })
-
-    return {
-        "data": models,
-        "first_id": models[0]["id"] if models else None,
-        "last_id": models[-1]["id"] if models else None,
-        "has_more": False,
-    }
-
-
 @app.get("/v1/models/health")
 async def model_health():
     """Check which model endpoints are reachable."""
@@ -970,59 +918,6 @@ async def usage_stats(
 #  See CLAUDE.md §Design decisions and memory/project_shared_llama_server.md.
 # =============================================================================
 
-def _claude_code_alias_for(public_id: str) -> str:
-    """Map a _PROXY_EXPOSED_MODELS key to its claude-code-{suffix} form.
-
-    Rule: Anthropic-native IDs (starting with "anthropic/") are stripped and
-    return bare (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6").
-    Non-Anthropic IDs get claude-code- prefix (e.g. "ollama-cloud/deepseek-v4-pro"
-    → "claude-code-deepseek-v4-pro").
-    """
-    if public_id.startswith("anthropic/"):
-        return public_id.split("/", 1)[1]
-    elif public_id.startswith("claude-"):
-        return public_id
-    else:
-        # Strip provider prefix and add claude-code- prefix
-        suffix = public_id.split("/", 1)[-1]
-        return f"claude-code-{suffix}"
-
-
-def _claude_code_alias_to_public(alias: str) -> str | None:
-    """Inverse of _claude_code_alias_for.
-
-    Given a claude-code-* or claude-* alias, find the matching public ID
-    from _PROXY_EXPOSED_MODELS. Returns None if no match.
-    """
-    for public_id in _PROXY_EXPOSED_MODELS:
-        if _claude_code_alias_for(public_id) == alias:
-            return public_id
-    return None
-
-
-def _display_name_for(public_id: str, info: dict) -> str:
-    """Build a human-readable label encoding provider, suffix, and context window.
-
-    Format: "{Pretty} ({provider}, {ctx}k ctx)"
-    where {Pretty} is a human-friendly model name and {ctx} is context_window // 1000.
-    """
-    context_window = info.get("context_window", 0)
-    ctx_k = context_window // 1000 if context_window else 0
-
-    # anthropic/* models are excluded from /v1/models (commit 5ba6971) — no branch needed here
-    if public_id.startswith("ollama-cloud/"):
-        suffix = public_id.split("/", 1)[1]
-        pretty = suffix.replace("-", " ").title()
-        return f"{pretty} (Ollama Cloud, {ctx_k}k ctx)"
-    elif public_id.startswith("local/"):
-        suffix = public_id.split("/", 1)[1]
-        pretty = suffix.replace("-", " ").title()
-        return f"{pretty} (local, {ctx_k}k ctx)"
-    else:
-        pretty = public_id.replace("-", " ").title()
-        return f"{pretty} ({ctx_k}k ctx)"
-
-
 # Extract _LITELLM_ROUTED to module level to avoid drift
 _LITELLM_ROUTED = frozenset(
     {"local/qwen3-4b-q6", "local/qwen3-9b-q4", "ollama-cloud/deepseek-v4-pro",
@@ -1076,7 +971,7 @@ def _build_proxy_model_entry(config: dict, public_name: str, internal_name: str)
 
 
 _LEGACY_ALIASES: dict[str, str] = {
-    # CC bare names (backward compat)
+    # Bare names for backward compat with Cline / OpenCode configs
     "qwen3-4b":          "local/qwen3-4b-q6",
     "claude-haiku-4-5":  "claude-haiku-4-5",
     "claude-sonnet-4-6": "claude-sonnet-4-6",
@@ -1126,10 +1021,6 @@ def _resolve_proxy_model(name: str | None) -> str | None:
     all_aliases = set(_PROXY_EXPOSED_MODELS.values()) | set(_LEGACY_ALIASES.values())
     if name in all_aliases:
         return name
-    # claude-code-* aliases from gateway discovery
-    resolved_via_alias = _claude_code_alias_to_public(name)
-    if resolved_via_alias is not None:
-        return _PROXY_EXPOSED_MODELS[resolved_via_alias]
     # Normalize CC context-window annotations ("[1m]") and Anthropic date suffixes
     # ("-20251001"), then retry. This handles:
     #   "claude-sonnet-4-6[1m]"      → "claude-sonnet-4-6"

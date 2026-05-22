@@ -28,8 +28,8 @@ redis:
 # -- Proxy access control -------------------------------------------------------
 proxy:
   # Models listed here are refused at /v1/messages with HTTP 400.
-  # Prevents CC from auto-spawning Haiku subagents when the main model is a
-  # claude-code-* (Ollama Cloud) model, which would incur unexpected Anthropic cost.
+  # Prevents CC from auto-spawning Haiku subagents for Ollama Cloud sessions,
+  # which would incur unexpected Anthropic cost.
   blocked_models:
     - claude-haiku-4-5-20251001
 
