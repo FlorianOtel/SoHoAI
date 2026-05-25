@@ -918,30 +918,47 @@ async def usage_stats(
 #  See CLAUDE.md §Design decisions and memory/project_shared_llama_server.md.
 # =============================================================================
 
-# Extract _LITELLM_ROUTED to module level to avoid drift
-_LITELLM_ROUTED = frozenset(
-    {"local/qwen3-4b-q6", "local/qwen3-9b-q4", "ollama-cloud/deepseek-v4-pro",
-     "ollama-cloud/kimi-k2.6", "ollama-cloud/glm-5.1", "ollama-cloud/qwen3-coder-next"}
-)
+def _build_proxy_tables(cfg: dict) -> tuple[dict[str, str], frozenset[str], dict[str, str]]:
+    """Derive proxy routing tables from model_list in SoHoAI-config.yaml.
 
-# Public-facing model name → internal router alias.
-# Both paths reach the same LiteLLM Router, so prompt caching on external
-# applies here too; Qwen3.5 routing still lands on the shared llama-server.
-_PROXY_EXPOSED_MODELS: dict[str, str] = {
-    # Local inference
-    "local/qwen3-4b-q6": "local/qwen3-4b-q6",
-    "local/qwen3-9b-q4": "local/qwen3-9b-q4",
-    # Anthropic cloud — public ID has anthropic/ prefix; internal alias is the bare
-    # name so LiteLLM routes through the proxy entry that carries ANTHROPIC_API_KEY.
-    "anthropic/claude-haiku-4-5": "claude-haiku-4-5",
-    "anthropic/claude-sonnet-4-6": "claude-sonnet-4-6",
-    "anthropic/claude-opus-4-7": "claude-opus-4-7",
-    # Ollama cloud
-    "ollama-cloud/deepseek-v4-pro": "ollama-cloud/deepseek-v4-pro",
-    "ollama-cloud/kimi-k2.6": "ollama-cloud/kimi-k2.6",
-    "ollama-cloud/glm-5.1": "ollama-cloud/glm-5.1",
-    "ollama-cloud/qwen3-coder-next": "ollama-cloud/qwen3-coder-next",
-}
+    Returns (exposed_models, litellm_routed, legacy_aliases).
+
+    Rules per model_name prefix:
+      local/X        → exposed identity, litellm_routed, bare legacy alias X→local/X
+      anthropic/X    → exposed anthropic/X→X (bare has api_key), NOT litellm_routed
+      ollama-cloud/X → exposed identity, litellm_routed, bare legacy alias X→ollama-cloud/X
+      bare name      → legacy identity alias only (backward compat for clients that omit prefix)
+    """
+    exposed: dict[str, str] = {}
+    litellm_routed: set[str] = set()
+    legacy: dict[str, str] = {}
+
+    for entry in cfg.get("model_list", []):
+        name: str = entry.get("model_name", "")
+        if name.startswith("local/"):
+            exposed[name] = name
+            litellm_routed.add(name)
+            legacy[name[len("local/"):]] = name
+        elif name.startswith("anthropic/"):
+            # Public anthropic/X → internal bare X, which carries ANTHROPIC_API_KEY
+            exposed[name] = name[len("anthropic/"):]
+        elif name.startswith("ollama-cloud/"):
+            exposed[name] = name
+            litellm_routed.add(name)
+            legacy[name[len("ollama-cloud/"):]] = name
+        else:
+            # Bare name (e.g. claude-sonnet-4-6) — internal alias; backward-compat legacy entry
+            legacy[name] = name
+
+    # "qwen3-4b" is a short alias that cannot be derived from the config model_name;
+    # keep it hardcoded so existing Cline configs that use this short form still work.
+    if "local/qwen3-4b-q6" in exposed:
+        legacy["qwen3-4b"] = "local/qwen3-4b-q6"
+
+    return exposed, frozenset(litellm_routed), legacy
+
+
+_PROXY_EXPOSED_MODELS, _LITELLM_ROUTED, _LEGACY_ALIASES = _build_proxy_tables(config)
 
 
 def _build_proxy_model_entry(config: dict, public_name: str, internal_name: str) -> dict | None:
@@ -968,22 +985,6 @@ def _build_proxy_model_entry(config: dict, public_name: str, internal_name: str)
         "litellm_params": litellm_params,
         "model_info": internal.get("model_info", {}),
     }
-
-
-_LEGACY_ALIASES: dict[str, str] = {
-    # Bare names for backward compat with Cline / OpenCode configs
-    "qwen3-4b":          "local/qwen3-4b-q6",
-    "claude-haiku-4-5":  "claude-haiku-4-5",
-    "claude-sonnet-4-6": "claude-sonnet-4-6",
-    "claude-opus-4-7":   "claude-opus-4-7",
-    # OpenCode flat names — model keys after OpenCode strips provider prefix
-    "deepseek-v4-pro":   "ollama-cloud/deepseek-v4-pro",
-    "kimi-k2.6":         "ollama-cloud/kimi-k2.6",
-    "glm-5.1":           "ollama-cloud/glm-5.1",
-    "qwen3-coder-next":  "ollama-cloud/qwen3-coder-next",
-    "qwen3-4b-q6":       "local/qwen3-4b-q6",
-    "qwen3-9b-q4":       "local/qwen3-9b-q4",
-}
 
 
 def _resolve_proxy_model(name: str | None) -> str | None:

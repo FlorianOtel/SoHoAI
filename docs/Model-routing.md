@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-22--15-30
+updated_at: 2026-05-25--23-00
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -53,7 +53,7 @@ SoHoAI routes conversation inference across two model tiers: **external** (Claud
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/proxy/v1/models` | OpenAI-compatible model list — all 8 public IDs from `_PROXY_EXPOSED_MODELS` (including `anthropic/*`) |
+| GET | `/proxy/v1/models` | OpenAI-compatible model list — all public IDs from `_PROXY_EXPOSED_MODELS` (including `anthropic/*`) |
 | GET | `/proxy/v1/model/info` | LiteLLM-compatible model info (`max_input_tokens`, `context_window`) — Cline reads this to set its context-window display |
 | POST | `/proxy/v1/chat/completions` | Stateless OpenAI chat completions, streaming supported |
 
@@ -79,7 +79,9 @@ picks the bare-name YAML entry that carries `ANTHROPIC_API_KEY` for authenticati
 | `anthropic/claude-haiku-4-5` | `claude-haiku-4-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 200,000 |
 | `anthropic/claude-sonnet-4-6` | `claude-sonnet-4-6` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `anthropic/claude-opus-4-7` | `claude-opus-4-7` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
+| `ollama-cloud/deepseek-v4-flash` | `ollama-cloud/deepseek-v4-flash` | LiteLLM | Ollama API key | — |
 | `ollama-cloud/deepseek-v4-pro` | `ollama-cloud/deepseek-v4-pro` | LiteLLM | Ollama API key | **~70% 503 rate** — see §2.3 |
+| `ollama-cloud/minimax-m2.5` | `ollama-cloud/minimax-m2.5` | LiteLLM | Ollama API key | — |
 | `ollama-cloud/kimi-k2.6` | `ollama-cloud/kimi-k2.6` | LiteLLM | Ollama API key | — |
 | `ollama-cloud/glm-5.1` | `ollama-cloud/glm-5.1` | LiteLLM | Ollama API key | — |
 | `ollama-cloud/qwen3-coder-next` | `ollama-cloud/qwen3-coder-next` | LiteLLM | Ollama API key | — |
@@ -180,7 +182,7 @@ REQUEST arrives at POST /v1/messages
   │     → tools forwarded; Qwen synthetic-smoke PASS, broader workload validation pending.
      llama-swap hot-swaps models on Server 2 with 60→90→120s geometric backoff.
   │
-  ├─ model starts with "ollama-cloud/" (all 4 Ollama cloud models)
+  ├─ model starts with "ollama-cloud/" (all Ollama cloud models)
   │     → _anthropic_messages_litellm() [same conversion path]
   │     → Anthropic→OpenAI format conversion (tools, tool_use, tool_result forwarded)
   │     → LiteLLM Router → https://ollama.com/v1 (OLLAMA_API_KEY from .env)
@@ -424,7 +426,7 @@ the Actor's costs.
 ### Local sub-agent (qwen3-4b) — tool-use status
 
 A sub-agent with `model: local/qwen3-4b-q6` or `model: ollama-cloud/*` routes via the LiteLLM local path.
-**Tool use is now supported on this path** (implemented 2026-05-10). All target models — `ollama-cloud/qwen3-coder-next`, `ollama-cloud/deepseek-v4-pro`, and `ollama-cloud/kimi-k2.6`, `ollama-cloud/glm-5.1` — passed the synthetic two-turn smoke (`utils/tool_use_smoke_test.py`) on both streaming and non-streaming.
+**Tool use is now supported on this path** (implemented 2026-05-10). Validated target models — `ollama-cloud/qwen3-coder-next`, `ollama-cloud/deepseek-v4-pro`, `ollama-cloud/kimi-k2.6`, and `ollama-cloud/glm-5.1` — passed the synthetic two-turn smoke (`utils/tool_use_smoke_test.py`) on both streaming and non-streaming. `ollama-cloud/deepseek-v4-flash` and `ollama-cloud/minimax-m2.5` are not yet smoke-validated.
 
 For `ollama-cloud/*` models (deepseek-v4-pro, qwen3-coder-next), such an agent can:
 - Read files (Read tool supported, smoke-validated)
@@ -473,7 +475,9 @@ All models exposed via `_PROXY_EXPOSED_MODELS` in `main.py`:
 | `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | Safest Actor-tier choice; ~$0.01/session |
 | `anthropic/claude-sonnet-4-6` | Transparent forward | Anthropic API | Default interactive model |
 | `anthropic/claude-opus-4-7` | Transparent forward | Anthropic API | Brain tier in /brain pipeline |
+| `ollama-cloud/deepseek-v4-flash` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; not yet validated |
 | `ollama-cloud/deepseek-v4-pro` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; **~70% 503 rate** — see §2.3; not recommended for critical tasks |
+| `ollama-cloud/minimax-m2.5` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; not yet validated |
 | `ollama-cloud/kimi-k2.6` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
 | `ollama-cloud/glm-5.1` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
 | `ollama-cloud/qwen3-coder-next` | LiteLLM conversion | Ollama cloud | Coding model; standard `max_tokens`; tool-use smoke PASS; **recommended** for $0 coding tasks |
@@ -500,7 +504,9 @@ for tool calls, including `message_delta` with `stop_reason: "tool_use"`.
 |-------|------------------|-----------------------|-------|
 | `local/qwen3-4b-q6` | PASS (streaming + non-streaming, 2026-05-10 with Gemma) | INFO: 1/5 tools only | Post-swap validation pending |
 | `ollama-cloud/qwen3-coder-next` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | — |
+| `ollama-cloud/deepseek-v4-flash` | — | — | Not yet validated |
 | `ollama-cloud/deepseek-v4-pro` | PASS (streaming, 2026-05-10) | FAIL — live 503 (2026-05-11) | Reasoning model: `max_tokens ≥ 500`; see §2.3 |
+| `ollama-cloud/minimax-m2.5` | — | — | Not yet validated |
 | `ollama-cloud/kimi-k2.6` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | Reasoning model: `max_tokens ≥ 500` |
 | `ollama-cloud/glm-5.1` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | Reasoning model: `max_tokens ≥ 500` |
 
@@ -679,7 +685,7 @@ input-size enforcement using these values.
 ## 8. Future work
 
 Basic tool-use support for the local-model path (qwen3-4b and Ollama cloud models) is now implemented
-and smoke-validated for all 5 targets (see `docs/TODO.md` IMPLEMENTED banner). The following deferred items remain:
+and smoke-validated for the original 5 targets (see `docs/TODO.md` IMPLEMENTED banner). The following deferred items remain:
 
 - **Full Claude Code tool catalogue + parallel tool calls** — the 2-turn single-tool smoke is validated; multi-tool
   parallel invocation (multiple `tool_use` blocks in one response) and the full claude-orchestra tool catalogue

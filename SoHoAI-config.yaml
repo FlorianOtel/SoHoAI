@@ -131,6 +131,18 @@ model_list:
       context_window: 1000000
       max_input_tokens: 1000000
 
+  - model_name: "ollama-cloud/deepseek-v4-flash"
+    litellm_params:
+      model: openai/deepseek-v4-flash:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      id: "ollama-cloud/deepseek-v4-flash"
+      description: "DeepSeek V4 Flash — Ollama Cloud"
+      max_tokens: 32000
+      max_input_tokens: 1000000
+      context_window: 1000000
+
   - model_name: "ollama-cloud/deepseek-v4-pro"
     litellm_params:
       model: openai/deepseek-v4-pro:cloud
@@ -138,6 +150,18 @@ model_list:
       api_key: os.environ/OLLAMA_API_KEY
     model_info:
       id: "ollama-cloud/deepseek-v4-pro"
+      description: "DeepSeek V4 Pro — Ollama Cloud"
+      max_tokens: 32000
+      max_input_tokens: 1000000
+      context_window: 1000000
+
+  - model_name: "ollama-cloud/minimax-m2.5"
+    litellm_params:
+      model: openai/minimax-m2.5:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      id: "ollama-cloud/minimax-m2.5"
       description: "DeepSeek V4 Pro — Ollama Cloud"
       max_tokens: 32000
       max_input_tokens: 1000000
