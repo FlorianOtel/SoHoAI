@@ -64,7 +64,7 @@ Server 1 (192.168.1.93)             │          Server 2 (192.168.1.95)
 ┌──────────────────────────┐  fallback/       ┌──────────────────────────┐
 │ FastAPI orchestrator:8000│──summarize/────→ │ llama-server :8000       │
 │  SmartRouter (LiteLLM)   │  variants →      │  Qwen3.5-4B Q6_K_XL     │
-│  ConversationCache       │─── /slots ─────→ │  2×110024 ctx (2 slots)  │
+│  ConversationCache       │─── /slots ─────→ │  262144 ctx (1 slot)     │
 │    Redis (short-term)    │                  │  KV slot save/restore    │
 │    KV cache mgr          │                  │  CLIP (Phase 4)          │
 │    rolling summarization │                  └──────────────────────────┘
@@ -115,18 +115,18 @@ SoHoAI/
 │   └── rag_system_prompts.py   # build_system_prompt(mode, tool_spec) → off/on/only prompts
 ├── rag_engine/                 # RAG pipeline (Phase 2 ✅ + §8 advanced retrieval ✅)
 │   ├── __init__.py             # re-exports search_rag, multi_query_search
-│   ├── schema.py               # Qdrant payload field constants + derive_owner(); FIELD_SESSION_ID + FIELD_PROJECT added for claude_chat documents
+│   ├── schema.py               # Qdrant payload field constants + derive_owner(); FIELD_SESSION_ID + FIELD_PROJECT + FIELD_SESSION_TITLE shared by claude_chat and opencode points
 │   ├── collection.py           # Collection name, vector size, get_client(), ensure_collection()
 │   ├── embeddings.py           # embed_text(), embed_batch(progress_cb) via Ollama on Server 1
 │   ├── state.py                # StateDB — ingestion queue CRUD + crash recovery; find_deleted()/purge_deleted() are the crash-safe split of the old handle_deleted() — callers must Qdrant-clean before calling purge_deleted() so a kill leaves SQLite intact for retry
-│   ├── scanner.py              # NFS + claude chat scanner → populates StateDB; scan_nfs_roots() walks configured NFS roots (filters from SoHoAI-config.yaml rag.scanner) and returns {scanned, existing_paths}; scan_claude_chats() walks SoHoAI-config.yaml claude_chats.roots for .jsonl sessions and returns {scanned, existing_paths}; callers merge existing_paths sets and call state_db.find_deleted() once before Qdrant cleanup + purge_deleted(); followlinks=True with visited_real_dirs + visited_real_files global dedup sets; exclude_dir_names uses trailing-slash path-suffix matching
-│   ├── ingest.py               # docling parse + parent-child chunking + Qdrant upsert; _parse_claude_chat() extracts user/assistant text turns from .jsonl session files and returns (text, {session_id, project}) metadata for Qdrant payload
+│   ├── scanner.py              # NFS + claude chat + opencode scanner → populates StateDB; scan_nfs_roots() walks configured NFS roots (filters from SoHoAI-config.yaml rag.scanner) and returns {scanned, existing_paths}; scan_claude_chats() walks SoHoAI-config.yaml claude_chats.roots for .jsonl sessions and returns {scanned, existing_paths}; scan_opencode_sessions() queries the opencode HTTP API (opencode.api_url) for live sessions and returns {scanned, existing_paths: set|None} — None signals API unreachable (skip in find_deleted() to preserve existing opencode Qdrant points); callers merge existing_paths sets and call state_db.find_deleted() once before Qdrant cleanup + purge_deleted(); followlinks=True with visited_real_dirs + visited_real_files global dedup sets; exclude_dir_names uses trailing-slash path-suffix matching
+│   ├── ingest.py               # docling parse + parent-child chunking + Qdrant upsert; _parse_claude_chat() extracts user/assistant text turns from .jsonl session files; _parse_opencode_session() fetches session metadata + messages via opencode HTTP API (rag.opencode_api_url) using synthetic opencode://{session_id} keys; both return (text, {session_id, project, session_title}) metadata; after parsing, file_name is overridden with session_title so renderers get a friendly label without per-type special-casing
 │   ├── search.py               # query → embed → Qdrant query_points → parent_text + provenance
 │   ├── multi_query.py          # §8.3: expand_query() + parallel search + MMR reranking (permanently disabled — no-go 2026-04-22)
 │   └── tool_use.py             # §8.2: build_tool_spec(), parse_tool_call(), format_tool_result()
 ├── utils/
 │   ├── cli_chat.py             # Terminal chat client; RAG off by default (opt-in); --user OWNER sends user_id; /rag on|off|only; /rag search <query> inspects retrieval; /user <id> changes owner mid-session
-│   ├── rag_sync_nfs.py         # CLI: scan NFS roots + claude chat dirs → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files; calls scan_nfs_roots() + scan_claude_chats(), merges existing_paths, calls find_deleted() once
+│   ├── rag_sync_nfs.py         # CLI: scan NFS roots + claude chat dirs + opencode sessions → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files; calls scan_nfs_roots() + scan_claude_chats() + scan_opencode_sessions(), merges existing_paths (skipping opencode source if its API was unreachable), calls find_deleted() once
 │   ├── rag_ingest_daemon.py    # CLI: process pending files (parse → chunk → embed → upsert)
 │   ├── rag_status.py           # CLI: queue counts + Qdrant point stats; --ignored for detail; --watch LOG_FILE for live ETA monitor; --list-pending [N] to print pending paths (pipeable)
 │   ├── rag_search_cli.py       # CLI: retrieval-only — embed query + Qdrant search; prints top-k hits + parent_text preview

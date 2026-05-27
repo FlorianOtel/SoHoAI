@@ -2,8 +2,8 @@
 title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-22--15-30
+updated_by: Claude Code (Claude Opus 4.7)
+updated_at: 2026-05-27--14-30
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -12,6 +12,36 @@ context: >
 ---
 
 # SoHoAI Design History
+
+---
+
+## 2026-05-27 — Opencode RAG ingestion, single-slot llama-server, chat title rendering
+
+Three related changes from one session, committed as `e1af344`, `306a99e`, `12df6a2`.
+
+### Opencode session ingestion (commit `e1af344`)
+
+OpenCode (the agent used by octmux) joins Claude Code as a second external LLM agent whose sessions get ingested into the `documents` Qdrant collection — same `session_title` + content treatment, queryable via `GET /v1/rag/search?file_types=opencode`.
+
+Architectural shape diverges from Claude Code: OpenCode has no on-disk session files, so the scanner queries its HTTP API (`/project`, `/session?directory=...`) instead of walking NFS. Sessions are referenced via synthetic `opencode://{session_id}` keys (kept in `ingestion_queue.file_path` and Qdrant `source_path`); the parser then fetches `/session/{id}/message` to extract text-only parts (skipping file/tool/reasoning/patch/snapshot parts).
+
+Critical invariant: if the API is unreachable, `scan_opencode_sessions()` returns `existing_paths=None` (not an empty set). Callers treat `None` as "skip this source in `find_deleted()`" so existing opencode Qdrant points are preserved instead of mass-purged when the opencode server happens to be down at sync time.
+
+Two config keys must both point at the live opencode server (currently `http://192.168.1.95:4096`, not `localhost`):
+- `opencode.api_url` — scanner uses this
+- `rag.opencode_api_url` — parser uses this (injected at startup in `lifespan()` and at daemon entry in `rag_ingest_daemon.py`)
+
+Initial run after activation: 30 opencode sessions discovered, 5 ingested as smoke test, remainder queued for the systemd-driven Server 2 ingestion service.
+
+### llama-server: single-slot 262144 ctx (commit `306a99e`)
+
+Qwen3.5-4B llama-server (and the llama-swap config that fronts it) had been running `--parallel 2 --ctx-size 262144`, giving two slots × 131072 ctx. KV cache slot session pinning is not yet implemented — a chat coming back into the conversation cache can land on whichever slot the scheduler picks, and miss its saved KV state. Stopgap: drop `--parallel 2` entirely, run a single slot at the full 262144 ctx. Proxy-advertised `max_tokens` / `max_input_tokens` / `context_window` bumped to 262144 to match what external clients (Cline, Claude Code) now see via `/proxy/v1/model/info`. Documented in CLAUDE.md's runbook command and RAG-troubleshoot.md's expected `ps aux` flags.
+
+### Chat sessions render by title, not by UUID (commit `12df6a2`)
+
+Search results for opencode hits were displaying the raw session id (`ses_1b5c9eed...`) in the File/Title column instead of the friendly title — the `utils/rag_search_cli.py` and `~/.claude/commands/rag.md` display paths special-cased `file_type == "claude_chat"` to swap in `session_title`, and opencode was omitted. Same root-cause as the Claude Code session_title work (2026-05-01): `file_name = Path(file_path).name` produces a meaningless identifier for chat sources (`UUID.jsonl` for CC, `ses_<id>` for opencode), so renderers needed special-casing to swap in `session_title`.
+
+Root-cause fix in `rag_engine/ingest.py`: when a parser returns `chat_meta[FIELD_SESSION_TITLE]`, override `file_name` with it before the Qdrant upsert. Both chat types now store the human-readable title in `file_name` natively. The display fallback in `rag_search_cli.py` was also extended to recognise `file_type=opencode` alongside `claude_chat` as a belt-and-braces measure — covers ~16.8k pre-existing claude_chat points and 5 pre-existing opencode points whose stored `file_name` still holds the raw identifier (they pick up the new label on re-ingest).
 
 ---
 
