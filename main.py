@@ -41,7 +41,6 @@ from schemas import (
     ChatResponse,
     ChatSummary,
     Message,
-    RagMode,
     Role,
 )
 from chat_store import ChatStore
@@ -54,8 +53,6 @@ from rag_engine.ingest import ingest_file
 from rag_engine.scanner import scan_nfs_roots, scan_claude_chats, scan_opencode_sessions
 from rag_engine.schema import FIELD_SOURCE_PATH
 from rag_engine.state import StateDB
-from rag_engine.tool_use import build_tool_spec, format_tool_result, parse_tool_call
-from prompts.rag_system_prompts import build_system_prompt
 from router import SmartRouter
 from kv_cache import KVCacheManager, apply_qwen3_template
 
@@ -270,60 +267,6 @@ async def inject_orchestra_session_id(request: Request, call_next):
 
 
 # =============================================================================
-#  RAG HELPERS
-# =============================================================================
-
-def _apply_system_prompt(messages: list[dict], system_prompt: str) -> list[dict]:
-    """Prepend a system message or replace an existing one."""
-    if messages and messages[0]["role"] == "system":
-        return [{"role": "system", "content": system_prompt}] + messages[1:]
-    return [{"role": "system", "content": system_prompt}] + messages
-
-
-def _fold_tool_messages(messages: list[dict]) -> list[dict]:
-    """Fold role=tool messages into role=user for models without native tool support.
-
-    Both the internal (Qwen3.5 ChatML path) and the external path (plain text
-    conversation via LiteLLM) use this transformation so tool results are always
-    readable by the model.
-    """
-    folded = []
-    for m in messages:
-        if m["role"] == "tool":
-            folded.append({"role": "user", "content": f"Tool result:\n\n{m['content']}"})
-        else:
-            folded.append(m)
-    return folded
-
-
-async def _retrieve(query: str, user_id: str | None, file_types: list[str] | None = None) -> list[dict]:
-    """Dispatch to multi-query+MMR or standard search based on config."""
-    rag_cfg = app.state.rag_cfg
-    limit = rag_cfg.get("top_k", 5)
-    mq_enabled = rag_cfg.get("multi_query", {}).get("enabled", False)
-
-    if mq_enabled:
-        logger.info("RAG retrieve: multi-query+MMR  query=%r", query[:60])
-        return await multi_query_search(
-            query=query,
-            user_id=user_id,
-            limit=limit,
-            qdrant_client=app.state.qdrant_client,
-            rag_cfg=rag_cfg,
-            llm_fn=app.state.variant_llm_fn,
-        )
-
-    logger.info("RAG retrieve: standard search  query=%r", query[:60])
-    return await search_rag(
-        query=query,
-        user_id=user_id,
-        limit=limit,
-        qdrant_client=app.state.qdrant_client,
-        rag_cfg=rag_cfg,
-        file_types=file_types,
-    )
-
-
 # =============================================================================
 #  CHAT ENDPOINT
 # =============================================================================
@@ -373,94 +316,37 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
     history = await cache.get_context(chat_id)
     messages = [m.to_llm_dict() for m in history]
 
-    # -- 4. RAG mode + system prompt (§8.1 / §8.2) ---------------------------
-    # If the client sent rag_mode explicitly, honour it. Otherwise fall back to
-    # the server-side default from SoHoAI-config.yaml (rag.default_mode).
-    if "rag_mode" in req.model_fields_set:
-        rag_mode: RagMode = req.rag_mode
-    else:
-        rag_mode = RagMode(app.state.rag_cfg.get("default_mode", "off"))
-    if rag_mode != RagMode.off and app.state.qdrant_client is None:
-        logger.warning("RAG mode=%s requested but Qdrant unavailable; forcing off", rag_mode)
-        rag_mode = RagMode.off
-
-    tool_spec = build_tool_spec() if rag_mode != RagMode.off else None
-    system_prompt = build_system_prompt(rag_mode, tool_spec)
-    messages = _apply_system_prompt(messages, system_prompt)
-
-    # -- 5. Tool-use loop (§8.2 / §8.3) -------------------------------------
-    rag_cfg = app.state.rag_cfg
-    max_iter = rag_cfg.get("tool_use", {}).get("max_iterations", 2)
-    strip_on_final = rag_cfg.get("tool_use", {}).get("strip_on_final", True)
-
-    rag_sources: list[str] | None = None
-    rag_chunks_used: list[dict] = []
+    # -- 4. Single inference --------------------------------------------------
     assistant_content = ""
     model_used = "local/qwen3-4b-q6"
     used_internal = False
     inference_ok = False
 
     try:
-        for iteration in range(max_iter + 1):
-            # 5a. Select model and run inference
-            target_model = router.select_model(messages, req.model, req.force_cloud)
-            used_internal = (
-                target_model.startswith("local/")
-                and cache.kv_cache is not None
-                and slot_id is not None
+        target_model = router.select_model(messages, req.model, req.force_cloud)
+        used_internal = (
+            target_model.startswith("local/")
+            and cache.kv_cache is not None
+            and slot_id is not None
+        )
+
+        if used_internal:
+            prompt = apply_qwen3_template(messages)
+            result = await cache.kv_cache.inference(slot_id=slot_id, prompt=prompt, chat_id=chat_id)
+            assistant_content = result["content"].strip()
+            model_used = target_model
+        else:
+            response = await router.complete(
+                messages=messages,
+                model=req.model,
+                force_cloud=req.force_cloud,
+                stream=False,
+                metadata={"source": "sohoai_chat", "user_id": req.user_id, "chat_id": chat_id, "orchestra_session_id": None},
             )
+            assistant_content = response.choices[0].message.content
+            model_used = response.get("model", req.model or "unknown")
 
-            llm_messages = _fold_tool_messages(messages)
-
-            if used_internal:
-                prompt = apply_qwen3_template(llm_messages)
-                result = await cache.kv_cache.inference(slot_id=slot_id, prompt=prompt, chat_id=chat_id)
-                raw_text = result["content"].strip()
-                model_used = target_model
-            else:
-                response = await router.complete(
-                    messages=llm_messages,
-                    model=req.model,
-                    force_cloud=req.force_cloud,
-                    stream=False,
-                    metadata={"source": "cli_chat", "user_id": req.user_id, "chat_id": chat_id, "orchestra_session_id": None},
-                )
-                raw_text = response.choices[0].message.content
-                model_used = response.get("model", req.model or "unknown")
-
-            inference_ok = True
-
-            # 5b. Parse tool call (only when RAG is active)
-            tool_call = parse_tool_call(raw_text) if rag_mode != RagMode.off else None
-
-            if tool_call is None or iteration == max_iter:
-                # Final answer — optionally strip any stray tool-call tags
-                if strip_on_final and tool_call is not None:
-                    raw_text = re.sub(
-                        r"<tool_call>.*?</tool_call>", "", raw_text, flags=re.DOTALL
-                    ).strip()
-                assistant_content = raw_text
-                break
-
-            # 5c. Dispatch known tool
-            if tool_call["name"] != "search_documents":
-                logger.warning("Unknown tool call: %s", tool_call["name"])
-                messages.append({"role": "assistant", "content": raw_text})
-                messages.append({"role": "tool", "content": f"Unknown tool: {tool_call['name']}"})
-                continue
-
-            query = tool_call["arguments"].get("query", "").strip()
-            file_types = tool_call["arguments"].get("file_types") or None
-            if not query:
-                messages.append({"role": "assistant", "content": raw_text})
-                messages.append({"role": "tool", "content": "Empty query — please provide a search term."})
-                continue
-
-            # 5d. Retrieve and feed result back
-            chunks = await _retrieve(query, req.user_id, file_types)
-            rag_chunks_used.extend(chunks)
-            messages.append({"role": "assistant", "content": raw_text})
-            messages.append({"role": "tool", "content": format_tool_result(chunks)})
+        inference_ok = True
 
     except Exception as e:
         logger.error(f"Inference failed (chat {chat_id[:8]}): {e}")
@@ -476,19 +362,8 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
             if cache.kv_cache is not None:
                 await cache.kv_cache.erase(chat_id)
 
-    # -- 6. Build rag_sources from actual tool results (dedup, order preserved)
-    if rag_chunks_used:
-        seen: set[str] = set()
-        rag_sources = []
-        for c in rag_chunks_used:
-            path = c.get("source_path", "")
-            if path and path not in seen:
-                seen.add(path)
-                rag_sources.append(path)
-
-    # -- 7. Persist assistant message ----------------------------------------
+    # -- 5. Persist assistant message ----------------------------------------
     await cache.append(chat_id, "assistant", assistant_content)
-    # Calculate token_count from response usage when using cloud model
     token_count = 0
     if not used_internal and 'response' in locals() and hasattr(response, 'usage') and response.usage:
         token_count = (response.usage.prompt_tokens or 0) + (response.usage.completion_tokens or 0)
@@ -498,13 +373,11 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
         token_count=token_count,
     )
 
-    # -- 8. Return ------------------------------------------------------------
+    # -- 6. Return ------------------------------------------------------------
     return ChatResponse(
         chat_id=chat_id,
         model_used=model_used,
         message=Message(role=Role.assistant, content=assistant_content),
-        rag_sources=rag_sources,
-        rag_mode_used=rag_mode,
     )
 
 
@@ -1104,7 +977,6 @@ async def proxy_chat_completions(req: Request):
     body.pop("force_cloud", None)
     body.pop("chat_id", None)
     body.pop("user_id", None)
-    body.pop("rag_mode", None)
 
     router: SmartRouter = app.state.router
 

@@ -2,8 +2,8 @@
 title: "SoHoAI — Project Context & Design Reference"
 created_at: 20260407-000000
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
-updated_by: Claude Code (claude-code-kimi-k2.6)
-updated_at: 2026-05-16--08-41
+updated_by: Claude Code (Claude Sonnet 4.6)
+updated_at: 2026-05-27--14-30
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   Project instructions and design decisions for Claude Code;
@@ -111,8 +111,6 @@ SoHoAI/
 ├── chat_store.py               # ChatStore — SQLite long-term persistence
 ├── mcp_gateway.py              # MCP tool gateway (Phase 3 stub, interface defined)
 ├── pyproject.toml              # Python dependencies (uv-managed)
-├── prompts/                    # System prompt builders (§8.1)
-│   └── rag_system_prompts.py   # build_system_prompt(mode, tool_spec) → off/on/only prompts
 ├── rag_engine/                 # RAG pipeline (Phase 2 ✅ + §8 advanced retrieval ✅)
 │   ├── __init__.py             # re-exports search_rag, multi_query_search
 │   ├── schema.py               # Qdrant payload field constants + derive_owner(); FIELD_SESSION_ID + FIELD_PROJECT + FIELD_SESSION_TITLE shared by claude_chat and opencode points
@@ -122,15 +120,13 @@ SoHoAI/
 │   ├── scanner.py              # NFS + claude chat + opencode scanner → populates StateDB; scan_nfs_roots() walks configured NFS roots (filters from SoHoAI-config.yaml rag.scanner) and returns {scanned, existing_paths}; scan_claude_chats() walks SoHoAI-config.yaml claude_chats.roots for .jsonl sessions and returns {scanned, existing_paths}; scan_opencode_sessions() walks GET /api/session (v2, cursor-paginated) — returns every opencode session globally regardless of cwd-at-launch; owner is config constant (opencode.owner); returns {scanned, existing_paths: set|None} where None signals API unreachable (skip in find_deleted() to preserve existing opencode Qdrant points); callers merge existing_paths sets and call state_db.find_deleted() once before Qdrant cleanup + purge_deleted(); followlinks=True with visited_real_dirs + visited_real_files global dedup sets; exclude_dir_names uses trailing-slash path-suffix matching
 │   ├── ingest.py               # docling parse + parent-child chunking + Qdrant upsert; _parse_claude_chat() extracts user/assistant text turns from .jsonl session files returning {session_id, project, session_title}; _parse_opencode_session() fetches session metadata + messages via opencode HTTP API (rag.opencode_api_url) using synthetic opencode://{session_id} keys, returns {session_id, session_title} only (no project — opencode session.directory is cwd-at-launch metadata, not topic classification); the cwd is preserved inside the searchable header body as "Launched from:"; after parsing, file_name is overridden with session_title so renderers get a friendly label without per-type special-casing
 │   ├── search.py               # query → embed → Qdrant query_points → parent_text + provenance
-│   ├── multi_query.py          # §8.3: expand_query() + parallel search + MMR reranking (permanently disabled — no-go 2026-04-22)
-│   └── tool_use.py             # §8.2: build_tool_spec(), parse_tool_call(), format_tool_result()
+│   └── multi_query.py          # §8.3: expand_query() + parallel search + MMR reranking (permanently disabled — no-go 2026-04-22)
 ├── utils/
-│   ├── cli_chat.py             # Terminal chat client; RAG off by default (opt-in); --user OWNER sends user_id; /rag on|off|only; /rag search <query> inspects retrieval; /user <id> changes owner mid-session
 │   ├── rag_sync_nfs.py         # CLI: scan NFS roots + claude chat dirs + opencode sessions → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files; calls scan_nfs_roots() + scan_claude_chats() + scan_opencode_sessions(), merges existing_paths (skipping opencode source if its API was unreachable), calls find_deleted() once
 │   ├── rag_ingest_daemon.py    # CLI: process pending files (parse → chunk → embed → upsert)
 │   ├── rag_status.py           # CLI: queue counts + Qdrant point stats; --ignored for detail; --watch LOG_FILE for live ETA monitor; --list-pending [N] to print pending paths (pipeable)
 │   ├── rag_search_cli.py       # CLI: retrieval-only — embed query + Qdrant search; prints top-k hits + parent_text preview
-│   ├── rag_smoke_test.py       # CLI: end-to-end smoke test — retrieval + /v1/chat/completions with rag_mode=on; --expect SUBSTR assertion; pass/fail exit code
+│   ├── rag_smoke_test.py       # CLI: smoke test — Phase 1: GET /v1/rag/search retrieval; Phase 2: POST /v1/chat/completions plain chat; --expect SUBSTR assertion; pass/fail exit code
 │   ├── rag_mmr_bench.py        # CLI: MMR benchmark harness (evaluated 2026-04-22; no-go verdict — kept for reference)
 │   ├── rag_rerank_bench.py     # CLI: dense vs reranked vs hybrid comparison bench; --mode dense|rerank|both|hybrid|hybrid+rerank
 │   ├── rag_bench_queries.txt   # 14 verified queries used by bench harnesses
@@ -185,7 +181,7 @@ SoHoAI/
 | POST | `/v1/rag/ingest/stop` | Stop ingestion worker gracefully |
 | GET | `/v1/rag/ingest/status` | Queue metrics + Qdrant point count |
 
-Responses use a custom `ChatResponse` model (`chat_id`, `model_used`, `message`, `rag_sources`, `rag_mode_used`).
+Responses use a custom `ChatResponse` model (`chat_id`, `model_used`, `message`).
 **Not** OpenAI-compatible format — the CLI reads `data["message"]["content"]`.
 OpenAI-compatible response format is a Phase 3 requirement for Open WebUI integration.
 
@@ -264,10 +260,6 @@ bash NFS-files--MCP-server/nfs_files_mcp_server.sh
 #   Claude Code (ANTHROPIC_BASE_URL): http://192.168.1.93:8000
 #   Claude Code (sub-agent frontmatter): api_base_url http://192.168.1.93:8000/proxy
 
-# CLI chat — RAG off by default (opt-in); --user florian enables ownership filter (omit for dev mode)
-python utils/cli_chat.py --server http://192.168.1.93:8000 --user florian
-#   in-session: /rag on | /rag only | /rag status | /rag search <query> | /user <id>
-
 # RAG ingestion — automated service (live since 2026-05-05; see RAG-strategy.md §10)
 # Fires at 01:00, 07:00, 13:00, 19:00 CEST via systemd timer; log: /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
 systemctl status rag-ingest.timer              # check timer status and next trigger
@@ -285,7 +277,7 @@ python utils/rag_status.py --list-pending              # print every pending fil
 
 # RAG testing
 python utils/rag_search_cli.py --query "certifications" --user florian        # retrieval only; add --no-rerank to skip cross-encoder reranking
-python utils/rag_smoke_test.py --query "AWS certifications" --user florian --expect "AWS-Certification"  # end-to-end retrieval + chat; pass/fail exit
+python utils/rag_smoke_test.py --query "AWS certifications" --user florian --expect "AWS-Certification"  # Phase 1: retrieval + Phase 2: plain chat; pass/fail exit
 python utils/rag_rerank_bench.py --user florian                               # dense-only vs reranked top-5 comparison
 
 # RAG sparse migration — one-time, required to enable hybrid search (see RAG-strategy.md §14)
@@ -315,10 +307,9 @@ python utils/sync_to_notebook.py
 
 After modifying any orchestrator code:
 1. The FastAPI app reloads automatically if run with `--reload`
-2. Test via CLI: `python utils/cli_chat.py --user florian`
-3. Test via curl: `curl -X POST http://192.168.1.93:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"hello"}],"rag_mode":"on"}'`
-4. Check health: `curl http://192.168.1.93:8000/health`
-5. RAG regression: `python utils/rag_smoke_test.py --query "..." --user florian --expect "<known-source-substring>"` (non-zero exit on failure)
+2. Test via curl: `curl -X POST http://192.168.1.93:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"hello"}]}'`
+3. Check health: `curl http://192.168.1.93:8000/health`
+4. RAG regression: `python utils/rag_smoke_test.py --query "..." --user florian --expect "<known-source-substring>"` (non-zero exit on failure)
 
 ### Performance benchmarks
 

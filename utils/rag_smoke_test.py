@@ -1,236 +1,142 @@
-#!/usr/bin/env python3
 """
-Smoke-test the RAG path end-to-end.
+rag_smoke_test.py — end-to-end RAG smoke test.
 
-Exercises both layers with the same query and compares them:
+Phase 1 — Retrieval: GET /v1/rag/search?q=...
+Phase 2 — Plain chat: POST /v1/chat/completions (no rag_mode).
 
-  Phase 1 — retrieval       direct search_rag() call  → what Qdrant returns
-  Phase 2 — chat completion POST /v1/chat/completions → what the orchestrator
-                                                        injects + the LLM sees
-
-If rag_sources from the chat response aren't a subset of the retrieval hits,
-something broke between search and prompt injection (main.py:_build_rag_prompt).
-
-Usage (run from project root):
-
-    # Basic: retrieval + chat, Florian's corpus
-    python utils/rag_smoke_test.py --query "what AWS certifications do I have" --user florian
-
-    # Assert a known source shows up (exit 1 if not)
-    python utils/rag_smoke_test.py \\
-        --query "cisco DCNIDS certificate" --user florian \\
-        --expect "cisco-DCNIDS"
-
-    # Retrieval-only (skip the LLM call — faster)
-    python utils/rag_smoke_test.py --query "..." --user florian --skip-chat
-
-    # No ownership filter (pre-auth dev mode — searches all docs)
-    python utils/rag_smoke_test.py --query "..." --no-filter
+Exit 0 on pass, non-zero on failure.
 """
-
-from __future__ import annotations
 
 import argparse
-import asyncio
+import json
 import sys
-import uuid
-from pathlib import Path
+import urllib.parse
+import urllib.request
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-import httpx  # noqa: E402
-import yaml  # noqa: E402
-
-from rag_engine.collection import DOCUMENTS_COLLECTION, get_client  # noqa: E402
-from rag_engine.search import search_rag  # noqa: E402
+DEFAULT_SERVER = "http://192.168.1.93:8000"
+DEFAULT_TOP_K = 5
+DEFAULT_TIMEOUT = 30
 
 
-# -- helpers ------------------------------------------------------------------
-
-def _load_config() -> dict:
-    with open(Path(__file__).resolve().parent.parent / "SoHoAI-config.yaml") as f:
-        return yaml.safe_load(f)
+def _get(url: str, timeout: int) -> dict:
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return json.loads(r.read())
 
 
-def _section(title: str) -> None:
-    print(f"\n── {title} " + "─" * (78 - len(title)))
+def _post(url: str, payload: dict, timeout: int) -> dict:
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
 
 
-def _qdrant_stats(qdrant_url: str) -> tuple[bool, int]:
+def phase1_retrieval(args) -> bool:
+    """GET /v1/rag/search and optionally assert --expect substring."""
+    params: dict = {"q": args.query, "top_k": args.top_k}
+    if args.user and not args.no_filter:
+        params["user"] = args.user
+    if args.file_type:
+        # file_types is a repeated query param
+        qs = urllib.parse.urlencode(params)
+        for ft in args.file_type:
+            qs += f"&file_types={urllib.parse.quote(ft)}"
+        url = f"{args.server}/v1/rag/search?{qs}"
+    else:
+        url = f"{args.server}/v1/rag/search?{urllib.parse.urlencode(params)}"
+
+    print(f"\n[Phase 1] GET {url}")
     try:
-        r = httpx.get(f"{qdrant_url}/collections/{DOCUMENTS_COLLECTION}", timeout=5)
-        r.raise_for_status()
-        return True, r.json()["result"]["points_count"]
+        resp = _get(url, args.timeout)
     except Exception as e:
-        print(f"  Qdrant check failed: {e}")
-        return False, 0
+        print(f"  FAIL: HTTP error: {e}")
+        return False
+
+    results = resp.get("results", [])
+    print(f"  {len(results)} result(s) returned")
+    for i, r in enumerate(results[:5], 1):
+        print(f"  [{i}] score={r.get('score', 0):.3f}  {r.get('source_path', '')}")
+        preview = r.get("content", "")[:120].replace("\n", " ")
+        print(f"       {preview}")
+
+    if args.expect:
+        haystack = json.dumps(resp)
+        if args.expect not in haystack:
+            print(f"  FAIL: expected substring {args.expect!r} not found in results")
+            return False
+        print(f"  PASS: found {args.expect!r} in results")
+
+    return True
 
 
-# -- phases -------------------------------------------------------------------
-
-async def retrieval_phase(query: str, user_id: str | None, top_k: int, rag_cfg: dict, file_types: list[str] | None = None) -> list[dict]:
-    _section("Phase 1 — direct retrieval (search_rag)")
-    qdrant_client = get_client(rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"))
-    results = await search_rag(
-        query=query,
-        user_id=user_id,
-        limit=top_k,
-        qdrant_client=qdrant_client,
-        rag_cfg=rag_cfg,
-        file_types=file_types,
-    )
-    if not results:
-        print("  (no results)")
-        return []
-
-    print(f"  {len(results)} hit(s) for {query!r}  user={user_id!r}\n")
-    print(f"  {'#':<3} {'score':>6}  {'file':<40}  source")
-    for i, r in enumerate(results, 1):
-        print(f"  {i:<3} {r['score']:>6.4f}  {r['file_name'][:40]:<40}  {r['source_path']}")
-    return results
-
-
-def chat_phase(server: str, query: str, user_id: str | None, timeout: float) -> dict:
-    _section("Phase 2 — /v1/chat/completions with rag_mode=on")
-    payload = {
-        # Fresh chat_id so we don't pick up unrelated Redis history.
-        "chat_id": str(uuid.uuid4()),
-        "messages": [{"role": "user", "content": query}],
-        "rag_mode": "on",
-        "stream": False,
+def phase2_chat(args) -> bool:
+    """POST /v1/chat/completions (no rag_mode) and optionally assert --expect."""
+    url = f"{args.server}/v1/chat/completions"
+    payload: dict = {
+        "messages": [{"role": "user", "content": args.query}],
     }
-    if user_id:
-        payload["user_id"] = user_id
+    if args.user and not args.no_filter:
+        payload["user_id"] = args.user
 
+    print(f"\n[Phase 2] POST {url}")
     try:
-        r = httpx.post(f"{server}/v1/chat/completions", json=payload, timeout=timeout)
-        r.raise_for_status()
-    except httpx.HTTPError as e:
-        print(f"  HTTP error: {e}")
-        return {}
+        resp = _post(url, payload, args.timeout)
+    except Exception as e:
+        print(f"  FAIL: HTTP error: {e}")
+        return False
 
-    data = r.json()
-    model_used = data.get("model_used", "?")
-    content = data.get("message", {}).get("content", "")
-    sources = data.get("rag_sources") or []
+    content = resp.get("message", {}).get("content", "")
+    model = resp.get("model_used", "unknown")
+    print(f"  model_used: {model}")
+    print(f"  reply: {content[:200]}")
 
-    print(f"  model_used : {model_used}")
-    print(f"  rag_sources: {len(sources)} source(s)")
-    for s in sources:
-        print(f"    - {s}")
-    print(f"\n  assistant reply ({len(content)} chars):")
-    preview = content[:600].rstrip()
-    print("    " + preview.replace("\n", "\n    "))
-    if len(content) > 600:
-        print(f"    ... [{len(content)} chars total]")
-    return data
+    # Confirm no rag_mode_used in response
+    if "rag_mode_used" in resp:
+        print(f"  FAIL: rag_mode_used field present in response (should be absent)")
+        return False
 
+    if args.expect:
+        if args.expect not in content:
+            print(f"  FAIL: expected substring {args.expect!r} not found in reply")
+            return False
+        print(f"  PASS: found {args.expect!r} in reply")
 
-# -- verdict ------------------------------------------------------------------
+    return True
 
-def verdict(
-    retrieval: list[dict],
-    chat_data: dict,
-    expect: str | None,
-    skipped_chat: bool,
-    skipped_retrieval: bool,
-) -> int:
-    _section("Verdict")
-    ok = True
-
-    if not skipped_retrieval:
-        if not retrieval:
-            print("  ✗ retrieval returned 0 hits")
-            ok = False
-        else:
-            print(f"  ✓ retrieval: {len(retrieval)} hit(s)")
-
-    if not skipped_chat:
-        sources = chat_data.get("rag_sources") or []
-        if not chat_data:
-            print("  ✗ chat endpoint failed")
-            ok = False
-        elif not sources:
-            print("  ✗ chat returned no rag_sources (retrieval or injection failed)")
-            ok = False
-        else:
-            print(f"  ✓ chat returned {len(sources)} rag_source(s)")
-
-        if not skipped_retrieval and sources:
-            retrieval_paths = {r["source_path"] for r in retrieval}
-            overlap = [s for s in sources if s in retrieval_paths]
-            if not overlap:
-                print("  ✗ rag_sources don't match retrieval — injection path is wrong")
-                ok = False
-            else:
-                print(f"  ✓ {len(overlap)}/{len(sources)} rag_sources match retrieval")
-
-    if expect:
-        sources = chat_data.get("rag_sources") or []
-        retrieval_paths = [r["source_path"] for r in retrieval]
-        haystack = sources if not skipped_chat else retrieval_paths
-        if any(expect in path for path in haystack):
-            print(f"  ✓ --expect {expect!r} found")
-        else:
-            print(f"  ✗ --expect {expect!r} NOT found in {'rag_sources' if not skipped_chat else 'retrieval'}")
-            ok = False
-
-    print(f"\n  {'PASS' if ok else 'FAIL'}")
-    return 0 if ok else 1
-
-
-# -- main ---------------------------------------------------------------------
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="RAG end-to-end smoke test")
-    p.add_argument("--query", required=True)
-    p.add_argument("--user", metavar="OWNER", default=None,
-                   help="Owner filter, e.g. florian (required unless --no-filter)")
-    p.add_argument("--no-filter", action="store_true",
-                   help="Skip ownership filter (dev mode)")
-    p.add_argument("--top-k", type=int, default=5)
-    p.add_argument("--server", default=None,
-                   help="Orchestrator URL (default: http://<server1_ip>:8000 from SoHoAI-config.yaml)")
-    p.add_argument("--timeout", type=float, default=180.0,
-                   help="Chat endpoint timeout in seconds (default 180)")
-    p.add_argument("--expect", metavar="SUBSTR", default=None,
-                   help="Assert this substring appears in a returned source path (e.g., 'opencode://' for any opencode session)")
-    p.add_argument("--file-type", metavar="TYPE", action="append", dest="file_types",
-                   help="Filter results by file type (e.g. 'pdf', 'md', 'opencode'); can be repeated")
-    p.add_argument("--skip-retrieval", action="store_true")
-    p.add_argument("--skip-chat", action="store_true")
-    args = p.parse_args()
+    parser = argparse.ArgumentParser(description="SoHoAI RAG smoke test")
+    parser.add_argument("--query", required=True, help="Search query / chat message")
+    parser.add_argument("--user", default=None, help="Owner filter (e.g. florian)")
+    parser.add_argument("--no-filter", action="store_true", help="Skip user ownership filter")
+    parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K, help="Max retrieval results")
+    parser.add_argument("--file-type", action="append", metavar="TYPE", help="Filter by file type (repeatable)")
+    parser.add_argument("--server", default=DEFAULT_SERVER, help="SoHoAI server base URL")
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="HTTP timeout seconds")
+    parser.add_argument("--expect", default=None, help="Assert this substring appears in results/reply")
+    parser.add_argument("--skip-retrieval", action="store_true", help="Skip Phase 1 (retrieval)")
+    parser.add_argument("--skip-chat", action="store_true", help="Skip Phase 2 (chat)")
+    args = parser.parse_args()
 
-    if not args.no_filter and not args.user:
-        p.error("Provide --user OWNER or --no-filter")
-    if args.skip_retrieval and args.skip_chat:
-        p.error("Cannot skip both phases")
-
-    user_id = None if args.no_filter else args.user
-    config = _load_config()
-    rag_cfg = config.get("rag", {})
-    server = args.server or f"http://{config.get('server1_ip', '192.168.1.93')}:8000"
-
-    # -- pre-flight --------------------------------------------------------
-    _section("Pre-flight")
-    qdrant_url = rag_cfg.get("qdrant_url", "http://192.168.1.93:6333")
-    ok, points = _qdrant_stats(qdrant_url)
-    print(f"  qdrant {qdrant_url}: {'up' if ok else 'DOWN'}, {points} point(s) in '{DOCUMENTS_COLLECTION}'")
-    if not ok or points == 0:
-        print("  (smoke test cannot proceed)")
-        return 1
-
-    # -- phases ------------------------------------------------------------
-    retrieval: list[dict] = []
-    chat_data: dict = {}
+    passed = True
 
     if not args.skip_retrieval:
-        retrieval = asyncio.run(retrieval_phase(args.query, user_id, args.top_k, rag_cfg, args.file_types))
+        ok = phase1_retrieval(args)
+        passed = passed and ok
+    else:
+        print("[Phase 1] skipped")
 
     if not args.skip_chat:
-        chat_data = chat_phase(server, args.query, user_id, args.timeout)
+        ok = phase2_chat(args)
+        passed = passed and ok
+    else:
+        print("[Phase 2] skipped")
 
-    return verdict(retrieval, chat_data, args.expect, args.skip_chat, args.skip_retrieval)
+    if passed:
+        print("\nSMOKE TEST PASSED")
+        return 0
+    else:
+        print("\nSMOKE TEST FAILED")
+        return 1
 
 
 if __name__ == "__main__":

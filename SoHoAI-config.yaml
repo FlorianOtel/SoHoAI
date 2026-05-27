@@ -246,17 +246,11 @@ rag:
   qdrant_url: "http://192.168.1.93:6333"         # Qdrant on Server 1 (local NVMe)
   # Active Qdrant storage: /var/lib/qdrant/storage (local NVMe, Server 1)
   # Snapshots (DR):        /mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/
-  default_mode: "off"                            # off | on | only — server default for rag_mode (opt-in)
 
   # -- Ingestion lock (shared across servers via NFS) ---------------------------
   # NFSv4.1 + local_lock=none forwards flock() to the NAS lock manager, making
   # this cross-machine. Both rag_ingest_daemon.py and rag-ingest-run.sh read this.
   ingest_lock: "/mnt/nfs/__Backups/SoHoAI--databases/rag-ingest.lock"
-
-  # -- Tool-use loop (§8.2) ---------------------------------------------------
-  tool_use:
-    max_iterations: 2       # hard cap on tool-call round trips per user turn
-    strip_on_final: true    # remove any stray <tool_call> tags from final answer
 
   # -- Multi-query retrieval + MMR (§8.3) -------------------------------------
   # Evaluated 2026-04-22: no-go verdict. Standard single-query retrieval is

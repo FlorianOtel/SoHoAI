@@ -18,11 +18,6 @@ class Role(str, Enum):
     assistant = "assistant"
     tool = "tool"
 
-class RagMode(str, Enum):
-    off = "off"
-    on = "on"
-    only = "only"
-
 class Message(BaseModel):
     role: Role
     content: str
@@ -41,7 +36,6 @@ class ChatRequest(BaseModel):
     stream: bool = False
     # SoHoAI extensions
     user_id: Optional[str] = None  # Google OAuth owner (e.g. "florian"); set by auth middleware
-    rag_mode: RagMode = RagMode.off  # off | on | only — server default overrides when field omitted
     force_cloud: bool = False
 
 
@@ -49,8 +43,6 @@ class ChatResponse(BaseModel):
     chat_id: str
     model_used: str
     message: Message
-    rag_sources: Optional[list[str]] = None
-    rag_mode_used: RagMode | None = None # Track which mode was used
 
 
 # -- Chat Management -----------------------------------------------------------

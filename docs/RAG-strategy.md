@@ -38,48 +38,16 @@ context: >
 
 ---
 
-## RAG client modes — server-managed vs. external LLM
+## RAG client mode — external LLM client retrieval
 
-Two distinct integration patterns exist for RAG in SoHoAI, serving different callers.
+SoHoAI exposes a single retrieval endpoint: `GET /v1/rag/search`. External clients
+(Claude Code, Cline, custom scripts) call this endpoint directly and manage their
+own RAG loops. The server has no visibility into how the retrieved text is used.
 
-### Server-managed RAG (`POST /v1/chat/completions` with `rag_mode`)
-
-Designed for clients like `cli_chat.py` and Open WebUI where SoHoAI's orchestrator
-manages the full conversation loop. The server's two-iteration tool-use loop
-(`rag_engine/tool_use.py`) injects a `<tool_call>search_documents</tool_call>` sentinel
-into the system prompt; the LLM decides at inference time whether retrieval is needed.
-
-The bge-m3 cosine score distribution for this corpus shows a narrow margin between
-signal (0.51–0.55) and noise (0.48–0.51). This margin justified the LLM-decides approach
-over always-inject: unconditional top-k injection floods the context with marginally
-relevant results on factual queries where no retrieval is needed at all. With tool-use,
-the LLM skips the search step entirely when the question can be answered from conversation
-history, and fires a targeted query only when genuinely needed. `rag_mode` values:
-- `off` — no retrieval, no tool spec in system prompt (default)
-- `on` — tool spec injected; LLM decides whether to call `search_documents`
-- `only` — tool spec injected; system prompt instructs LLM to answer only from retrieved docs
-
-### External LLM client RAG (`GET /v1/rag/search`)
-
-For Claude Code and similar agents that manage their own context and reasoning loop.
-Claude Code IS the LLM deciding when to search; running SoHoAI's server-side tool-use
-loop would be redundant — it would fire a second LLM inference (Qwen3.5 or Sonnet 4.6)
-purely to emit a `<tool_call>` sentinel and then execute the same `search_rag()` call the
-client could have made directly.
-
-`GET /v1/rag/search` returns raw document hits as JSON with no LLM invocation on the
-server side. Query parameters: `q` (required), `user` (owner filter), `top_k` (1–20,
-default 5), `file_types` (list, e.g. `["pdf","md","opencode"]`). Each result includes `content`
-(parent chunk text), `source_path`, `score`, `file_name`, `file_type`, and `session_title`
-(for claude_chat or opencode results). For chat sessions, `file_name` is overridden at
-ingest time with the human-readable `session_title` so renderers can use `file_name`
-uniformly — the raw UUID-named `.jsonl` or `ses_<id>` identifier is not surfaced.
-
-Invoked interactively via the `/user:rag` slash command (`~/.claude/commands/rag.md`):
-- `/user:rag search <query>` — one-shot retrieval, displays ranked hits
-- `/user:rag on` — automatic pre-search before each Claude Code answer
-- `/user:rag only` — answer exclusively from retrieved documents
-- `/user:rag off` — disable automatic search
+**Server-managed RAG was removed on 2026-05-27.** The `rag_mode` parameter, the
+three-mode system (off/on/only), the server-side tool-use loop, and `cli_chat.py`
+were deleted as part of Session 2 cleanup. Files removed: `rag_engine/tool_use.py`,
+`prompts/rag_system_prompts.py`, `rag_engine/main.py`, `utils/cli_chat.py`.
 
 ---
 
@@ -1301,22 +1269,27 @@ Search without ownership filter (returns all documents):
 python utils/rag_search_cli.py --query "family trip" --no-filter
 ```
 
-### 5.7 Enable RAG in the chat client
+### 5.7 Test RAG retrieval
 
-Once satisfied with search quality, enable RAG in the CLI chat:
+Use `rag_search_cli.py` to verify retrieval quality before running full ingestion:
 
 ```bash
-python utils/cli_chat.py --server http://192.168.1.93:8000 --user florian
-# In the chat session:
-/rag on            # advertise the search_documents tool; LLM decides when to call it
-/rag only          # force grounded mode — answers must come from retrieved chunks
+# Direct retrieval test (no LLM)
+python utils/rag_search_cli.py --query "AWS certifications" --user florian
+
+# End-to-end smoke test (retrieval + plain chat, no rag_mode)
+python utils/rag_smoke_test.py --query "AWS certifications" --user florian \
+  --expect "AWS" --skip-chat
 ```
 
-Or pass `"rag_mode": "on"` (or `"only"`) in the `ChatRequest` JSON. The orchestrator
-injects a tool spec into the system prompt; when the LLM emits a `<tool_call>` block,
-the orchestrator invokes `search_rag()` (or `multi_query_search()` if `rag.multi_query.enabled: true`),
-feeds the retrieved chunks back as a tool message, and the LLM composes the final answer.
-`rag_sources` in the response reflects chunks the LLM actually retrieved.
+Alternatively call the endpoint directly:
+
+```bash
+curl "http://192.168.1.93:8000/v1/rag/search?q=AWS+certifications&user=florian"
+```
+
+Note: server-managed RAG (`rag_mode`) was removed on 2026-05-27. Clients manage
+their own retrieval loops.
 
 ### 5.8 API control (via the orchestrator)
 
@@ -1575,427 +1548,19 @@ All service addresses in the codebase now use explicit IPs:
 
 `SoHoAI-config.yaml` is the single source of truth for all non-Redis URLs. Python fallback defaults in source files match `SoHoAI-config.yaml` exactly and are only reached if the config file fails to load.
 
-### 8.1 Three RAG modes: `off` / `on` / `only` ✅ implemented 2026-04-21
+### 8.1 Server-managed RAG modes ⛔ removed 2026-05-27
 
-#### Purpose
+The `rag_mode` parameter, three-mode system (off/on/only), system-prompt injection,
+and server-side tool-use loop were removed as part of Session 2 cleanup. Clients
+retrieve documents directly via `GET /v1/rag/search` and manage their own RAG loops.
 
-Give the caller explicit control over how documents participate in generation.
+Files removed: `rag_engine/tool_use.py`, `prompts/rag_system_prompts.py`,
+`utils/cli_chat.py`, `rag_engine/main.py` (dead code).
 
-| Mode | Retrieval behaviour | LLM instruction |
-|------|--------------------|-----------------|
-| `off` | Tool is **not** advertised in the system prompt. No retrieval happens. | "You are a helpful assistant." (no mention of documents.) |
-| `on`  | Tool **is** advertised. LLM calls it when it judges the corpus likely to help. | "You may call `search_documents` when the user's personal corpus likely contains the answer. You may also answer from general knowledge." |
-| `only` | Tool **is** advertised, **and** the LLM is required to call it before answering; answers must be grounded strictly in tool results. | "Your ONLY source of knowledge is `search_documents`. Call it for every factual question. If the results do not answer the question, reply exactly: 'I don't have information about that in the provided context.' Do not use prior knowledge." |
+### 8.2 Tool-use RAG loop ⛔ removed 2026-05-27
 
-Note: §8.1 defines the *modes*; the *mechanism* by which the tool is advertised / invoked
-is §8.2. The two sections are meant to be implemented in the same change set.
-
-#### Schema changes
-
-File: `schemas.py`.
-
-The legacy boolean toggle has been **removed entirely**. All clients send `rag_mode`
-explicitly; server falls back to `rag.default_mode` from `SoHoAI-config.yaml` when omitted.
-
-```python
-from enum import Enum
-
-class RagMode(str, Enum):
-    off  = "off"
-    on   = "on"
-    only = "only"
-
-class ChatRequest(BaseModel):
-    # ... existing fields ...
-    rag_mode: RagMode = RagMode.on   # default server-side; see default_mode below
-```
-
-`SearchRequest` is unchanged (retrieval-only endpoint has no notion of `only`).
-
-#### Config changes
-
-File: `SoHoAI-config.yaml`, under `rag:`:
-
-```yaml
-rag:
-  default_mode: "on"        # off | on | only — server default when caller omits rag_mode
-  # ... existing keys ...
-```
-
-`main.py:_server_managed_completion` resolves the effective mode as follows:
-
-```python
-if "rag_mode" in req.model_fields_set:
-    rag_mode = req.rag_mode                               # client was explicit
-else:
-    rag_mode = RagMode(app.state.rag_cfg.get("default_mode", "on"))
-```
-
-Using `model_fields_set` (Pydantic) distinguishes "client omitted the field" from
-"client sent `rag_mode: on` explicitly", so the config `default_mode` only kicks in
-when the caller truly didn't specify. The Pydantic field default (`RagMode.on`) is a
-belt-and-braces backstop in case a code path bypasses the config read.
-
-#### Prompt module
-
-New file: `prompts/rag_system_prompts.py`. Single source of truth for all three mode
-prompts AND the tool-use scaffolding from §8.2. Centralises the strings so changes to
-one don't drift away from the others.
-
-```python
-# prompts/rag_system_prompts.py
-"""System prompts for the three RAG modes. Composed with the tool-use section (§8.2)
-at call time by build_system_prompt(mode, tool_spec)."""
-
-_BASE = "You are SoHoAI's assistant. Be concise, accurate, and helpful."
-
-_MODE_OFF = f"""{_BASE}
-
-Answer from general knowledge."""
-
-_MODE_ON = f"""{_BASE}
-
-You have access to the user's personal document corpus via a search tool
-(see the TOOLS section below). Call the tool when the question is likely
-about the user's documents, projects, certifications, notes, or personal
-information. For general questions (greetings, model identity, common
-knowledge, code explanations unrelated to the user's corpus), answer
-directly without calling the tool."""
-
-_MODE_ONLY = f"""{_BASE}
-
-You have access to the user's personal document corpus via a search tool
-(see the TOOLS section below). For every factual question, you MUST call
-the tool before answering, and your answer MUST be grounded strictly in
-the tool results.
-
-If the tool returns no relevant results, or the results do not answer the
-question, you MUST reply EXACTLY with the following sentence and nothing
-else:
-
-    I don't have information about that in the provided context.
-
-Do NOT use prior knowledge. Do NOT speculate. Do NOT fill gaps with general
-information. This rule applies even if you are confident you know the answer
-from training data."""
-
-
-def build_system_prompt(mode: str, tool_spec: str | None) -> str:
-    """Compose the final system prompt.
-
-    Args:
-        mode:      "off" | "on" | "only"
-        tool_spec: the TOOLS section (output of tool_use.build_tool_spec())
-                   or None if mode == "off"
-    """
-    base = {"off": _MODE_OFF, "on": _MODE_ON, "only": _MODE_ONLY}[mode]
-    if mode == "off" or tool_spec is None:
-        return base
-    return f"{base}\n\n{tool_spec}"
-```
-
-#### Pipeline change
-
-File: `main.py`, function `_server_managed_completion`.
-
-The previous top-k auto-inject block is replaced with the tool-use loop from §8.2.
-Before entering that loop, resolve the effective mode:
-
-```python
-mode: RagMode = req.rag_mode or app.state.rag_cfg.get("default_mode", "on")
-if mode != "off" and app.state.qdrant_client is None:
-    logger.warning("RAG requested (mode=%s) but Qdrant unavailable; forcing off", mode)
-    mode = "off"
-```
-
-`rag_sources` is populated from tool results actually returned during this turn
-(see §8.2); `rag_mode_used` is added to `ChatResponse` for debuggability.
-
-#### ChatResponse addition
-
-File: `schemas.py`:
-
-```python
-class ChatResponse(BaseModel):
-    # ... existing fields ...
-    rag_mode_used: RagMode | None = None
-```
-
-#### CLI changes
-
-File: `utils/cli_chat.py`.
-
-- Default: `self.rag_mode: str = "off"` (callers opt in with `/rag on` or `/rag only`).
-- `send_message` payload sends `"rag_mode": self.rag_mode`.
-- `/rag` handler subcommands: `off`, `on`, `only`, `status`, `search <query>`
-  (pass-through for `status` and `search` is unchanged).
-- Preflight banner line includes `mode=<mode>`.
-- `rag_sources` display: prefix the block with the mode used by the server, e.g.
-  `Sources (mode=only):`.
-
-#### Verification (Acceptance tests)
-
-1. `curl … -d '{"rag_mode":"off", …}'` — no RAG tool advertised; `rag_sources == null`.
-2. `curl … -d '{"rag_mode":"on", "messages":[{"role":"user","content":"what model are you?"}]}'`
-   — assistant answers directly without calling the tool; `rag_sources == null`.
-3. `curl … -d '{"rag_mode":"on", "messages":[{"role":"user","content":"what AWS certifications do I have"}]}'`
-   — tool is called; `rag_sources` is populated with paths that include one
-   containing `AWS-Certification`.
-4. `curl … -d '{"rag_mode":"only", "messages":[{"role":"user","content":"what is the capital of France?"}]}'`
-   — tool is called (search returns low-relevance hits), assistant replies with the
-   exact decline sentence and nothing else.
-5. Config default: `curl … -d '{"messages":[…]}'` (no `rag_mode`) uses
-   `rag.default_mode` from `SoHoAI-config.yaml`; overriding `default_mode: "only"` and omitting
-   `rag_mode` in the request gives `only`-mode behaviour.
-
-### 8.2 Tool-use via system prompt (provider-independent) ✅ implemented 2026-04-21
-
-#### Purpose
-
-Replace unconditional top-k injection with an LLM-driven decision to retrieve. Works
-identically for `internal` (Qwen3.5-4B via llama-server `/completion`) and `external`
-(Claude Sonnet via LiteLLM/Anthropic). No dependency on native function-calling APIs.
-
-#### Protocol
-
-The assistant is instructed to emit one or zero tool calls per turn, in a fenced JSON
-block terminated by a sentinel:
-
-```
-<tool_call>
-{"name": "search_documents", "arguments": {"query": "…"}}
-</tool_call>
-```
-
-Rules encoded in the prompt:
-- If the assistant emits a tool call, it MUST emit ONLY the tool call block (no prose
-  before or after) and stop.
-- If the assistant has the information to answer, it emits prose only (no `<tool_call>`).
-- One tool call per turn max.
-
-The orchestrator enforces a hard cap of `rag.tool_use.max_iterations` (default 2,
-config key) tool-call round trips per user turn. On cap exceeded, the last tool result
-is injected as context and the assistant is prompted for a final answer with tools
-disabled.
-
-#### Tool specification block
-
-Rendered into the system prompt when `mode in {"on", "only"}`. One tool only in this
-phase (`search_documents`). Keep the block schema ready for additional tools later
-(Phase 3 MCP tools).
-
-```
-## TOOLS
-
-You have access to the following tools. Call a tool by writing a single
-<tool_call>…</tool_call> block as your entire reply — no prose before or
-after, no additional text.
-
-### search_documents(query: str) -> list[Document]
-
-Searches the user's personal corpus and returns up to N relevant chunks.
-Each result has:
-  - source_path: full NFS path (cite this in your answer)
-  - score:       relevance score (0–1, higher = more relevant)
-  - content:     chunk text (use this to answer)
-
-Call this tool when you need information from the user's documents.
-DO NOT call it for greetings, identity questions, or general knowledge.
-
-Example invocation:
-<tool_call>
-{"name": "search_documents", "arguments": {"query": "AWS certifications"}}
-</tool_call>
-```
-
-#### New module: `rag_engine/tool_use.py`
-
-```python
-"""System-prompt-driven tool-use for RAG. Provider-agnostic.
-
-Exported functions:
-  build_tool_spec()          → str   # TOOLS section for the system prompt
-  parse_tool_call(text)      → dict | None   # extract first <tool_call> block
-  format_tool_result(chunks) → str   # render chunks as a tool-role message
-"""
-import json
-import re
-from typing import Any
-
-_TOOL_CALL_RE = re.compile(
-    r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
-    re.DOTALL,
-)
-
-def build_tool_spec() -> str:
-    """Return the TOOLS section string. Static for now (one tool)."""
-    # ... literal string from the protocol section above ...
-
-def parse_tool_call(assistant_text: str) -> dict[str, Any] | None:
-    """Find first <tool_call>…</tool_call> block. Return {"name":..., "arguments":...}
-    or None if no valid block found. Malformed JSON → None + log warning."""
-    m = _TOOL_CALL_RE.search(assistant_text)
-    if not m:
-        return None
-    try:
-        call = json.loads(m.group(1))
-    except json.JSONDecodeError as e:
-        logger.warning("tool_call JSON decode failed: %s (text=%r)", e, m.group(1))
-        return None
-    if not isinstance(call, dict) or "name" not in call:
-        return None
-    call.setdefault("arguments", {})
-    return call
-
-def format_tool_result(chunks: list[dict]) -> str:
-    """Render retrieved chunks into a tool-role message body.
-
-    Compact JSON-ish format for the LLM; not the prompt the user sees.
-    """
-    if not chunks:
-        return "search_documents returned no results."
-    lines = [f"search_documents returned {len(chunks)} result(s):\n"]
-    for i, c in enumerate(chunks, 1):
-        lines.append(
-            f"[{i}] score={c['score']:.4f}  source={c['source_path']}\n"
-            f"{c['content']}\n"
-        )
-    return "\n".join(lines)
-```
-
-#### Pipeline loop in `main.py`
-
-Replaces the current RAG block in `_server_managed_completion`:
-
-```python
-from prompts.rag_system_prompts import build_system_prompt
-from rag_engine.tool_use import build_tool_spec, parse_tool_call, format_tool_result
-
-# ... after step 3 (get_context from Redis) ...
-
-# -- 4. System prompt (mode-aware) ----------------------------------------
-tool_spec = build_tool_spec() if mode != "off" else None
-system_prompt = build_system_prompt(mode, tool_spec)
-# Prepend as role=system if not already present in history; otherwise
-# replace the first system message with the computed one.
-messages = _apply_system_prompt(messages, system_prompt)
-
-# -- 5. Tool-use loop -----------------------------------------------------
-max_iter = app.state.rag_cfg.get("tool_use", {}).get("max_iterations", 2)
-rag_sources: list[str] | None = None
-rag_chunks_used: list[dict] = []
-
-for iteration in range(max_iter + 1):
-    # Step 5a: run inference (internal via KV slot, or external via LiteLLM)
-    assistant_text, model_used = await _run_inference(
-        target_model, messages, cache, slot_id, req, router
-    )
-
-    # Step 5b: tool-call parse
-    tool_call = parse_tool_call(assistant_text) if mode != "off" else None
-
-    if tool_call is None or iteration == max_iter:
-        # No tool call, or we've hit the cap — this is the final answer.
-        assistant_content = assistant_text
-        break
-
-    # Step 5c: dispatch the tool
-    if tool_call["name"] != "search_documents":
-        logger.warning("Unknown tool call: %s", tool_call["name"])
-        # Feed back as an error tool result so the model can recover.
-        messages.append({"role": "assistant", "content": assistant_text})
-        messages.append({"role": "tool", "content": f"Unknown tool: {tool_call['name']}"})
-        continue
-
-    query = tool_call["arguments"].get("query", "").strip()
-    if not query:
-        messages.append({"role": "assistant", "content": assistant_text})
-        messages.append({"role": "tool", "content": "Empty query"})
-        continue
-
-    chunks = await _retrieve(query, req.user_id, app.state)  # §8.3 hooks in here
-    rag_chunks_used.extend(chunks)
-    messages.append({"role": "assistant", "content": assistant_text})
-    messages.append({"role": "tool", "content": format_tool_result(chunks)})
-
-# Step 6: build rag_sources from *actual* tool results, dedup preserving order.
-if rag_chunks_used:
-    seen: set[str] = set()
-    rag_sources = []
-    for c in rag_chunks_used:
-        if c["source_path"] not in seen:
-            seen.add(c["source_path"])
-            rag_sources.append(c["source_path"])
-```
-
-#### Specialist path considerations
-
-The `internal` path today bypasses LiteLLM and calls llama-server `/completion`
-directly with `slot_id` for KV-cache reuse. The tool-use loop must preserve that:
-
-- Each iteration's inference call uses the same `slot_id`. llama-server appends the
-  new prompt (which now includes the previous assistant message and tool result) and
-  resumes from the cached prefix — no KV re-warm needed for the shared prefix.
-- The `apply_qwen_template()` function formats messages using Qwen3.5-4B's native
-  prompt format (verified against llama-server `/props` chat_template).
-  Stop tokens are configured per model. `tool` role messages are folded to
-  `user` by `_fold_tool_messages()` before the template is applied; no template
-  changes are needed for tool turns. The old `apply_mistral_template` (`[INST]…[/INST]`)
-  is kept in `kv_cache.py` as a deprecated stub but must never be called — using
-  Mistral format with a local model causes post-tool-call hallucination and broken multi-turn
-  context (root-caused 2026-04-21).
-- On KV-slot divergence (rare — e.g. template render difference between turns):
-  `kv_cache.py` already handles cache miss by recomputing from scratch. No action needed.
-
-#### External path considerations
-
-LiteLLM passes messages through to Anthropic's Messages API. `role=tool` is mapped to
-Anthropic's native `tool_result` content block by LiteLLM when `tools=[…]` is set on
-the call — but **we are NOT using native tool-use**. Instead we keep the conversation
-as plain user/assistant/tool text messages with the tool-call block in assistant text
-and the tool result in a `role=user` message (since Anthropic only has user / assistant
-roles without tools enabled). Update `_run_inference` for the external path to fold
-`role=tool` → `role=user` with the `"Tool result:\n\n"` preamble, symmetric to the
-internal path.
-
-#### Rolling summarization interaction
-
-`ConversationCache.maybe_summarize` triggers at ~100K tokens. The tool-use loop can
-add ~2 × top_k × parent_text_size tokens per turn (~4K tokens with defaults).
-Summarization already handles arbitrary message roles, but verify:
-- Summarizer's input: raw messages from Redis. If a turn contains a `tool_call` block
-  (assistant text) and a tool result (user text), summary should include "searched for
-  X; found Y" rather than the raw JSON. Update the summarization prompt in
-  `conversation.py` to instruct: "If a turn involved a tool call, summarize the query
-  and gist of the result — not the raw JSON or source paths."
-
-#### Config additions
-
-```yaml
-rag:
-  tool_use:
-    max_iterations: 2       # hard cap on tool-call round trips per user turn
-    strip_on_final: true    # remove any stray <tool_call> tags from final answer
-```
-
-#### Verification
-
-1. `rag_mode=off`: system prompt does not contain "TOOLS" section; no tool calls
-   parsed; `rag_sources == null`.
-2. `rag_mode=on` + meta question: no tool call emitted; `rag_sources == null`;
-   latency is a single inference call (no retrieval).
-3. `rag_mode=on` + document question: exactly one tool call emitted; retrieval runs;
-   second inference consumes tool result; `rag_sources` populated from actual
-   retrieval (not pre-fetched top-k).
-4. `rag_mode=only` + answerable question: tool call emitted every time; final answer
-   grounds in tool result.
-5. `rag_mode=only` + unanswerable question: tool called, final reply is the exact
-   decline sentence.
-6. Malformed tool call (broken JSON) does not crash the pipeline; logged warning, loop
-   continues with the assistant text as final answer.
-7. Two-iteration cap honoured: if the model emits a second tool call on iteration 2,
-   the orchestrator breaks and treats the assistant text as final (strip `<tool_call>`
-   block per `strip_on_final: true`).
+See §8.1 tombstone. The `rag_engine/tool_use.py` module and all associated
+pipeline code in `main.py` were deleted.
 
 ### 8.3 Multi-query retrieval with MMR reranking 🚫 evaluated 2026-04-22 — no-go, permanently disabled
 
