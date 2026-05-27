@@ -2,8 +2,8 @@
 title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Haiku 4.5)
-updated_at: 2026-05-27--11-58
+updated_by: Claude Code (Claude Opus 4.7)
+updated_at: 2026-05-27--14-15
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -62,7 +62,9 @@ client could have made directly.
 server side. Query parameters: `q` (required), `user` (owner filter), `top_k` (1–20,
 default 5), `file_types` (list, e.g. `["pdf","md","opencode"]`). Each result includes `content`
 (parent chunk text), `source_path`, `score`, `file_name`, `file_type`, and `session_title`
-(for claude_chat or opencode results).
+(for claude_chat or opencode results). For chat sessions, `file_name` is overridden at
+ingest time with the human-readable `session_title` so renderers can use `file_name`
+uniformly — the raw UUID-named `.jsonl` or `ses_<id>` identifier is not surfaced.
 
 Invoked interactively via the `/user:rag` slash command (`~/.claude/commands/rag.md`):
 - `/user:rag search <query>` — one-shot retrieval, displays ranked hits

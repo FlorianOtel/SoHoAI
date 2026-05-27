@@ -79,7 +79,7 @@ async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_
         for i, r in enumerate(results, 1):
             ftype  = r.get("file_type", "")
             stitle = r.get("session_title", "")
-            display = (stitle if ftype == "claude_chat" and stitle else r.get("file_name", ""))[:38]
+            display = (stitle if ftype in ("claude_chat", "opencode") and stitle else r.get("file_name", ""))[:38]
             rr = r.get("rerank_score", 0.0)
             print(f"{i:<3}  {r['score']:>6.4f}  {rr:>+7.2f}  {display:<40}  {r['source_path']}")
     else:
@@ -88,7 +88,7 @@ async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_
         for i, r in enumerate(results, 1):
             ftype  = r.get("file_type", "")
             stitle = r.get("session_title", "")
-            display = (stitle if ftype == "claude_chat" and stitle else r.get("file_name", ""))[:38]
+            display = (stitle if ftype in ("claude_chat", "opencode") and stitle else r.get("file_name", ""))[:38]
             print(f"{i:<3}  {r['score']:>6.4f}  {display:<40}  {r['source_path']}")
 
     print()

@@ -741,6 +741,13 @@ async def ingest_file(
             file_type = raw_file_type
             chat_meta = {}
 
+        # For chat sessions, the raw file_name is a meaningless identifier
+        # (UUID-named .jsonl for Claude Code, ses_<id> for opencode). Replace it
+        # with the human-readable session_title so any renderer using file_name
+        # gets a sensible label without per-type special-casing.
+        if chat_meta.get(FIELD_SESSION_TITLE):
+            file_name = chat_meta[FIELD_SESSION_TITLE]
+
         if not text.strip():
             logger.warning("Empty document, skipping: %s", file_path)
             state_db.mark_completed(file_path)
