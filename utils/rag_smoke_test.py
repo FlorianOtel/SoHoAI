@@ -68,7 +68,7 @@ def _qdrant_stats(qdrant_url: str) -> tuple[bool, int]:
 
 # -- phases -------------------------------------------------------------------
 
-async def retrieval_phase(query: str, user_id: str | None, top_k: int, rag_cfg: dict) -> list[dict]:
+async def retrieval_phase(query: str, user_id: str | None, top_k: int, rag_cfg: dict, file_types: list[str] | None = None) -> list[dict]:
     _section("Phase 1 — direct retrieval (search_rag)")
     qdrant_client = get_client(rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"))
     results = await search_rag(
@@ -77,6 +77,7 @@ async def retrieval_phase(query: str, user_id: str | None, top_k: int, rag_cfg: 
         limit=top_k,
         qdrant_client=qdrant_client,
         rag_cfg=rag_cfg,
+        file_types=file_types,
     )
     if not results:
         print("  (no results)")
@@ -193,7 +194,9 @@ def main() -> int:
     p.add_argument("--timeout", type=float, default=180.0,
                    help="Chat endpoint timeout in seconds (default 180)")
     p.add_argument("--expect", metavar="SUBSTR", default=None,
-                   help="Assert this substring appears in a returned source path")
+                   help="Assert this substring appears in a returned source path (e.g., 'opencode://' for any opencode session)")
+    p.add_argument("--file-type", metavar="TYPE", action="append", dest="file_types",
+                   help="Filter results by file type (e.g. 'pdf', 'md', 'opencode'); can be repeated")
     p.add_argument("--skip-retrieval", action="store_true")
     p.add_argument("--skip-chat", action="store_true")
     args = p.parse_args()
@@ -222,7 +225,7 @@ def main() -> int:
     chat_data: dict = {}
 
     if not args.skip_retrieval:
-        retrieval = asyncio.run(retrieval_phase(args.query, user_id, args.top_k, rag_cfg))
+        retrieval = asyncio.run(retrieval_phase(args.query, user_id, args.top_k, rag_cfg, args.file_types))
 
     if not args.skip_chat:
         chat_data = chat_phase(server, args.query, user_id, args.timeout)

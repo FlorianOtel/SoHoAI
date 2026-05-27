@@ -29,7 +29,9 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import urllib.request
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import tiktoken
@@ -368,6 +370,110 @@ def _parse_claude_chat(path: Path) -> tuple[str, dict]:
     return text, metadata
 
 
+def _parse_opencode_session(path: str, oc_api_url: str) -> tuple[str, dict]:
+    """
+    Fetch an opencode session via HTTP and extract user/assistant text turns.
+
+    path is the synthetic key "opencode://{session_id}".
+    oc_api_url is the opencode API base URL (e.g. "http://localhost:4096").
+
+    Returns (text, metadata) with session_id, project, session_title.
+    On any HTTP failure, returns ("", {}) to signal parse failure.
+    """
+    # Parse session_id from synthetic path
+    if not path.startswith("opencode://"):
+        return "", {}
+    session_id = path[len("opencode://"):]
+    if not session_id:
+        return "", {}
+
+    turns: list[str] = []
+    session_title = ""
+    project = "unknown"
+    created_timestamp = ""
+
+    try:
+        # Fetch session metadata (for title and created timestamp)
+        session_url = f"{oc_api_url}/session/{session_id}"
+        with urllib.request.urlopen(session_url, timeout=5) as response:
+            session = json.load(response)
+        session_title = session.get("title", "").strip()
+        project = Path(session.get("directory", "")).name or "unknown"
+        time_info = session.get("time", {})
+        created_ms = time_info.get("created", 0)
+        if created_ms:
+            created_timestamp = datetime.fromtimestamp(created_ms / 1000.0).isoformat()
+
+        # Fetch messages
+        messages_url = f"{oc_api_url}/session/{session_id}/message"
+        with urllib.request.urlopen(messages_url, timeout=5) as response:
+            messages = json.load(response)
+    except Exception:
+        return "", {}
+
+    # Extract text turns from messages
+    first_user_text = ""
+    for message in messages:
+        info = message.get("info", {})
+        role = info.get("role", "")
+        parts = message.get("parts", [])
+
+        # Extract text from parts; skip non-text types
+        text_parts = []
+        for part in parts:
+            part_type = part.get("type", "")
+            if part_type == "text":
+                part_text = part.get("text", "").strip()
+                if part_text:
+                    text_parts.append(part_text)
+
+        if not text_parts:
+            continue
+
+        combined_text = "\n".join(text_parts)
+
+        # Format as user/assistant turn
+        if role == "user":
+            if not combined_text.startswith("/"):  # Skip slash commands
+                turns.append(f"**User**: {combined_text}")
+                if not first_user_text:
+                    first_user_text = combined_text
+        elif role == "assistant":
+            turns.append(f"**Assistant**: {combined_text}")
+
+    if not turns:
+        return "", {}
+
+    # Synthesise session_title if absent or empty
+    if not session_title:
+        if first_user_text:
+            # Use first non-empty user text (up to 60 chars), stripping leading <
+            text = first_user_text.lstrip("<").replace("\n", " ").strip()[:60]
+            session_title = text + "..." if len(first_user_text) > 60 else text
+        else:
+            session_title = session_id  # Fallback to session_id
+
+    # Build header block
+    header = (
+        f"# Opencode Session\n\n"
+        f"Session: {session_id}\n"
+        f"Project: {project}\n"
+        f"Date: {created_timestamp}\n"
+        f"Title: {session_title}\n\n"
+        f"---\n\n"
+    )
+
+    body = "\n\n".join(turns)
+    text = header + body
+
+    metadata = {
+        FIELD_SESSION_ID:    session_id,
+        FIELD_PROJECT:       project,
+        FIELD_SESSION_TITLE: session_title,
+    }
+    return text, metadata
+
+
 def _parse_pptx(path: Path) -> str:
     """
     Extract text from a PowerPoint file using python-pptx.
@@ -623,7 +729,11 @@ async def ingest_file(
         # asyncio.to_thread keeps the event loop responsive for other tasks.
         # ------------------------------------------------------------------
         state_db.set_progress(file_path, "parsing")
-        if raw_file_type == "jsonl":
+        if file_path.startswith("opencode://"):
+            oc_api_url = rag_cfg.get("opencode_api_url", "http://localhost:4096")
+            text, chat_meta = await asyncio.to_thread(_parse_opencode_session, file_path, oc_api_url)
+            file_type = "opencode"
+        elif raw_file_type == "jsonl":
             text, chat_meta = await asyncio.to_thread(_parse_claude_chat, Path(file_path))
             file_type = "claude_chat"
         else:

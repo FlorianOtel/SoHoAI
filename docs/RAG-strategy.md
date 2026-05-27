@@ -2,8 +2,8 @@
 title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (claude-code-kimi-k2.6)
-updated_at: 2026-05-16--08-41
+updated_by: Claude Code (Claude Haiku 4.5)
+updated_at: 2026-05-27--11-58
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -21,6 +21,7 @@ context: >
   §14 hybrid sparse+dense search (fastembed BM25 + Qdrant RRF) — code complete,
   migration complete 2026-05-14, hybrid live; §14.7 qdrant-client API name
   mismatches fixed (sparse_vectors, FusionQuery, Prefetch.filter).
+  Updated 2026-05-26: §1.2 opencode scanner subsection + §0 file_types filter note.
 ---
 ---
 
@@ -59,9 +60,9 @@ client could have made directly.
 
 `GET /v1/rag/search` returns raw document hits as JSON with no LLM invocation on the
 server side. Query parameters: `q` (required), `user` (owner filter), `top_k` (1–20,
-default 5), `file_types` (list, e.g. `["pdf","md"]`). Each result includes `content`
+default 5), `file_types` (list, e.g. `["pdf","md","opencode"]`). Each result includes `content`
 (parent chunk text), `source_path`, `score`, `file_name`, `file_type`, and `session_title`
-(for claude_chat results).
+(for claude_chat or opencode results).
 
 Invoked interactively via the `/user:rag` slash command (`~/.claude/commands/rag.md`):
 - `/user:rag search <query>` — one-shot retrieval, displays ranked hits
@@ -187,6 +188,16 @@ The `.claude/` directory is excluded from the generic NFS scanner to prevent ing
 3. Uses a dedicated parser `_parse_claude_chat()` (in `rag_engine/ingest.py`) that extracts structured user/assistant text turns from the JSONL format
 
 A raw UTF-8 read of `.jsonl` produces unreadable JSON blobs; the dedicated parser is mandatory for RAG-quality content. Additionally, `_build_title_map()` reads `~/.claude/chats/` as a read-only side channel to derive human-readable session titles — it is never ingested, only consulted during ingest time for metadata enrichment. This two-path architecture solves three constraints: (1) avoid duplicate ingestion via `.chats/` symlinks, (2) ingest high-value sessions at all, (3) process them correctly with structured parsing. Full rationale and code locations documented in `docs/design-history.md` (2026-05-04--12-46).
+
+**OpenCode sessions — HTTP API scanner + `opencode://` synthetic keys (added 2026-05-26)**
+
+OpenCode is a second external LLM agent like Claude Code. A dedicated scanner function `scan_opencode_sessions()` (in `rag_engine/scanner.py`) queries the HTTP API endpoint to discover live and archived session metadata. Unlike Claude Code sessions (read from `.jsonl` files on NFS), OpenCode exists as HTTP state only — the API is the source of truth. If unreachable, `scan_opencode_sessions()` returns `existing_paths=None`, preserving all existing Qdrant points to avoid accidental deletion. Session content is ingested via a dedicated parser `_parse_opencode_session()` (in `rag_engine/ingest.py`), which constructs synthetic `opencode://{session_id}` keys (file_type=opencode) and enriches metadata with `session_title`. The `worktree_prefix` config value (e.g. `/mnt/nfs/Florian`) maps to an owner field for multi-tenant filtering.
+
+**Important configuration**: Two keys in `SoHoAI-config.yaml` must point to the OpenCode server (typically running on Server 2):
+- `opencode.api_url` — discovered by `scan_opencode_sessions()` (scanner.py)
+- `rag.opencode_api_url` — used by `_parse_opencode_session()` (ingest.py)
+
+Both must use the server's IP (e.g. `http://192.168.1.95:4096`), not `localhost`, to ensure consistency across multi-server deployments and systemd daemon invocations.
 
 ### 1.3 Symlink handling (updated 2026-04-21)
 

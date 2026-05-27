@@ -51,7 +51,7 @@ from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchVa
 from rag_engine import search_rag, multi_query_search
 from rag_engine.collection import DOCUMENTS_COLLECTION, ensure_collection, get_client
 from rag_engine.ingest import ingest_file
-from rag_engine.scanner import scan_nfs_roots, scan_claude_chats
+from rag_engine.scanner import scan_nfs_roots, scan_claude_chats, scan_opencode_sessions
 from rag_engine.schema import FIELD_SOURCE_PATH
 from rag_engine.state import StateDB
 from rag_engine.tool_use import build_tool_spec, format_tool_result, parse_tool_call
@@ -200,6 +200,8 @@ async def lifespan(app: FastAPI):
 
     app.state.summarize_fn = summarize_fn
     app.state.rag_cfg = config.get("rag", {})
+    _oc_cfg = config.get("opencode", {})
+    app.state.rag_cfg["opencode_api_url"] = _oc_cfg.get("api_url", "http://localhost:4096")
 
     try:
         qdrant_url = app.state.rag_cfg.get("qdrant_url", "http://192.168.1.93:6333")
@@ -629,8 +631,16 @@ async def rag_ingest_sync(user: str | None = Query(None)):
         config,
         user,
     )
+    result_opencode = await asyncio.to_thread(
+        scan_opencode_sessions,
+        app.state.state_db,
+        config,
+        user,
+    )
 
     all_existing = result_nfs["existing_paths"] | result_chats["existing_paths"]
+    if result_opencode["existing_paths"] is not None:
+        all_existing |= result_opencode["existing_paths"]
     deleted_paths, stale_paths = app.state.state_db.find_deleted(all_existing)
 
     # Qdrant cleanup BEFORE SQLite deletion — if killed mid-loop, the SQLite rows
@@ -658,6 +668,8 @@ async def rag_ingest_sync(user: str | None = Query(None)):
     return {
         "nfs_scanned": result_nfs["scanned"],
         "chats_scanned": result_chats["scanned"],
+        "opencode_scanned": result_opencode["scanned"],
+        "opencode_reachable": result_opencode["existing_paths"] is not None,
         "deleted": len(stale_paths),
         "queue": counts,
     }

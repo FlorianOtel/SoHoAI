@@ -35,7 +35,7 @@ import yaml  # noqa: E402  (after sys.path fix)
 from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
 
 from rag_engine.collection import DOCUMENTS_COLLECTION, get_client
-from rag_engine.scanner import scan_nfs_roots, scan_claude_chats
+from rag_engine.scanner import scan_nfs_roots, scan_claude_chats, scan_opencode_sessions
 from rag_engine.schema import FIELD_SOURCE_PATH
 from rag_engine.state import StateDB
 
@@ -81,8 +81,16 @@ def main() -> None:
 
     result_nfs = scan_nfs_roots(state_db, config, user_filter=args.user)
     result_chats = scan_claude_chats(state_db, config, user_filter=args.user)
+    result_opencode = scan_opencode_sessions(state_db, config, user_filter=args.user)
 
     all_existing = result_nfs["existing_paths"] | result_chats["existing_paths"]
+    if result_opencode["existing_paths"] is not None:
+        all_existing |= result_opencode["existing_paths"]
+    else:
+        logger.warning(
+            "Opencode API unreachable — skipping opencode paths in deletion check "
+            "(existing opencode Qdrant points are preserved)"
+        )
     deleted_paths, stale_paths = state_db.find_deleted(all_existing)
     if all_existing and deleted_paths:
         logger.info("Found %d completed file(s) pending Qdrant cleanup", len(deleted_paths))
@@ -105,6 +113,10 @@ def main() -> None:
     print(f"Scan complete:")
     print(f"  NFS files discovered  : {result_nfs['scanned']}")
     print(f"  Chat sessions found   : {result_chats['scanned']}")
+    if result_opencode["existing_paths"] is not None:
+        print(f"  Opencode sessions found : {result_opencode['scanned']}")
+    else:
+        print(f"  Opencode API unreachable — preserved existing opencode points")
     print(f"  Stale rows removed    : {len(stale_paths)}")
     print()
     print(f"Queue status:")

@@ -19,8 +19,10 @@ Matching is done against the full child path, so "Library/" will NOT match
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import urllib.request
 from pathlib import Path
 
 from .state import StateDB
@@ -240,5 +242,120 @@ def scan_claude_chats(
                 root_count += 1
 
         logger.info("  → %d session(s) found in %s", root_count, root)
+
+    return {"scanned": scanned, "existing_paths": existing_paths}
+
+
+def scan_opencode_sessions(
+    state_db: StateDB,
+    config: dict,
+    user_filter: str | None = None,
+) -> dict:
+    """
+    Discover opencode sessions via HTTP API and update the ingestion queue.
+
+    Reads config["opencode"] with api_url and roots (list of {worktree_prefix, owner} dicts).
+    Returns gracefully if the key is absent or the API is unreachable.
+
+    Synthesises file_path as "opencode://{session_id}" for use in StateDB and Qdrant.
+    Mtime is derived from session["time"]["updated"] / 1000.0 (UNIX milliseconds).
+
+    Returns:
+        {'scanned': N, 'existing_paths': set[str] | None}
+        existing_paths is None if the opencode API is unreachable — callers must
+        treat None as "skip this source in find_deleted()" to avoid mass-purging
+        existing opencode Qdrant points.
+    """
+    opencode_cfg = config.get("opencode", {})
+    if not opencode_cfg:
+        logger.info("No opencode config — skipping opencode scan")
+        return {"scanned": 0, "existing_paths": set()}
+
+    api_url = opencode_cfg.get("api_url", "http://localhost:4096")
+    roots_cfg = opencode_cfg.get("roots", [])
+    if not roots_cfg:
+        logger.info("No opencode roots configured — skipping opencode scan")
+        return {"scanned": 0, "existing_paths": set()}
+
+    # Build {worktree_prefix: owner} map and apply user_filter
+    prefix_to_owner: dict[str, str] = {}
+    for entry in roots_cfg:
+        prefix = entry.get("worktree_prefix", "")
+        owner = entry.get("owner", "")
+        if not prefix or not owner:
+            continue
+        if user_filter and owner != user_filter:
+            continue
+        prefix_to_owner[prefix] = owner
+
+    if not prefix_to_owner:
+        logger.info("No applicable opencode roots after user filter — skipping opencode scan")
+        return {"scanned": 0, "existing_paths": set()}
+
+    try:
+        # Fetch projects from the opencode API
+        projects_url = f"{api_url}/project"
+        with urllib.request.urlopen(projects_url, timeout=5) as response:
+            projects = json.load(response)
+    except Exception as exc:
+        logger.warning(
+            "opencode API unreachable at %s: %s — skipping opencode scan, "
+            "will NOT delete stale opencode Qdrant points",
+            api_url, exc,
+        )
+        return {"scanned": 0, "existing_paths": None}
+
+    scanned = 0
+    existing_paths: set[str] = set()
+
+    # For each project, fetch sessions
+    for project in projects:
+        project_worktree = project.get("worktree", "")
+        if not project_worktree:
+            continue
+
+        # Find the matching owner for this worktree
+        owner = None
+        for prefix in prefix_to_owner:
+            if project_worktree.startswith(prefix):
+                owner = prefix_to_owner[prefix]
+                break
+
+        if owner is None:
+            continue
+
+        try:
+            # Fetch sessions for this project
+            sessions_url = f"{api_url}/session?directory={project_worktree}"
+            with urllib.request.urlopen(sessions_url, timeout=5) as response:
+                sessions = json.load(response)
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch sessions for project %s: %s — "
+                "aborting opencode scan to avoid partial existing_paths set "
+                "(existing opencode Qdrant points are preserved)",
+                project_worktree, exc,
+            )
+            return {"scanned": scanned, "existing_paths": None}
+
+        for session in sessions:
+            session_id = session.get("id", "")
+            if not session_id:
+                continue
+
+            # Synthesise the path key
+            path = f"opencode://{session_id}"
+
+            # Extract mtime from session["time"]["updated"] (milliseconds)
+            time_info = session.get("time", {})
+            updated_ms = time_info.get("updated", 0)
+            mtime = updated_ms / 1000.0
+
+            # Register the session
+            state_db.discover_or_update(path, owner, mtime)
+            existing_paths.add(path)
+            scanned += 1
+
+    logger.info("  → %d opencode session(s) discovered", scanned)
 
     return {"scanned": scanned, "existing_paths": existing_paths}
