@@ -22,6 +22,12 @@ context: >
   migration complete 2026-05-14, hybrid live; §14.7 qdrant-client API name
   mismatches fixed (sparse_vectors, FusionQuery, Prefetch.filter).
   Updated 2026-05-26: §1.2 opencode scanner subsection + §0 file_types filter note.
+  Updated 2026-05-27: §1.2 opencode scanner rewritten — now walks v2 /api/session
+  with cursor pagination (covers every session globally; replaces the /project +
+  worktree_prefix model which silently missed sessions opened from non-project
+  cwds, like the 6 "SoHoAI project overview" sessions launched from /home/florian).
+  Project field dropped on opencode points (session.directory is not topic
+  classification). Owner is now a single config constant.
 ---
 ---
 
@@ -191,15 +197,22 @@ The `.claude/` directory is excluded from the generic NFS scanner to prevent ing
 
 A raw UTF-8 read of `.jsonl` produces unreadable JSON blobs; the dedicated parser is mandatory for RAG-quality content. Additionally, `_build_title_map()` reads `~/.claude/chats/` as a read-only side channel to derive human-readable session titles — it is never ingested, only consulted during ingest time for metadata enrichment. This two-path architecture solves three constraints: (1) avoid duplicate ingestion via `.chats/` symlinks, (2) ingest high-value sessions at all, (3) process them correctly with structured parsing. Full rationale and code locations documented in `docs/design-history.md` (2026-05-04--12-46).
 
-**OpenCode sessions — HTTP API scanner + `opencode://` synthetic keys (added 2026-05-26)**
+**OpenCode sessions — v2 paginated discovery + `opencode://` synthetic keys (added 2026-05-26, redesigned 2026-05-27)**
 
-OpenCode is a second external LLM agent like Claude Code. A dedicated scanner function `scan_opencode_sessions()` (in `rag_engine/scanner.py`) queries the HTTP API endpoint to discover live and archived session metadata. Unlike Claude Code sessions (read from `.jsonl` files on NFS), OpenCode exists as HTTP state only — the API is the source of truth. If unreachable, `scan_opencode_sessions()` returns `existing_paths=None`, preserving all existing Qdrant points to avoid accidental deletion. Session content is ingested via a dedicated parser `_parse_opencode_session()` (in `rag_engine/ingest.py`), which constructs synthetic `opencode://{session_id}` keys (file_type=opencode) and enriches metadata with `session_title`. The `worktree_prefix` config value (e.g. `/mnt/nfs/Florian`) maps to an owner field for multi-tenant filtering.
+OpenCode is a second external LLM agent like Claude Code, but its sessions are *not files*. They live as rows in opencode's own SQLite DB, exposed only via the HTTP API. SoHoAI invents the synthetic key `opencode://{session_id}` so the existing ingestion plumbing (queue → embed → upsert) has something to key on, but there is no actual filesystem path. **Path-based semantics (ownership-via-prefix, project-from-parent-dir) that work for NFS files and Claude Code chats do not apply** — `session.directory` is just cwd-at-launch metadata, not topic/owner classification. (For Claude Code chats the path model still works because `~/.claude` is itself NFS-mounted, so every chat *does* have a real path.)
 
-**Important configuration**: Two keys in `SoHoAI-config.yaml` must point to the OpenCode server (typically running on Server 2):
-- `opencode.api_url` — discovered by `scan_opencode_sessions()` (scanner.py)
-- `rag.opencode_api_url` — used by `_parse_opencode_session()` (ingest.py)
+A dedicated scanner function `scan_opencode_sessions()` (in `rag_engine/scanner.py`) walks `GET /api/session` (the v2 endpoint, operationId `v2.session.list`) with cursor-based pagination until exhausted. This endpoint returns every session opencode knows about — project-bound or loose, archived or active — with no directory filter. Earlier `GET /session` and `GET /project` endpoints are unsuitable because they filter by opencode's server cwd or only enumerate registered projects, missing any session opened from outside a project worktree (the same trap oc-history falls into).
 
-Both must use the server's IP (e.g. `http://192.168.1.95:4096`), not `localhost`, to ensure consistency across multi-server deployments and systemd daemon invocations.
+A dedicated parser `_parse_opencode_session()` (in `rag_engine/ingest.py`) fetches `GET /session/{id}` for title/timestamp and `GET /session/{id}/message` for turns, builds a header block (`Session:`, `Launched from:`, `Date:`, `Title:`) followed by `**User**:` / `**Assistant**:` turns, and returns `{session_id, session_title}` metadata. **No `project` field is set** on opencode points — opencode sessions have no honest path-derived project, and renderers already fall back to `session_title` (which `ingest_file()` also overrides into `file_name` so search results display the title cleanly).
+
+If the API is unreachable mid-walk, `scan_opencode_sessions()` returns `existing_paths=None`, preserving all existing Qdrant points to avoid accidental deletion.
+
+**Configuration** — two keys in `SoHoAI-config.yaml`:
+- `opencode.api_url` — base URL of the opencode HTTP API (scanner)
+- `opencode.owner` — single constant owner for all opencode sessions (single-user per host)
+- `rag.opencode_api_url` — the same base URL, threaded into `rag_cfg` for `_parse_opencode_session()` (ingest.py)
+
+Both URLs should use the server's IP (e.g. `http://192.168.1.95:4096`), not `localhost`, for consistency across multi-server deployments and systemd daemon invocations.
 
 ### 1.3 Symlink handling (updated 2026-04-21)
 

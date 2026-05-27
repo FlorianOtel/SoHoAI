@@ -358,11 +358,12 @@ claude_chats:
       owner: florian
 
 # -- OpenCode session ingestion ---------------------------------------------------
+# Scanner walks GET /api/session (v2 paginated) which returns every session
+# opencode knows about, regardless of cwd-at-launch. session.directory is just
+# metadata, not classification — so there's no path-prefix filter here.
 opencode:
   api_url: "http://192.168.1.95:4096"
-  roots:
-    - worktree_prefix: "/mnt/nfs/Florian"
-      owner: florian
+  owner: florian
 
 # -- llama-server native API (KV cache slot management) -----------------------
 llama_server:

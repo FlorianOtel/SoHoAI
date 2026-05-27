@@ -21,7 +21,7 @@ FIELD_PAGE = "page"                 # page number / slide index / notebook cell 
 FIELD_CHUNK_INDEX = "chunk_index"   # child chunk index within its parent
 FIELD_TAG = "tag"                   # e.g. "certifications", "cisco-backup", "family"
 FIELD_SESSION_ID = "session_id"     # UUID of the Claude Code session — indexed for Qdrant filter queries
-FIELD_PROJECT = "project"           # derived project name (Path(cwd).name, e.g. "SoHoAI") — indexed for filtering
+FIELD_PROJECT = "project"           # NFS document folder or claude_chat project; absent on opencode points (session.directory is cwd-at-launch metadata, not topic classification)
 FIELD_SESSION_TITLE = "session_title"  # claude_chat + opencode sessions; absent on NFS document points
 SPARSE_VECTOR_NAME = "sparse_text"   # named sparse vector space in the Qdrant collection
 

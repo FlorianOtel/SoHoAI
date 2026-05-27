@@ -377,7 +377,11 @@ def _parse_opencode_session(path: str, oc_api_url: str) -> tuple[str, dict]:
     path is the synthetic key "opencode://{session_id}".
     oc_api_url is the opencode API base URL (e.g. "http://localhost:4096").
 
-    Returns (text, metadata) with session_id, project, session_title.
+    Returns (text, metadata) with session_id and session_title. No `project`
+    field — opencode sessions have no path-derived project (session.directory
+    is just cwd-at-launch metadata, not topic classification). The directory
+    is preserved inside the searchable header body as forensic context.
+
     On any HTTP failure, returns ("", {}) to signal parse failure.
     """
     # Parse session_id from synthetic path
@@ -389,7 +393,7 @@ def _parse_opencode_session(path: str, oc_api_url: str) -> tuple[str, dict]:
 
     turns: list[str] = []
     session_title = ""
-    project = "unknown"
+    launched_from = ""
     created_timestamp = ""
 
     try:
@@ -398,7 +402,7 @@ def _parse_opencode_session(path: str, oc_api_url: str) -> tuple[str, dict]:
         with urllib.request.urlopen(session_url, timeout=5) as response:
             session = json.load(response)
         session_title = session.get("title", "").strip()
-        project = Path(session.get("directory", "")).name or "unknown"
+        launched_from = session.get("directory", "") or ""
         time_info = session.get("time", {})
         created_ms = time_info.get("created", 0)
         if created_ms:
@@ -453,11 +457,13 @@ def _parse_opencode_session(path: str, oc_api_url: str) -> tuple[str, dict]:
         else:
             session_title = session_id  # Fallback to session_id
 
-    # Build header block
+    # Build header block. "Launched from" is forensic information about cwd
+    # at session start — NOT a project classification (opencode sessions have
+    # no genuine path-derived project; see schema.py FIELD_PROJECT comment).
     header = (
         f"# Opencode Session\n\n"
         f"Session: {session_id}\n"
-        f"Project: {project}\n"
+        f"Launched from: {launched_from}\n"
         f"Date: {created_timestamp}\n"
         f"Title: {session_title}\n\n"
         f"---\n\n"
@@ -466,9 +472,9 @@ def _parse_opencode_session(path: str, oc_api_url: str) -> tuple[str, dict]:
     body = "\n\n".join(turns)
     text = header + body
 
+    # No FIELD_PROJECT — opencode points intentionally omit the project field.
     metadata = {
         FIELD_SESSION_ID:    session_id,
-        FIELD_PROJECT:       project,
         FIELD_SESSION_TITLE: session_title,
     }
     return text, metadata
