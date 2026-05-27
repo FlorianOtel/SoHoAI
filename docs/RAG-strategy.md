@@ -28,6 +28,9 @@ context: >
   cwds, like the 6 "SoHoAI project overview" sessions launched from /home/florian).
   Project field dropped on opencode points (session.directory is not topic
   classification). Owner is now a single config constant.
+  Updated 2026-05-27 (later): §1.2 expanded with explicit "fake path problem" +
+  "multi-tenant blind spot" callouts, and §3.6 multi-tenancy section now states
+  upfront that opencode is excluded from per-user isolation today.
 ---
 ---
 
@@ -199,20 +202,106 @@ A raw UTF-8 read of `.jsonl` produces unreadable JSON blobs; the dedicated parse
 
 **OpenCode sessions — v2 paginated discovery + `opencode://` synthetic keys (added 2026-05-26, redesigned 2026-05-27)**
 
-OpenCode is a second external LLM agent like Claude Code, but its sessions are *not files*. They live as rows in opencode's own SQLite DB, exposed only via the HTTP API. SoHoAI invents the synthetic key `opencode://{session_id}` so the existing ingestion plumbing (queue → embed → upsert) has something to key on, but there is no actual filesystem path. **Path-based semantics (ownership-via-prefix, project-from-parent-dir) that work for NFS files and Claude Code chats do not apply** — `session.directory` is just cwd-at-launch metadata, not topic/owner classification. (For Claude Code chats the path model still works because `~/.claude` is itself NFS-mounted, so every chat *does* have a real path.)
+> **Read this first.** OpenCode sessions break two assumptions baked into the
+> rest of this document: they have **no real file path**, and the multi-tenant
+> ownership model described in §11 **does not apply to them**. The two
+> subsections below spell out why and what that means today.
 
-A dedicated scanner function `scan_opencode_sessions()` (in `rag_engine/scanner.py`) walks `GET /api/session` (the v2 endpoint, operationId `v2.session.list`) with cursor-based pagination until exhausted. This endpoint returns every session opencode knows about — project-bound or loose, archived or active — with no directory filter. Earlier `GET /session` and `GET /project` endpoints are unsuitable because they filter by opencode's server cwd or only enumerate registered projects, missing any session opened from outside a project worktree (the same trap oc-history falls into).
+**The "fake path" problem.** OpenCode sessions are rows in opencode's own
+SQLite database, exposed only via its HTTP API — there is no file on disk you
+can `cat` or `ls`. To make them fit the existing ingestion plumbing (which
+keys everything off a `source_path` string), SoHoAI **fabricates** a synthetic
+key: `opencode://{session_id}`. This string lives in
+`ingestion_queue.file_path` (SQLite) and in the Qdrant payload's `source_path`
+field, but it is **not a filesystem path** — it has no parent directory, no
+mtime on disk, no owner derivable by inspection. The parser fetches the
+session content fresh from the HTTP API every ingest cycle; the synthetic key
+is only used for de-duplication and Qdrant filtering.
 
-A dedicated parser `_parse_opencode_session()` (in `rag_engine/ingest.py`) fetches `GET /session/{id}` for title/timestamp and `GET /session/{id}/message` for turns, builds a header block (`Session:`, `Launched from:`, `Date:`, `Title:`) followed by `**User**:` / `**Assistant**:` turns, and returns `{session_id, session_title}` metadata. **No `project` field is set** on opencode points — opencode sessions have no honest path-derived project, and renderers already fall back to `session_title` (which `ingest_file()` also overrides into `file_name` so search results display the title cleanly).
+The consequence: every place elsewhere in this document that says
+"`source_path` is an NFS path" or "`owner` is derived by matching the path
+prefix against configured roots" is **silently false for opencode points**.
+Specifically:
 
-If the API is unreachable mid-walk, `scan_opencode_sessions()` returns `existing_paths=None`, preserving all existing Qdrant points to avoid accidental deletion.
+- **`session.directory`** (the cwd opencode was launched from) is NOT a project
+  classification — it's just metadata. A SoHoAI-topic session launched from
+  inside the `octmux` worktree does NOT belong to "project octmux". This is
+  why the `project` payload field is intentionally omitted on opencode points;
+  see §3 Qdrant payload schema. (Renderers fall back to `session_title`, which
+  is also copied into `file_name` at ingest time, so search output stays
+  human-readable.)
+- **`derive_owner()`** in `rag_engine/schema.py` is path-prefix-based and only
+  works for NFS files. It is **never called** for opencode (or for Claude Code
+  chats — those derive owner from `claude_chats.roots[i].owner`). Opencode
+  owner comes from the new `opencode.owner` config field.
 
-**Configuration** — two keys in `SoHoAI-config.yaml`:
-- `opencode.api_url` — base URL of the opencode HTTP API (scanner)
-- `opencode.owner` — single constant owner for all opencode sessions (single-user per host)
-- `rag.opencode_api_url` — the same base URL, threaded into `rag_cfg` for `_parse_opencode_session()` (ingest.py)
+For Claude Code chats the path model still works because `~/.claude` is itself
+NFS-mounted, so every chat *does* have a real path. OpenCode is the only
+source type today where the path is fully synthetic.
 
-Both URLs should use the server's IP (e.g. `http://192.168.1.95:4096`), not `localhost`, for consistency across multi-server deployments and systemd daemon invocations.
+**The multi-tenant blind spot (revisit when needed).** SoHoAI's multi-tenancy
+design (§11) uses path prefixes to attribute every file to exactly one owner,
+and the Qdrant query layer enforces isolation via `owner` filters. **For
+opencode this enforcement is currently neutralised**: a single
+`opencode.owner` config constant stamps every opencode point with the same
+owner, with no consideration of *which person* started the session, who the
+session's content belongs to, or how it should be partitioned across users.
+
+This is acceptable as long as opencode runs as a **single-user local API on a
+single host** — which is the current SoHoAI deployment (one opencode server on
+Server 2, one user behind it). The moment any of these stop being true the
+design needs to be revisited:
+
+- Multiple users running opencode against the same SoHoAI deployment.
+- A shared opencode server (e.g. on the LAN) used by more than one identity.
+- Wanting to expose RAG results across the Google-OAuth2 multi-tenant frontend
+  described in §11 with opencode content included.
+
+Possible future directions: derive owner from opencode's per-session API
+metadata (e.g. the session's user/identity if opencode ever exposes one),
+require multiple opencode servers — one per user — and configure each
+separately, or extend the config to map a server URL or auth token to an
+owner. None of these are implemented or designed today. **Tracked here as a
+known limitation.**
+
+---
+
+**Discovery — v2 `/api/session`.** A dedicated scanner function
+`scan_opencode_sessions()` (in `rag_engine/scanner.py`) walks
+`GET /api/session` (the v2 endpoint, operationId `v2.session.list`) with
+cursor-based pagination until exhausted. This endpoint returns every session
+opencode knows about — project-bound or loose, archived or active — with no
+directory filter. Earlier `GET /session` and `GET /project` endpoints are
+unsuitable because they filter by opencode's server cwd or only enumerate
+registered projects, missing any session opened from outside a project
+worktree (the same trap oc-history falls into; see
+`~/Gin-AI/tmp/oc-history-fix.md` for the parallel fix).
+
+**Parsing.** `_parse_opencode_session()` (in `rag_engine/ingest.py`) fetches
+`GET /session/{id}` for title/timestamp and `GET /session/{id}/message` for
+turns, builds a header block (`Session:`, `Launched from:`, `Date:`, `Title:`)
+followed by `**User**:` / `**Assistant**:` turns, and returns
+`{session_id, session_title}` metadata. The cwd is preserved inside the
+searchable header body as `Launched from: <directory>` purely as forensic
+context — NOT as a project classification.
+
+**Unreachability guard.** If the API is unreachable mid-walk,
+`scan_opencode_sessions()` returns `existing_paths=None`. Callers must skip
+merging that source into `find_deleted()` to avoid mass-purging existing
+opencode Qdrant points the next time opencode happens to be off. See
+`utils/rag_sync_nfs.py` and `main.py`'s `/v1/rag/ingest/sync` for the
+canonical caller pattern.
+
+**Configuration** — keys in `SoHoAI-config.yaml`:
+- `opencode.api_url` — base URL of the opencode HTTP API (used by the scanner).
+- `opencode.owner` — single constant owner stamped onto every opencode point.
+  Single-user-per-host assumption (see "multi-tenant blind spot" above).
+- `rag.opencode_api_url` — the same base URL, threaded into `rag_cfg` for the
+  parser. Must match `opencode.api_url`.
+
+Both URLs should use the server's IP (e.g. `http://192.168.1.95:4096`), not
+`localhost`, for consistency across multi-server deployments and systemd
+daemon invocations.
 
 ### 1.3 Symlink handling (updated 2026-04-21)
 
@@ -673,6 +762,18 @@ The MCP server at port 3001 already exposes these paths.
 SoHoAI serves a family of users, each with private NFS storage and a shared directory.
 Authentication is via **Google OAuth2 (OIDC)** — all users are members of the same Google
 Family Group but have separate Google accounts.
+
+> **Scope of this section.** Everything below applies to NFS files and Claude
+> Code chats — the sources whose `source_path` is a real filesystem path. It
+> does **not** apply to opencode sessions: those have synthetic
+> `opencode://{session_id}` keys with no derivable owner, and every opencode
+> point is currently stamped with a single config-constant
+> (`opencode.owner` in `SoHoAI-config.yaml`). Per-user isolation for opencode
+> content is **not implemented** today — acceptable while opencode runs as a
+> single-user local API on a single host, but needs revisiting if multiple
+> users ever start accessing opencode through SoHoAI. See §1.2 "OpenCode
+> sessions — multi-tenant blind spot" for the full discussion and possible
+> future directions.
 
 #### Identity flow
 
