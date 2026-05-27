@@ -50,9 +50,10 @@ model_list:
       # Advertised context window: per-slot capacity with "--ctx-size 262144 --parallel 2"
       # 262144 / 2 = 131072. This is what external clients (Cline, Claude Code) read via
       # /proxy/v1/model/info for their contextWindow setting.
-      max_tokens: 131072
-      max_input_tokens: 131072
-      context_window: 131072
+      ### Update 20260526 -- Only one slot, no "--parallel 2", until we figure out K-V cache slot session pinning
+      max_tokens: 262144
+      max_input_tokens: 262144
+      context_window: 262144
 
 
   #### Second use-case: summarize, and emergency local fallback -- local LLM on GPU inference on Server 2

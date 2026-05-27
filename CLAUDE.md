@@ -230,13 +230,14 @@ source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
 
 # Server 2 — llama-server (GPU inference + KV cache)
 # Qwen3.5-4B Q6_K_XL — ChatML format, --jinja for template, q8_0 KV
-# VRAM: ~3.4 GB model weights + 2×~1,320 MiB KV (q8_0, 2 slots × 110024 ctx) ≈ 6 GB estimated / 12 GB
+# VRAM: ~3.4 GB model weights + ~3 GB KV (q8_0, single slot × 262144 ctx) ≈ 6.5 GB / 12 GB
+# Single slot for now (no --parallel) until KV cache slot session pinning is resolved.
 # NOTE: existing .bin KV slot files are incompatible when switching models — erase k-v-caches/*.bin first
 llama-server \
   -m ~/Gin-AI/LLMs-cache/llama-server/Qwen3.5-4B-UD-Q6_K_XL.gguf \
   --jinja --flash-attn on \
   --cache-type-k q8_0 --cache-type-v q8_0 \
-  -ngl 99 --ctx-size 220048 --parallel 2 \
+  -ngl 99 --ctx-size 262144 \
   --slot-save-path ~/Gin-AI/LLMs-cache/llama-server/k-v-caches/ \
   --host 0.0.0.0 --port 8000
 

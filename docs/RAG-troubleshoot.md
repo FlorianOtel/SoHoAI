@@ -2,8 +2,8 @@
 title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (claude-code-kimi-k2.6)
-updated_at: 2026-05-16--08-41
+updated_by: Claude Code (Claude Opus 4.7)
+updated_at: 2026-05-27--13-40
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -164,7 +164,7 @@ the chat endpoint (Gemma 4 on port 8000). The reranker listens on port 8001. To 
 ```bash
 ssh Server2
 ps aux | grep llama-server
-# Should see one llama-server process with flags: --parallel 2 --port 8000 --slot-save-path ...
+# Should see one llama-server process with flags: --ctx-size 262144 --port 8000 --slot-save-path ...
 # (port 8001 reranker is served by the same process via model routing)
 ```
 
