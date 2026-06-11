@@ -33,7 +33,8 @@ import yaml
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
+from starlette.requests import ClientDisconnect
 
 from schemas import (
     ChatExport,
@@ -120,7 +121,17 @@ litellm.register_model({
         "mode": "chat",
         "max_tokens": 32000,
         "max_input_tokens": 200000,
-    }
+    },
+    "claude-fable-5": {
+        "input_cost_per_token": 0.000010,
+        "output_cost_per_token": 0.000050,
+        "cache_creation_input_token_cost": 0.00001250,
+        "cache_read_input_token_cost": 0.000001,
+        "litellm_provider": "anthropic",
+        "mode": "chat",
+        "max_tokens": 128000,
+        "max_input_tokens": 1000000,
+    },
 })
 
 # -- Load config ---------------------------------------------------------------
@@ -1125,7 +1136,11 @@ async def anthropic_messages(req: Request):
     For ollama-cloud models, tool use now also works on the LiteLLM path, but
     local/qwen3-4b-q6 tool reliability remains unvalidated.
     """
-    body_bytes = await req.body()
+    try:
+        body_bytes = await req.body()
+    except ClientDisconnect:
+        logger.warning("anthropic_messages: client disconnected before body was read")
+        return Response(status_code=499)
     body = json.loads(body_bytes)
 
     public_model = body.get("model")

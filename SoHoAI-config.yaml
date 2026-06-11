@@ -109,6 +109,16 @@ model_list:
       max_input_tokens: 999000
       context_window: 1000000
 
+  - model_name: "anthropic/claude-fable-5"
+    litellm_params:
+      model: anthropic/claude-fable-5
+    model_info:
+      id: "anthropic/claude-fable-5"
+      description: "Claude Fable 5 — CC transparent forward. No API key configured."
+      max_tokens: 128000
+      max_input_tokens: 999000
+      context_window: 1000000
+
   ####
   #### Models exposed to proxy clients (Cline, OpenCode) — auth via SoHoAI's ANTHROPIC_API_KEY.
   #### Bare names (no provider prefix) so _PROXY_EXPOSED_MODELS can route anthropic/ → these.
@@ -131,6 +141,11 @@ model_list:
     model_info:
       context_window: 1000000
       max_input_tokens: 1000000
+
+  - model_name: claude-fable-5
+    litellm_params:
+      model: anthropic/claude-fable-5
+      api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: "ollama-cloud/deepseek-v4-flash"
     litellm_params:
@@ -156,14 +171,14 @@ model_list:
       max_input_tokens: 1000000
       context_window: 1000000
 
-  - model_name: "ollama-cloud/minimax-m2.5"
+  - model_name: "ollama-cloud/minimax-m3"
     litellm_params:
-      model: openai/minimax-m2.5:cloud
+      model: openai/minimax-m3:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
     model_info:
-      id: "ollama-cloud/minimax-m2.5"
-      description: "DeepSeek V4 Pro — Ollama Cloud"
+      id: "ollama-cloud/minimax-m3"
+      description: "Minimax M3 — Ollama Cloud"
       max_tokens: 32000
       max_input_tokens: 1000000
       context_window: 1000000
@@ -209,15 +224,13 @@ model_list:
 routing:
   default_model: "local/qwen3-4b-q6"
   #### Fallback chains are now implemented via "router_settings" above. Leaving this commented anyway. 
-  # Fallback for local actor -> Ollama-cloud
-  # fallback_chain: ["local/qwen3-4b-q6", "ollama-cloud/qwen3-coder-next"]
   # Fallback for Ollama-cloud when throttled 
   # fallback_chain: ["anthropic/claude-sonnet-4-6", "ollama-cloud/kimi-k2.6"]
   # Route to cloud when context exceeds threshold.
   # Hard limit: -c 220048 / 2 = 110024 tokens per slot. At 100K we route to cloud,
   # leaving ~10K headroom for output (default max_tokens=1024 + safety margin).
   complexity_threshold_tokens: 100000
-  cloud_model: "ollama-cloud/kimi-k2.6"
+  cloud_model: "ollama-cloud/minimax-m3"
   summarization_model: "local/qwen3-9b-q4"
 
 
@@ -227,10 +240,10 @@ router_settings:
   routing_strategy: simple-shuffle
   # Each item in this list is an independent fallback rule
   fallbacks:
-    - "local/qwen3-4b-q6": ["ollama-cloud/qwen3-coder-next"]
-    - "anthropic/claude-sonnet-4-6": ["ollama-cloud/kimi-k2.6"]
-    - "ollama-cloud/kimi-k2.6": ["local/qwen3-9b-q4"]
-
+    - "ollama-cloud/minimax-m3": ["anthropic/claude-opus-4-7"]
+    - "ollama-cloud/kimi-k2.6": ["anthropic/claude-sonnet-4-6"]
+    - "ollama-cloud/glm-5.1": ["anthropic/claude-sonnet-4-6"]
+    - "ollama-cloud/qwen3-coder-next": ["anthropic/claude-haiku-4-5"]
 
 #### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
 rag:
