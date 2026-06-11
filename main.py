@@ -641,7 +641,7 @@ async def rag_ingest_status(user: str | None = Query(None)):
 async def rag_search(
     q: str,
     user: str | None = Query(None),
-    top_k: int = Query(5, ge=1, le=20),
+    top_k: int = Query(5, ge=1, le=100),
     file_types: list[str] | None = Query(None),
     score_threshold: float = Query(0.0, ge=0.0, le=1.0,
                                    description="Minimum cosine score; 0=no filter"),

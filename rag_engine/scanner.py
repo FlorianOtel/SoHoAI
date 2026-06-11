@@ -319,7 +319,7 @@ def scan_opencode_sessions(
             )
             return {"scanned": scanned, "existing_paths": None}
 
-        items = payload.get("items", []) if isinstance(payload, dict) else []
+        items = payload.get("data", []) if isinstance(payload, dict) else []
         for session in items:
             session_id = session.get("id", "")
             if not session_id:
