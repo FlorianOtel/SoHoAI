@@ -83,7 +83,7 @@ picks the bare-name YAML entry that carries `ANTHROPIC_API_KEY` for authenticati
 | `ollama-cloud/deepseek-v4-flash` | `ollama-cloud/deepseek-v4-flash` | LiteLLM | Ollama API key | — |
 | `ollama-cloud/deepseek-v4-pro` | `ollama-cloud/deepseek-v4-pro` | LiteLLM | Ollama API key | **~70% 503 rate** — see §2.3 |
 | `ollama-cloud/minimax-m2.5` | `ollama-cloud/minimax-m2.5` | LiteLLM | Ollama API key | — |
-| `ollama-cloud/kimi-k2.6` | `ollama-cloud/kimi-k2.6` | LiteLLM | Ollama API key | — |
+| `ollama-cloud/kimi-k2.7` | `ollama-cloud/kimi-k2.7` | LiteLLM | Ollama API key | — |
 | `ollama-cloud/glm-5.1` | `ollama-cloud/glm-5.1` | LiteLLM | Ollama API key | — |
 | `ollama-cloud/qwen3-coder-next` | `ollama-cloud/qwen3-coder-next` | LiteLLM | Ollama API key | — |
 
@@ -104,7 +104,7 @@ correctly. The `anthropic_messages` and `count_tokens` endpoints also strip `[�
 the model name before forwarding to `api.anthropic.com` (Anthropic only accepts bare
 names; the annotation caused a 404 that blocked CC's auto-mode Bash safety classifier).
 
-**Ollama cloud models are reasoning models** (DeepSeek V4 Pro, Kimi K2.6, GLM-5.1
+**Ollama cloud models are reasoning models** (DeepSeek V4 Pro, Kimi K2.7, GLM-5.1
 in particular). They spend a variable number of tokens on internal reasoning before
 emitting visible output. Use `max_tokens ≥ 500` for these models; requests with low
 limits (e.g. `max_tokens=20`) will hit the limit during the thinking phase and return
@@ -278,7 +278,7 @@ the status bar and server logs — not the model's self-description.
 
 **deepseek-v4-pro has a documented ~70% HTTP 500/503 failure rate** on Ollama's shared
 inference tier since its April 2026 release (GitHub issues #15832, #15934). Ollama shared
-inference carries **no SLA**. The other three models (kimi-k2.6, glm-5.1, qwen3-coder-next)
+inference carries **no SLA**. The other three models (kimi-k2.7, glm-5.1, qwen3-coder-next)
 are substantially more reliable.
 
 **Why not a silent fallback?** A LiteLLM Router fallback (deepseek → Sonnet) was
@@ -303,7 +303,7 @@ Worst-case total: 60+90+120 = 270 s — within CC's 300 s httpx limit. Only `lit
 triggers a retry; auth errors and 4xx responses propagate immediately.
 
 > **Note (2026-05-15):** Initial implementation used 30s→60s→90s (180s worst-case). Production
-> logs showed kimi-k2.6 regularly needs 30–60s for complex coding tasks, so every non-trivial
+> logs showed kimi-k2.7 regularly needs 30–60s for complex coding tasks, so every non-trivial
 > request failed attempt 1 and incurred an unnecessary 30s penalty. Raised to 60s→90s→120s.
 
 **How final failures are reported:**
@@ -352,7 +352,7 @@ Add future versioned Haiku model names here as needed.
 
 ### §2.5 Tool_use ID sanitization
 
-Ollama Cloud models (confirmed: kimi-k2.6) return tool call IDs in the format
+Ollama Cloud models (confirmed: kimi-k2.7) return tool call IDs in the format
 `functions.{name}:{index}` — e.g. `functions.Bash:38`. These contain `.` and `:` which
 violate Anthropic's required pattern `^[a-zA-Z0-9_-]+$`. Without sanitization, CC stores
 these IDs in its conversation history and the next call to an Anthropic-native model fails
@@ -427,7 +427,7 @@ the Actor's costs.
 ### Local sub-agent (qwen3-4b) — tool-use status
 
 A sub-agent with `model: local/qwen3-4b-q6` or `model: ollama-cloud/*` routes via the LiteLLM local path.
-**Tool use is now supported on this path** (implemented 2026-05-10). Validated target models — `ollama-cloud/qwen3-coder-next`, `ollama-cloud/deepseek-v4-pro`, `ollama-cloud/kimi-k2.6`, and `ollama-cloud/glm-5.1` — passed the synthetic two-turn smoke (`utils/tool_use_smoke_test.py`) on both streaming and non-streaming. `ollama-cloud/deepseek-v4-flash` and `ollama-cloud/minimax-m2.5` are not yet smoke-validated.
+**Tool use is now supported on this path** (implemented 2026-05-10). Validated target models — `ollama-cloud/qwen3-coder-next`, `ollama-cloud/deepseek-v4-pro`, `ollama-cloud/kimi-k2.7`, and `ollama-cloud/glm-5.1` — passed the synthetic two-turn smoke (`utils/tool_use_smoke_test.py`) on both streaming and non-streaming. `ollama-cloud/deepseek-v4-flash` and `ollama-cloud/minimax-m2.5` are not yet smoke-validated.
 
 For `ollama-cloud/*` models (deepseek-v4-pro, qwen3-coder-next), such an agent can:
 - Read files (Read tool supported, smoke-validated)
@@ -479,7 +479,7 @@ All models exposed via `_PROXY_EXPOSED_MODELS` in `main.py`:
 | `ollama-cloud/deepseek-v4-flash` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; not yet validated |
 | `ollama-cloud/deepseek-v4-pro` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; **~70% 503 rate** — see §2.3; not recommended for critical tasks |
 | `ollama-cloud/minimax-m2.5` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; not yet validated |
-| `ollama-cloud/kimi-k2.6` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
+| `ollama-cloud/kimi-k2.7` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
 | `ollama-cloud/glm-5.1` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
 | `ollama-cloud/qwen3-coder-next` | LiteLLM conversion | Ollama cloud | Coding model; standard `max_tokens`; tool-use smoke PASS; **recommended** for $0 coding tasks |
 
@@ -508,7 +508,7 @@ for tool calls, including `message_delta` with `stop_reason: "tool_use"`.
 | `ollama-cloud/deepseek-v4-flash` | — | — | Not yet validated |
 | `ollama-cloud/deepseek-v4-pro` | PASS (streaming, 2026-05-10) | FAIL — live 503 (2026-05-11) | Reasoning model: `max_tokens ≥ 500`; see §2.3 |
 | `ollama-cloud/minimax-m2.5` | — | — | Not yet validated |
-| `ollama-cloud/kimi-k2.6` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | Reasoning model: `max_tokens ≥ 500` |
+| `ollama-cloud/kimi-k2.7` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | Reasoning model: `max_tokens ≥ 500` |
 | `ollama-cloud/glm-5.1` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | Reasoning model: `max_tokens ≥ 500` |
 
 Smoke harness: `utils/tool_use_smoke_test.py`

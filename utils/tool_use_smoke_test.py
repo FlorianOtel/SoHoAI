@@ -19,7 +19,7 @@ Turn 2: POST with 5 tool_result blocks in a single user message.
         → Expect final text referencing "42", "root", "644", "2024-03-15", and "17".
 
 Targets: ollama-cloud/qwen3-coder-next, ollama-cloud/deepseek-v4-pro,
-         ollama-cloud/kimi-k2.6, ollama-cloud/glm-5.1,
+         ollama-cloud/kimi-k2.7, ollama-cloud/glm-5.1,
          local/qwen3-4b-q6 (informational, non-gating).
 
 Exit code: 0 if all ollama-cloud targets PASS, non-zero if any fail.
@@ -636,7 +636,7 @@ def main():
     TARGETS = [
         ("ollama-cloud/qwen3-coder-next", False),
         ("ollama-cloud/deepseek-v4-pro", False),
-        ("ollama-cloud/kimi-k2.6", False),
+        ("ollama-cloud/kimi-k2.7", False),
         ("ollama-cloud/glm-5.1", False),
         ("local/qwen3-4b-q6", True),
     ]

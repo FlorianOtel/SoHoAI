@@ -397,13 +397,13 @@ Added clarification to `docs/RAG-strategy.md` §1.2 ("Exclusion filters") with a
 
 ### Problem
 
-Three production issues surfaced during Claude Code sessions using `claude-code-kimi-k2.6`:
+Three production issues surfaced during Claude Code sessions using `claude-code-kimi-k2.7`:
 
-1. **Haiku subagent leak**: CC internally auto-spawns `claude-haiku-4-5-20251001` for lightweight tasks even when the main model is `claude-code-kimi-k2.6` (an Ollama Cloud model). These Haiku requests hit `/v1/messages`, resolved to `None` in `_resolve_proxy_model()`, and were transparently forwarded to Anthropic — incurring unexpected Anthropic API cost while the user believed they were on a $0 Ollama session.
+1. **Haiku subagent leak**: CC internally auto-spawns `claude-haiku-4-5-20251001` for lightweight tasks even when the main model is `claude-code-kimi-k2.7` (an Ollama Cloud model). These Haiku requests hit `/v1/messages`, resolved to `None` in `_resolve_proxy_model()`, and were transparently forwarded to Anthropic — incurring unexpected Anthropic API cost while the user believed they were on a $0 Ollama session.
 
 2. **No backoff on Ollama Cloud timeouts**: When Ollama Cloud timed out (30s), the error was immediately surfaced to CC as HTTP 529. No retries. A transient slowness caused the whole task to fail.
 
-3. **Invalid `tool_use.id` from Ollama models**: Kimi K2.6 (and likely other Ollama models) returns tool call IDs in the format `functions.Bash:38` — containing `.` and `:` which violate Anthropic's required pattern `^[a-zA-Z0-9_-]+$`. Our LiteLLM path passed these IDs through unchanged. CC stored them in its conversation history. On a subsequent turn using an Anthropic-native model (transparent forward), Anthropic returned HTTP 400. Confirmed via session `/home/florian/.claude/projects/-mnt-nfs-Florian-Gin-AI-projects-claude-orchestra/31111cfa-ca5d-4b9a-a87c-b25ebb3fbeff.jsonl`.
+3. **Invalid `tool_use.id` from Ollama models**: Kimi K2.7 (and likely other Ollama models) returns tool call IDs in the format `functions.Bash:38` — containing `.` and `:` which violate Anthropic's required pattern `^[a-zA-Z0-9_-]+$`. Our LiteLLM path passed these IDs through unchanged. CC stored them in its conversation history. On a subsequent turn using an Anthropic-native model (transparent forward), Anthropic returned HTTP 400. Confirmed via session `/home/florian/.claude/projects/-mnt-nfs-Florian-Gin-AI-projects-claude-orchestra/31111cfa-ca5d-4b9a-a87c-b25ebb3fbeff.jsonl`.
 
 ### Solutions
 
@@ -448,8 +448,8 @@ Added `_sanitize_tool_use_id()` helper and `_TOOL_ID_VALID = re.compile(r'^[a-zA
 ### Problem
 
 Production logs (`/var/tmp/SoHoAI-gateway-timeout.log`) showed that the 30s initial
-timeout introduced in the proxy hardening commit was too aggressive for kimi-k2.6.
-kimi-k2.6 is a large reasoning model that regularly takes 30–60 s for complex coding
+timeout introduced in the proxy hardening commit was too aggressive for kimi-k2.7.
+kimi-k2.7 is a large reasoning model that regularly takes 30–60 s for complex coding
 tasks. As a result, every non-trivial request was guaranteed to fail attempt 1, then
 succeed on the 60s retry — adding +30s latency to every complex request and filling
 logs with spurious timeout errors.
@@ -584,7 +584,7 @@ Three code-quality issues accumulated during the `claude-code-*` alias scheme +
 | Model | context_window | max_tokens |
 |---|---|---|
 | `ollama-cloud/deepseek-v4-pro` | 1 000 000 | 32 000 |
-| `ollama-cloud/kimi-k2.6` | 256 000 | 32 000 |
+| `ollama-cloud/kimi-k2.7` | 256 000 | 32 000 |
 | `ollama-cloud/glm-5.1` | 200 000 | 32 000 |
 | `ollama-cloud/qwen3-coder-next` | 262 000 | 32 000 |
 

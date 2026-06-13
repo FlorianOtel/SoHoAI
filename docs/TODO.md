@@ -2,7 +2,7 @@
 title: "SoHoAI — Future work and deferred tasks"
 created_at: 2026-05-04--17-30
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (claude-code-kimi-k2.6)
+updated_by: Claude Code (claude-code-kimi-k2.7)
 updated_at: 2026-05-16--08-41
 context: >
   Tracks deferred implementation work that is understood, scoped, and intentionally
@@ -72,7 +72,7 @@ Required work in a future claude-orchestra branch:
 
    Affected models (all five):
    - `internal/qwen3-4b` → llama-server (Server 2)
-   - `ollama-cloud/deepseek-v4-pro`, `ollama-cloud/kimi-k2.6`, `ollama-cloud/glm-5.1`,
+   - `ollama-cloud/deepseek-v4-pro`, `ollama-cloud/kimi-k2.7`, `ollama-cloud/glm-5.1`,
      `ollama-cloud/qwen3-coder-next` → Ollama cloud (`https://ollama.com/v1`)
 
 ### Implementation note
@@ -195,7 +195,7 @@ Once the conversion was implemented, reliability per model is now being validate
   tasks only; parallel tool dispatch requires an ollama-cloud or Anthropic model.
 - **`ollama-cloud/deepseek-v4-pro`** and **`ollama-cloud/qwen3-coder-next`**: both
   support OpenAI function calling natively and are expected to be reliable for tool use.
-- **`ollama-cloud/kimi-k2.6`**: gating target in `utils/tool_use_smoke_test.py`; **PASS (streaming, 2026-05-10)**.
+- **`ollama-cloud/kimi-k2.7`**: gating target in `utils/tool_use_smoke_test.py`; **PASS (streaming, 2026-05-10)**.
 - **`ollama-cloud/glm-5.1`**: gating target in `utils/tool_use_smoke_test.py`; **PASS (streaming, 2026-05-10)**.
 
 ---
@@ -228,7 +228,7 @@ Validate Qwen3.5's tool-call reliability on representative claude-orchestra work
 ### What is done (2026-05-10)
 
 **Parallel tool calls — DONE.** `utils/tool_use_smoke_test.py --parallel` added and run successfully with 3 simultaneous tools (`get_file_size`, `get_file_owner`, `get_file_permissions`). Results:
-- All 4 ollama-cloud models (`qwen3-coder-next`, `deepseek-v4-pro`, `kimi-k2.6`, `glm-5.1`): **PASS** on both streaming and non-streaming legs.
+- All 4 ollama-cloud models (`qwen3-coder-next`, `deepseek-v4-pro`, `kimi-k2.7`, `glm-5.1`): **PASS** on both streaming and non-streaming legs.
 - `internal/qwen3-4b`: **INFO FAIL** parallel on both stream and no-stream (2026-05-15).
   - Single-tool sequential: **PASS** (stream + no-stream).
   - Parallel (5 tools): **FAIL** (stream + no-stream) — gets 1 `tool_use` block instead of 5.

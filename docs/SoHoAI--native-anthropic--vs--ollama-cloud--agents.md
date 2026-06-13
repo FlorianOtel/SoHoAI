@@ -34,7 +34,7 @@ context: >
 | Parent model | claude-opus-4-7 | claude-opus-4-7 |
 | Planner | claude-sonnet-4-6 (native) | ollama-cloud/deepseek-v4-pro (SoHoAI) |
 | Actor | claude-haiku-4-5-20251001 (native) | ollama-cloud/qwen3-coder-next (SoHoAI) |
-| Actor-heavy | — | ollama-cloud/kimi-k2.6 (SoHoAI) |
+| Actor-heavy | — | ollama-cloud/kimi-k2.7 (SoHoAI) |
 | Reviewer | claude-sonnet-4-6 (native) | claude-sonnet-4-6 (native) |
 
 Session A *implemented* the SoHoAI agent switch. Session B was the first real-world `/brain` run *after* deploying those changes — the first session where deepseek, qwen3, and kimi ran as actual subagents.
@@ -63,7 +63,7 @@ Session A *implemented* the SoHoAI agent switch. Session B was the first real-wo
 | Planner | ollama-cloud/deepseek-v4-pro | SoHoAI → Ollama Cloud | 1 | 755 s |
 | Planner-long | claude-sonnet-4-6 | Anthropic (via SoHoAI proxy) | 1 | 107 s |
 | Actor | ollama-cloud/qwen3-coder-next | SoHoAI → Ollama Cloud | 3 | 1,177 s total (avg 392 s) |
-| Actor-heavy | ollama-cloud/kimi-k2.6 | SoHoAI → Ollama Cloud | 2 | 1,007 s total |
+| Actor-heavy | ollama-cloud/kimi-k2.7 | SoHoAI → Ollama Cloud | 2 | 1,007 s total |
 | Reviewer | claude-sonnet-4-6 | Anthropic (via SoHoAI proxy) | 2 | 360 s total |
 | **Total subagent dispatches** | | | **13** | **3,555 s** |
 
@@ -122,9 +122,9 @@ Session A *implemented* the SoHoAI agent switch. Session B was the first real-wo
 
 21:15:02Z  Actor #1 (qwen3) — Steps 1+2: YAML + ctx-segment.sh      [159s]
 21:17:41Z  Actor #1 ends
-21:18:27Z  Actor-heavy #1 (kimi-k2.6) — Step 3: sohoai-live-cost.sh [681s]  ← 11.4 min
+21:18:27Z  Actor-heavy #1 (kimi-k2.7) — Step 3: sohoai-live-cost.sh [681s]  ← 11.4 min
 21:29:48Z  Actor-heavy #1 ends
-21:30:42Z  Actor-heavy #2 (kimi-k2.6) — Step 4: orchestra-block      [326s]  ← 5.4 min
+21:30:42Z  Actor-heavy #2 (kimi-k2.7) — Step 4: orchestra-block      [326s]  ← 5.4 min
 21:36:08Z  Actor-heavy #2 ends
 21:37:05Z  Actor #2 (qwen3) — FIX cycle: ctx-segment.sh bugs        [460s]  ← 7.7 min
 21:44:45Z  Actor #2 ends
@@ -215,7 +215,7 @@ The missing amount closely matches the Opus cache write and cache read costs:
 | Planner | deepseek-v4-pro | $0 | $0 | $0 | $0 | **$0** (SoHoAI) |
 | Planner-long | claude-sonnet-4-6 | $0.000 | $0.094 | $0.233 | $0.025 | **$0.352** |
 | Actor ×3 | qwen3-coder-next | $0 | $0 | $0 | $0 | **$0** (SoHoAI) |
-| Actor-heavy ×2 | kimi-k2.6 | $0 | $0 | $0 | $0 | **$0** (SoHoAI) |
+| Actor-heavy ×2 | kimi-k2.7 | $0 | $0 | $0 | $0 | **$0** (SoHoAI) |
 | Reviewer ×2 | claude-sonnet-4-6 | $0.001 | $0.222 | $0.685 | $0.715 | **$1.623** |
 | Explore ×3 | claude-haiku-4-5 | $0.002 | $0.057 | $0.296 | $0.278 | **$0.633** |
 | **Total** | | **$0.005** | **$16.209** | **$57.617** | **$9.831** | **$83.662** |
@@ -281,7 +281,7 @@ The fix committed to claude-orchestra prevents Ollama Cloud model routing from a
 |---|---|---|---|
 | Planner | 138 s (Sonnet) | 755 s (deepseek-v4-pro) | **5.5×** |
 | Actor per-dispatch avg | 77 s (Haiku) | 392 s (qwen3-coder-next) | **5.1×** |
-| Actor-heavy per-dispatch | — | 503 s avg (kimi-k2.6) | — |
+| Actor-heavy per-dispatch | — | 503 s avg (kimi-k2.7) | — |
 | Explore per-dispatch avg | 16 s (Haiku) | 50 s (Haiku) | 3.1× |
 | Reviewer per-dispatch avg | 167 s (Sonnet, 1 pass) | 180 s (Sonnet, avg 2 passes) | comparable |
 
@@ -289,11 +289,11 @@ The fix committed to claude-orchestra prevents Ollama Cloud model routing from a
 
 1. **LiteLLM proxy hop**: Requests route through the local SoHoAI gateway at `http://192.168.1.93:8000` before reaching Ollama Cloud's `https://ollama.com/v1`. Each request pays two network hops and serialization overhead.
 
-2. **Ollama Cloud cold-start**: Ollama Cloud Pro does not guarantee a warm model instance. deepseek-v4-pro and kimi-k2.6 are large models (100B+ parameters); a cold start on Ollama Cloud can account for 60–120 s of the observed latency.
+2. **Ollama Cloud cold-start**: Ollama Cloud Pro does not guarantee a warm model instance. deepseek-v4-pro and kimi-k2.7 are large models (100B+ parameters); a cold start on Ollama Cloud can account for 60–120 s of the observed latency.
 
 3. **No Anthropic prompt cache**: LiteLLM strips `cache_control` markers (Anthropic-specific header extension). Every request to SoHoAI models is a full cold-context inference — no cache reuse, no latency benefit from prior turns. This particularly hurts the Planner which processes a large RESEARCH.md + system prompt on every token.
 
-4. **Model throughput**: deepseek-v4-pro and kimi-k2.6 generate at lower tokens/second than Anthropic's hosted Haiku. Even discounting latency, raw generation time for equivalent output is longer.
+4. **Model throughput**: deepseek-v4-pro and kimi-k2.7 generate at lower tokens/second than Anthropic's hosted Haiku. Even discounting latency, raw generation time for equivalent output is longer.
 
 The 1,611 s difference in session wall time between A (3,039 s) and B (4,650 s) is almost entirely explained by SoHoAI model latency (deepseek 617 s extra + kimi 1,007 s + qwen3 extra ~900 s vs Haiku baseline).
 

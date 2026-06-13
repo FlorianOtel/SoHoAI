@@ -1080,7 +1080,7 @@ _TOOL_ID_VALID = re.compile(r'^[a-zA-Z0-9_-]+$')
 def _sanitize_tool_use_id(raw_id: str | None) -> str:
     """Ensure a tool_use id satisfies Anthropic's '^[a-zA-Z0-9_-]+$' pattern.
 
-    Some non-Anthropic models (e.g. Ollama kimi-k2.6) return IDs like
+    Some non-Anthropic models (e.g. Ollama kimi-k2.7) return IDs like
     'functions.Bash:38' containing '.' and ':'.  Replace invalid chars with '_'
     so the ID stays recognisable and round-trips deterministically through CC's
     conversation history.  Falls back to a fresh UUID-based ID if raw_id is
@@ -1573,7 +1573,7 @@ async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResp
     Reliability per provider:
     - `ollama-cloud/qwen3-coder-next` and `ollama-cloud/deepseek-v4-pro`: native
       OpenAI function calling, expected reliable.
-    - `ollama-cloud/kimi-k2.6` and `ollama-cloud/glm-5.1`: untested.
+    - `ollama-cloud/kimi-k2.7` and `ollama-cloud/glm-5.1`: untested.
     - `local/qwen3-4b-q6`: tool-call JSON reliability at Q6_K_XL is unvalidated;
       may need grammar-constrained generation as a fallback. See docs/TODO.md.
 

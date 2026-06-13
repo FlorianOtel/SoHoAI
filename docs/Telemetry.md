@@ -2,7 +2,7 @@
 title: "SoHoAI Usage and Billing Telemetry Pipeline"
 created_at: 2026-05-06--00-00
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (claude-code-kimi-k2.6)
+updated_by: Claude Code (claude-code-kimi-k2.7)
 updated_at: 2026-05-16--08-41
 context: >
   Cross-project design document for SoHoAI Stage 1 telemetry implementation.

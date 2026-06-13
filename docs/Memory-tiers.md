@@ -2,7 +2,7 @@
 title: "SoHoAI — Memory tiers"
 created_at: 2026-05-05--16-38
 created_by: Claude Code (Claude Haiku 4.5)
-updated_by: Claude Code (claude-code-kimi-k2.6)
+updated_by: Claude Code (claude-code-kimi-k2.7)
 updated_at: 2026-05-16--08-41
 context: >
   Three-tier conversation memory architecture for SoHoAI: Redis short-term cache,
