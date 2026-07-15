@@ -2,8 +2,8 @@
 title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-06-11--20-30
+updated_by: Claude Code (Claude Sonnet 5)
+updated_at: 2026-07-15--15-00
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -22,6 +22,8 @@ context: >
   Update 2026-05-16: provider prefix renamed internal→local; two local models
   (qwen3-4b-q6 default resident, qwen3-9b-q4 hot-swap via llama-swap); geometric
   backoff now covers all non-Anthropic models (was ollama-cloud only).
+  Update 2026-07-15: interactive default renamed claude-sonnet-4-6 →
+  claude-sonnet-5 (SoHoAI-config.yaml); routing/pricing tables refreshed.
 ---
 
 # SoHoAI model routing — Cline and Claude Code integration
@@ -33,13 +35,13 @@ summarization. The caller manages its own conversation history.
 
 ## 0. LLM routing overview
 
-SoHoAI routes conversation inference across two model tiers: **external** (Claude Sonnet 4.6 via Anthropic API, primary cloud default) and **local** (Qwen3.5-4B Q6_K_XL and Qwen3.5-9B Q4_K_XL on Server 2 via llama-swap, fallback/summarization). Routing logic is implemented in `router.py`. The default is external (Sonnet 4.6); if Anthropic becomes unreachable, the router automatically falls back to local Qwen. Rolling summarization at ~100K tokens uses local/qwen3-9b-q4 to keep per-token costs predictable and persists summaries to SQLite for cold-resume recovery.
+SoHoAI routes conversation inference across two model tiers: **external** (Claude Sonnet 5 via Anthropic API, primary cloud default) and **local** (Qwen3.5-4B Q6_K_XL and Qwen3.5-9B Q4_K_XL on Server 2 via llama-swap, fallback/summarization). Routing logic is implemented in `router.py`. The default is external (Sonnet 5); if Anthropic becomes unreachable, the router automatically falls back to local Qwen. Rolling summarization at ~100K tokens uses local/qwen3-9b-q4 to keep per-token costs predictable and persists summaries to SQLite for cold-resume recovery.
 
-**External (Sonnet 4.6) path** goes through LiteLLM with prompt caching enabled — cache_control markers are injected on the system message (long-lived anchor) and on `messages[-2]` (rolling prefix anchor), reducing input cost by ~90% on cache hits. Prompt caching is active only on the Anthropic-compatible path; the local path uses Anthropic prompt caching instead.
+**External (Sonnet 5) path** goes through LiteLLM with prompt caching enabled — cache_control markers are injected on the system message (long-lived anchor) and on `messages[-2]` (rolling prefix anchor), reducing input cost by ~90% on cache hits. Prompt caching is active only on the Anthropic-compatible path; the local path uses Anthropic prompt caching instead.
 
 **Local (Qwen3.5-4B / Qwen3.5-9B) path** bypasses LiteLLM and calls llama-server's native `/completion` endpoint directly, which is mandatory to pass `slot_id` for KV cache targeting. This path is used only on fallback (Anthropic down), for rolling summarization operations, and for background/offline tasks. Rolling summarization erases the KV slot before calling Qwen, and both summarization and the subsequent main inference start cold sequentially on the same slot. Prompt caching is irrelevant for local inference (no API cost).
 
-**Design rationale**: Sonnet 4.6 is now the interactive default (2026-04-22 flip). At ~50–100 turns/day for a 4-user family, Sonnet with prompt caching costs ~$30–60/mo — tolerable — while delivering substantially better reasoning and tool-use fidelity than a 4B local model. Qwen's role is as a "specialized worker" for fallback and summarization without removing the infrastructure.
+**Design rationale**: Sonnet 5 is now the interactive default (2026-04-22 flip). At ~50–100 turns/day for a 4-user family, Sonnet with prompt caching costs ~$30–60/mo — tolerable — while delivering substantially better reasoning and tool-use fidelity than a 4B local model. Qwen's role is as a "specialized worker" for fallback and summarization without removing the infrastructure.
 
 **LiteLLM stays as the routing + fallback layer**, handling OpenAI/Anthropic API differences and executing the fallback chain `external → local` (reversed direction from pre-flip implementation). **Local bypasses LiteLLM** — native `/completion` is required to pass `slot_id` for KV cache targeting. The branch point is at `main.py:405-415`.
 
@@ -77,7 +79,7 @@ picks the bare-name YAML entry that carries `ANTHROPIC_API_KEY` for authenticati
 | `local/qwen3-4b-q6` | `local/qwen3-4b-q6` | LiteLLM | dummy key | 131,072 |
 | `local/qwen3-9b-q4` | `local/qwen3-9b-q4` | LiteLLM | dummy key | 262,144 |
 | `anthropic/claude-haiku-4-5` | `claude-haiku-4-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 200,000 |
-| `anthropic/claude-sonnet-4-6` | `claude-sonnet-4-6` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
+| `anthropic/claude-sonnet-5` | `claude-sonnet-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `anthropic/claude-opus-4-7` | `claude-opus-4-7` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `anthropic/claude-fable-5` | `claude-fable-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `ollama-cloud/deepseek-v4-flash` | `ollama-cloud/deepseek-v4-flash` | LiteLLM | Ollama API key | — |
@@ -94,12 +96,12 @@ duplication risk. This differs from the old `GET /v1/models` endpoint: that endp
 already has those IDs in its native built-in list and would show each model twice if
 the gateway also returned them.
 
-`_resolve_proxy_model()` also accepts legacy bare names (`qwen3-4b`, `claude-sonnet-4-6`
+`_resolve_proxy_model()` also accepts legacy bare names (`qwen3-4b`, `claude-sonnet-5`
 etc.) via `_LEGACY_ALIASES` for backward compat with existing Cline configs.
 
 **Model name normalization** (2026-05-22): `_resolve_proxy_model()` now strips CC
 context-window annotations (`[1m]`) and Anthropic date suffixes (`-20251001`) before
-lookup, so `claude-sonnet-4-6[1m]` and `claude-haiku-4-5-20251001` both resolve
+lookup, so `claude-sonnet-5[1m]` and `claude-haiku-4-5-20251001` both resolve
 correctly. The `anthropic_messages` and `count_tokens` endpoints also strip `[…]` from
 the model name before forwarding to `api.anthropic.com` (Anthropic only accepts bare
 names; the annotation caused a 404 that blocked CC's auto-mode Bash safety classifier).
@@ -117,7 +119,7 @@ In Cline VSCode settings, choose **LiteLLM** as the provider (not "OpenAI Compat
 ```
 Base URL : http://192.168.1.93:8000/proxy
 API Key  : sohoai-local  (any non-empty string)
-Model    : qwen3-4b  (local, 131K ctx)  OR  claude-sonnet-4-6  (cloud, 200K ctx)
+Model    : qwen3-4b  (local, 131K ctx)  OR  claude-sonnet-5  (cloud, 1M ctx)
 ```
 
 API key must be non-empty — Cline's client-side gate rejects an empty string regardless
@@ -474,7 +476,7 @@ All models exposed via `_PROXY_EXPOSED_MODELS` in `main.py`:
 |----------|------|---------|-------|
 | `local/qwen3-4b-q6` | LiteLLM conversion | llama-server, Server 2 | $0/session; tool-use smoke PASS (Gemma); post-swap validation pending |
 | `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | Safest Actor-tier choice; ~$0.01/session |
-| `anthropic/claude-sonnet-4-6` | Transparent forward | Anthropic API | Default interactive model |
+| `anthropic/claude-sonnet-5` | Transparent forward | Anthropic API | Default interactive model |
 | `anthropic/claude-opus-4-7` | Transparent forward | Anthropic API | Brain tier in /brain pipeline |
 | `ollama-cloud/deepseek-v4-flash` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; not yet validated |
 | `ollama-cloud/deepseek-v4-pro` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; **~70% 503 rate** — see §2.3; not recommended for critical tasks |
@@ -570,7 +572,7 @@ model = "claude-*"        →  _anthropic_messages_forward()   (transparent rela
 model = "local/qwen3-*"   →  _anthropic_messages_litellm()  (LiteLLM conversion)
 ```
 
-LiteLLM's `/anthropic` passthrough endpoint has no such branching — it can only forward to Anthropic. It cannot route local models. SoHoAI's implementation handles both paths behind the same `ANTHROPIC_BASE_URL`, which is what allows `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-7`, and `local/qwen3-4b-q6` to all be valid `model:` values in agent frontmatter while sharing one endpoint configuration in `settings.json`.
+LiteLLM's `/anthropic` passthrough endpoint has no such branching — it can only forward to Anthropic. It cannot route local models. SoHoAI's implementation handles both paths behind the same `ANTHROPIC_BASE_URL`, which is what allows `claude-haiku-4-5`, `claude-sonnet-5`, `claude-opus-4-7`, and `local/qwen3-4b-q6` to all be valid `model:` values in agent frontmatter while sharing one endpoint configuration in `settings.json`.
 
 ### 5.3 Observation regarding caching — the one finding worth noting
 
@@ -612,21 +614,21 @@ becomes available (account upgrade, region change), no proxy changes are needed.
 | Model | Input (uncached) | Input (cached read) | Output |
 |---|---|---|---|
 | Opus 4.7 | $15/MTok | $1.50/MTok | $75/MTok |
-| Sonnet 4.6 | $3/MTok | $0.30/MTok | $15/MTok |
+| Sonnet 5 | $2/MTok | $0.20/MTok | $10/MTok |
 | Haiku 4.5 | $0.80/MTok | $0.08/MTok | $4/MTok |
 | Qwen3.5 (local) | $0 | $0 | $0 |
 
 ### /duo session cost breakdown (typical task, 5 parent turns + 1 actor execution)
 
-**Parent (Sonnet 4.6) — transparent forward, prompt caching active**
+**Parent (Sonnet 5) — transparent forward, prompt caching active**
 
 | Turn | Input (system+history) | Cache hit? | Effective input cost |
 |---|---|---|---|
-| 1 (cold) | ~30K tokens | ❌ | 30K × $3/MTok = $0.090 |
-| 2 | ~32K (30K cached + 2K new) | ✅ 30K cached | 2K×$3 + 30K×$0.30 = $0.015 |
-| 3–5 | ~34K (growing) | ✅ rolling cache | ~$0.015/turn |
-| Output | ~500 tok/turn × 5 | — | 2.5K × $15/MTok = $0.038 |
-| **Parent total** | | | **~$0.18** |
+| 1 (cold) | ~30K tokens | ❌ | 30K × $2/MTok = $0.060 |
+| 2 | ~32K (30K cached + 2K new) | ✅ 30K cached | 2K×$2 + 30K×$0.20 = $0.010 |
+| 3–5 | ~34K (growing) | ✅ rolling cache | ~$0.010/turn |
+| Output | ~500 tok/turn × 5 | — | 2.5K × $10/MTok = $0.025 |
+| **Parent total** | | | **~$0.13** |
 
 **Actor (Haiku 4.5) — transparent forward, narrower context**
 
@@ -637,7 +639,7 @@ becomes available (account upgrade, region change), no proxy changes are needed.
 | Output | ~1K tok × 2 | — | 2K × $4/MTok = $0.008 |
 | **Actor total** | | | **~$0.015** |
 
-**Session total (approx)**: **~$0.20**
+**Session total (approx)**: **~$0.14**
 
 **Without transparent forward (broken LiteLLM path, pre-fix)**:
 - cache_control stripped → every turn cold → 30K × $3/MTok × 5 = $0.45 input alone

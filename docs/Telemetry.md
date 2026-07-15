@@ -2,8 +2,8 @@
 title: "SoHoAI Usage and Billing Telemetry Pipeline"
 created_at: 2026-05-06--00-00
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (claude-code-kimi-k2.7)
-updated_at: 2026-05-16--08-41
+updated_by: Claude Code (Claude Sonnet 5)
+updated_at: 2026-07-15--15-00
 context: >
   Cross-project design document for SoHoAI Stage 1 telemetry implementation.
   Goal: Add a complete usage and billing telemetry pipeline to SoHoAI so that
@@ -37,7 +37,7 @@ Phases:
 **Post-review fix 1 (2026-05-06):** `_anthropic_messages_forward()` (raw httpx path, bypasses
 LiteLLM) initially omitted cache token costs. Fixed in commit `1a15abe`:
 versioned model IDs have the date suffix stripped before `get_model_info()` lookup
-(e.g. `claude-sonnet-4-6-20250219` → `claude-sonnet-4-6`), then
+(e.g. `claude-sonnet-5-20250219` → `claude-sonnet-5`), then
 `cache_creation_input_token_cost` and `cache_read_input_token_cost` rates are fetched
 and applied to the extracted cache token counts. Without this, heavy-caching orchestra
 sessions (typical: ~1.5M cache_read tokens) would undercount cost by ~$0.45/session
@@ -112,7 +112,7 @@ CREATE TABLE usage_events (
   user_id              TEXT,                        -- nullable; from request user field
   chat_id              TEXT,                        -- nullable; SoHoAI chat_id if applicable
   orchestra_session_id TEXT,                        -- nullable; from X-Orchestra-Session-ID header
-  model                TEXT NOT NULL,               -- normalized model id (e.g. claude-sonnet-4-6)
+  model                TEXT NOT NULL,               -- normalized model id (e.g. claude-sonnet-5)
   input_tokens         INTEGER NOT NULL DEFAULT 0,
   output_tokens        INTEGER NOT NULL DEFAULT 0,
   cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
@@ -141,7 +141,7 @@ CREATE INDEX idx_usage_events_model_created ON usage_events(model, created_at);
 - **user_id**: User identifier from request `user` field (optional; nullable for stateless proxy calls)
 - **chat_id**: SoHoAI's internal chat ID, if conversation is stored (NULL for /v1/messages passthrough)
 - **orchestra_session_id**: Session directory basename from X-Orchestra-Session-ID header (e.g., `20260506T154456Z-1605029`); NULL if not an orchestra request
-- **model**: Normalized model identifier (requested model normalized to canonical form, e.g., claude-sonnet-4-6)
+- **model**: Normalized model identifier (requested model normalized to canonical form, e.g., claude-sonnet-5)
 - **input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens**: From LiteLLM response usage object
 - **cost_usd**: Floating-point cost in USD, calculated via `litellm.completion_cost(completion_response=response)` (§4)
 - **provider**: Provider enum (anthropic, openai, google, local) — allows filtering by vendor
@@ -294,7 +294,7 @@ GET /v1/usage/stats?user=florian&since=2026-04-06&group_by=model
 GET /v1/usage/stats?session_id=20260506T154456Z-1605029
 
 # Cost breakdown by source for a specific model
-GET /v1/usage/stats?model=claude-sonnet-4-6&group_by=source
+GET /v1/usage/stats?model=claude-sonnet-5&group_by=source
 ```
 
 ### Response
@@ -315,7 +315,7 @@ GET /v1/usage/stats?model=claude-sonnet-4-6&group_by=source
     "cache_hit_rate": 0.0
   },
   "by_model": [
-    {"model": "claude-sonnet-4-6", "requests": 100, "input_tokens": 400000, "output_tokens": 80000, "cache_creation_tokens": 0, "cache_read_tokens": 0, "cost_usd": 1.00},
+    {"model": "claude-sonnet-5", "requests": 100, "input_tokens": 400000, "output_tokens": 80000, "cache_creation_tokens": 0, "cache_read_tokens": 0, "cost_usd": 1.00},
     {"model": "qwen3-4b", "requests": 27, "input_tokens": 50280, "output_tokens": 9432, "cache_creation_tokens": 0, "cache_read_tokens": 0, "cost_usd": 0.0}
   ],
   "by_source": [
@@ -448,7 +448,7 @@ urgent pricing.yaml update is needed.
 | Model | Input (per 1M) | Output (per 1M) | Cache Create (per 1M) | Cache Read (per 1M) | Source |
 |-------|---|---|---|---|---|
 | claude-opus-4-7 | $15.00 | $75.00 | $18.75 | $1.50 | pricing.yaml + LiteLLM |
-| claude-sonnet-4-6 | $3.00 | $15.00 | $3.75 | $0.30 | pricing.yaml + LiteLLM |
+| claude-sonnet-5 | $2.00 | $10.00 | $2.50 | $0.20 | LiteLLM |
 | claude-sonnet-4-5 | $3.00 | $15.00 | $3.75 | $0.30 | pricing.yaml (legacy alias) |
 | claude-haiku-4-5 | $1.00 | $5.00 | $1.25 | $0.10 | pricing.yaml + LiteLLM |
 

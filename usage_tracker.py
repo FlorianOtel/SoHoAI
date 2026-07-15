@@ -88,7 +88,7 @@ class UsageTracker(CustomLogger):
             if not provider:
                 provider = kwargs.get("custom_llm_provider")
             if not provider:
-                # Fallback: parse model string prefix (e.g., "anthropic/claude-sonnet-4-6" → "anthropic")
+                # Fallback: parse model string prefix (e.g., "anthropic/claude-sonnet-5" → "anthropic")
                 if "/" in model:
                     provider = model.split("/")[0]
                 elif any(alias in model for alias in ["local", "gemma"]):

@@ -2,8 +2,8 @@
 title: "SoHoAI — Project Context & Design Reference"
 created_at: 20260407-000000
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 4.6)
-updated_at: 2026-05-27--14-30
+updated_by: Claude Code (Claude Sonnet 5)
+updated_at: 2026-07-15--15-00
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   Project instructions and design decisions for Claude Code;
@@ -55,7 +55,7 @@ for family photos and RL training data collection from chat interactions.
 ```
                          Anthropic API (cloud)
                          ┌───────────────────────────────┐
-                ─primary─→│ Claude Sonnet 4.6            │
+                ─primary─→│ Claude Sonnet 5              │
                          │ (prompt caching: system +     │
                          │  rolling prefix breakpoints)  │
                          └───────────────────────────────┘

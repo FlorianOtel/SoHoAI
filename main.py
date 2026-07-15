@@ -228,7 +228,7 @@ async def lifespan(app: FastAPI):
         resp = await app.state.router.complete(
             messages=[{"role": "user", "content": prompt}],
             model=_variant_model,
-            force_cloud=(_variant_model == "anthropic/claude-sonnet-4-6"),
+            force_cloud=(_variant_model == "anthropic/claude-sonnet-5"),
             stream=False,
         )
         return resp.choices[0].message.content.strip()
@@ -843,7 +843,7 @@ def _build_proxy_tables(cfg: dict) -> tuple[dict[str, str], frozenset[str], dict
             litellm_routed.add(name)
             legacy[name[len("ollama-cloud/"):]] = name
         else:
-            # Bare name (e.g. claude-sonnet-4-6) — internal alias; backward-compat legacy entry
+            # Bare name (e.g. claude-sonnet-5) — internal alias; backward-compat legacy entry
             legacy[name] = name
 
     # "qwen3-4b" is a short alias that cannot be derived from the config model_name;
@@ -888,8 +888,8 @@ def _resolve_proxy_model(name: str | None) -> str | None:
 
     Accepts any of:
       - bare public name:   "qwen3-4b", "ollama-cloud/deepseek-v4-pro"
-      - provider-prefixed:  "openai/qwen3-4b", "anthropic/claude-sonnet-4-6", "ollama-cloud/deepseek-v4-pro"
-      - legacy bare names:  "claude-sonnet-4-6" (backward compat)
+      - provider-prefixed:  "openai/qwen3-4b", "anthropic/claude-sonnet-5", "ollama-cloud/deepseek-v4-pro"
+      - legacy bare names:  "claude-sonnet-5" (backward compat)
       - local aliases:      "local", "auto"  (for direct testing)
     Returns the internal router alias or None if unknown.
     """
@@ -920,7 +920,7 @@ def _resolve_proxy_model(name: str | None) -> str | None:
         return name
     # Normalize CC context-window annotations ("[1m]") and Anthropic date suffixes
     # ("-20251001"), then retry. This handles:
-    #   "claude-sonnet-4-6[1m]"      → "claude-sonnet-4-6"
+    #   "claude-sonnet-5[1m]"        → "claude-sonnet-5"
     #   "claude-haiku-4-5-20251001"  → "claude-haiku-4-5"
     normalized = re.sub(r"\[.*?\]$", "", name)
     normalized = re.sub(r"-\d{8}$", "", normalized)
@@ -1176,7 +1176,7 @@ async def anthropic_messages(req: Request):
             )
 
     # Strip provider prefix and CC context-window annotations before forwarding.
-    # Anthropic API only accepts bare model names like "claude-sonnet-4-6".
+    # Anthropic API only accepts bare model names like "claude-sonnet-5".
     # CC appends e.g. "[1m]" to distinguish 1M-context variants in its UI — that
     # annotation is not a real model ID and causes a 404 from api.anthropic.com.
     api_model = public_model or ""
@@ -1326,7 +1326,7 @@ async def _anthropic_messages_forward(
         source = "orchestra" if orchestra_session_id else "claude_code_native"
 
         # Calculate cost via get_model_info() — covers base + cache token rates.
-        # Versioned model IDs (e.g. claude-sonnet-4-6-20250219) are not in
+        # Versioned model IDs (e.g. claude-sonnet-5-20250219) are not in
         # litellm's model map, so strip the trailing date suffix first.
         import re as _re
         _normalized_model = _re.sub(r"-\d{8}$", "", model)

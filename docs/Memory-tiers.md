@@ -2,8 +2,8 @@
 title: "SoHoAI — Memory tiers"
 created_at: 2026-05-05--16-38
 created_by: Claude Code (Claude Haiku 4.5)
-updated_by: Claude Code (claude-code-kimi-k2.7)
-updated_at: 2026-05-16--08-41
+updated_by: Claude Code (Claude Sonnet 5)
+updated_at: 2026-07-15--15-00
 context: >
   Three-tier conversation memory architecture for SoHoAI: Redis short-term cache,
   SQLite long-term persistence, and GPU KV cache for efficient inference on subsequent turns.
@@ -102,7 +102,7 @@ Before this design, summaries were held in Redis only. A 24h Redis TTL expiry me
 
 ### Prompt caching vs. summarization trade-off
 
-Anthropic's prompt caching on Sonnet 4.6 maintains a rolling prefix cache (system message + `messages[-2]`) that grows more efficient with each turn (~10× input cost reduction on cache hits). Each `maybe_summarize()` event rewrites Redis (summary replaces old turns), which invalidates the rolling prefix cache on the next turn (the cache_control token resets). At the 100K-token threshold, summarization fires roughly once per ~50-turn chat. The cost spike on the summary turn (~$0.05) is amortized over the ongoing savings from a smaller, faster-to-cache prefix on all subsequent turns. The threshold (100K) is deliberately aligned with the cloud-routing threshold (`complexity_threshold_tokens` in `SoHoAI-config.yaml`), so both events fire in lockstep — the summarization never catches the system by surprise.
+Anthropic's prompt caching on Sonnet 5 maintains a rolling prefix cache (system message + `messages[-2]`) that grows more efficient with each turn (~10× input cost reduction on cache hits). Each `maybe_summarize()` event rewrites Redis (summary replaces old turns), which invalidates the rolling prefix cache on the next turn (the cache_control token resets). At the 100K-token threshold, summarization fires roughly once per ~50-turn chat. The cost spike on the summary turn (~$0.05) is amortized over the ongoing savings from a smaller, faster-to-cache prefix on all subsequent turns. The threshold (100K) is deliberately aligned with the cloud-routing threshold (`complexity_threshold_tokens` in `SoHoAI-config.yaml`), so both events fire in lockstep — the summarization never catches the system by surprise.
 
 ---
 

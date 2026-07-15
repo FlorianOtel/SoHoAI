@@ -5,7 +5,7 @@ Routing strategy (post 2026-04-22 flip):
   1. If user explicitly requests a model → use it
   2. If force_cloud flag → use cloud (kept for API compat; cloud is now default anyway)
   3. If message context is very long → use cloud (better context handling)
-  4. Default → external (Sonnet 4.6, cloud); LiteLLM falls back to internal
+  4. Default → external (Sonnet 5, cloud); LiteLLM falls back to internal
      (local Qwen3.5 via llama-server) if the external call fails.
 
 LiteLLM handles the actual fallback retries; this module decides
@@ -81,7 +81,7 @@ class SmartRouter:
 
         self.routing_config = self.config.get("routing", {})
         self.default_model = self.routing_config.get("default_model", "local/qwen3-4b-q6")
-        self.cloud_model = self.routing_config.get("cloud_model", "anthropic/claude-sonnet-4-6")
+        self.cloud_model = self.routing_config.get("cloud_model", "anthropic/claude-sonnet-5")
         self.complexity_threshold = self.routing_config.get(
             "complexity_threshold_tokens", 2000
         )
