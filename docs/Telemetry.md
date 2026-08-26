@@ -447,7 +447,7 @@ urgent pricing.yaml update is needed.
 
 | Model | Input (per 1M) | Output (per 1M) | Cache Create (per 1M) | Cache Read (per 1M) | Source |
 |-------|---|---|---|---|---|
-| claude-opus-4-7 | $15.00 | $75.00 | $18.75 | $1.50 | pricing.yaml + LiteLLM |
+| claude-opus-5 | $5.00 | $25.00 | $6.25 | $0.50 | pricing.yaml + LiteLLM |
 | claude-sonnet-5 | $2.00 | $10.00 | $2.50 | $0.20 | LiteLLM |
 | claude-sonnet-4-5 | $3.00 | $15.00 | $3.75 | $0.30 | pricing.yaml (legacy alias) |
 | claude-haiku-4-5 | $1.00 | $5.00 | $1.25 | $0.10 | pricing.yaml + LiteLLM |

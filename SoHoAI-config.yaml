@@ -99,12 +99,12 @@ model_list:
       max_input_tokens: 999000
       context_window: 1000000
 
-  - model_name: "anthropic/claude-opus-4-7"
+  - model_name: "anthropic/claude-opus-5"
     litellm_params:
-      model: anthropic/claude-opus-4-7
+      model: anthropic/claude-opus-5
     model_info:
-      id: "anthropic/claude-opus-4-7"
-      description: "Claude Opus 4.7 — CC transparent forward. No API key configured."
+      id: "anthropic/claude-opus-5"
+      description: "Claude Opus 5 — CC transparent forward. No API key configured."
       max_tokens: 1000000
       max_input_tokens: 999000
       context_window: 1000000
@@ -134,9 +134,9 @@ model_list:
       model: anthropic/claude-sonnet-5
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  - model_name: claude-opus-4-7
+  - model_name: claude-opus-5
     litellm_params:
-      model: anthropic/claude-opus-4-7
+      model: anthropic/claude-opus-5
       api_key: os.environ/ANTHROPIC_API_KEY
     model_info:
       context_window: 1000000
@@ -183,17 +183,29 @@ model_list:
       max_input_tokens: 1000000
       context_window: 1000000
 
-  - model_name: "ollama-cloud/kimi-k2.7"
+  - model_name: "ollama-cloud/kimi-k2.7-code"
     litellm_params:
-      model: openai/kimi-k2.7:cloud
+      model: openai/kimi-k2.7-code:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
     model_info:
-      id: "ollama-cloud/kimi-k2.7"
-      description: "Kimi K2.7 — Ollama Cloud"
+      id: "ollama-cloud/kimi-k2.7-code"
+      description: "Kimi K2.7 Code — Ollama Cloud"
       max_tokens: 32000
       max_input_tokens: 256000
       context_window: 256000
+
+  - model_name: "ollama-cloud/kimi-k3"
+    litellm_params:
+      model: openai/kimi-k3:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      id: "ollama-cloud/kimi-k3"
+      description: "Kimi K3 — Ollama Cloud"
+      max_tokens: 32000
+      max_input_tokens: 1000000
+      context_window: 1000000
 
   - model_name: "ollama-cloud/glm-5.2"
     litellm_params:
@@ -207,25 +219,13 @@ model_list:
       max_input_tokens: 1000000 
       context_window: 1000000
 
-  - model_name: "ollama-cloud/qwen3-coder-next"
-    litellm_params:
-      model: openai/qwen3-coder-next:cloud
-      api_base: https://ollama.com/v1
-      api_key: os.environ/OLLAMA_API_KEY
-    model_info:
-      id: "ollama-cloud/qwen3-coder-next"
-      description: "Qwen3 Coder Next — Ollama Cloud"
-      max_tokens: 32000
-      max_input_tokens: 262000
-      context_window: 262000
-
 
 # -- Routing Policy ------------------------------------------------------------
 routing:
   default_model: "local/qwen3-4b-q6"
-  #### Fallback chains are now implemented via "router_settings" above. Leaving this commented anyway. 
-  # Fallback for Ollama-cloud when throttled 
-  # fallback_chain: ["anthropic/claude-sonnet-5", "ollama-cloud/kimi-k2.7"]
+  #### Fallback chains are now implemented via "router_settings" above. Leaving this commented anyway.
+  # Fallback for Ollama-cloud when throttled
+  # fallback_chain: ["anthropic/claude-sonnet-5", "ollama-cloud/kimi-k3"]
   # Route to cloud when context exceeds threshold.
   # Hard limit: -c 220048 / 2 = 110024 tokens per slot. At 100K we route to cloud,
   # leaving ~10K headroom for output (default max_tokens=1024 + safety margin).
@@ -240,10 +240,10 @@ router_settings:
   routing_strategy: simple-shuffle
   # Each item in this list is an independent fallback rule
   fallbacks:
-    - "ollama-cloud/minimax-m3": ["anthropic/claude-opus-4-7"]
-    - "ollama-cloud/kimi-k2.7": ["anthropic/claude-sonnet-5"]
+    - "ollama-cloud/minimax-m3": ["anthropic/claude-opus-5"]
+    - "ollama-cloud/kimi-k3": ["anthropic/claude-sonnet-5"]
+    - "ollama-cloud/kimi-k2.7-code": ["anthropic/claude-sonnet-5"]
     - "ollama-cloud/glm-5.2": ["anthropic/claude-sonnet-5"]
-    - "ollama-cloud/qwen3-coder-next": ["anthropic/claude-haiku-4-5"]
 
 #### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
 rag:

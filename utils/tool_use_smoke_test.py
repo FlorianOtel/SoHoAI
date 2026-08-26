@@ -18,9 +18,13 @@ Turn 1: POST with 5 tools (get_file_size, get_file_owner, get_file_permissions,
 Turn 2: POST with 5 tool_result blocks in a single user message.
         → Expect final text referencing "42", "root", "644", "2024-03-15", and "17".
 
-Targets: ollama-cloud/qwen3-coder-next, ollama-cloud/deepseek-v4-pro,
-         ollama-cloud/kimi-k2.7, ollama-cloud/glm-5.1,
+Targets: ollama-cloud/deepseek-v4-pro, ollama-cloud/kimi-k2.7-code,
+         ollama-cloud/kimi-k3, ollama-cloud/glm-5.1,
          local/qwen3-4b-q6 (informational, non-gating).
+
+Note: ollama-cloud/qwen3-coder-next was retired by Ollama Cloud on 2026-07-15
+(confirmed via direct API probe 2026-07-30 — returns HTTP 410 Gone) and has been
+removed as a target.
 
 Exit code: 0 if all ollama-cloud targets PASS, non-zero if any fail.
            Qwen3 failure is printed but does not affect exit code.
@@ -634,9 +638,9 @@ def main():
 
     # Define targets: (model_name, informational_only)
     TARGETS = [
-        ("ollama-cloud/qwen3-coder-next", False),
         ("ollama-cloud/deepseek-v4-pro", False),
-        ("ollama-cloud/kimi-k2.7", False),
+        ("ollama-cloud/kimi-k2.7-code", False),
+        ("ollama-cloud/kimi-k3", False),
         ("ollama-cloud/glm-5.1", False),
         ("local/qwen3-4b-q6", True),
     ]

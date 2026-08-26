@@ -3,7 +3,7 @@
 
 Tests:
   - _read_active_orchestra_session_id() — session detection from .lck files
-  - Opus 4.7 cache rates registered via litellm.register_model()
+  - Opus 5 cache rates registered via litellm.register_model()
   - SSE usage parsing (_parse_sse_chunk logic extracted for testability)
 
 Offline: no network, no server, no Redis required.
@@ -131,32 +131,32 @@ def test_read_active_session_native_plus_orchestra():
 
 
 # ---------------------------------------------------------------------------
-# Tests: Opus 4.7 cache rates
+# Tests: Opus 5 cache rates
 # ---------------------------------------------------------------------------
 
 def test_opus_cache_rates_registered():
-    """After litellm.register_model() at module import, Opus 4.7 cache rates are non-zero."""
+    """After litellm.register_model() at module import, Opus 5 cache rates are non-zero."""
     import litellm
-    info = litellm.get_model_info("claude-opus-4-7")
+    info = litellm.get_model_info("claude-opus-5")
     failures = []
     cc_rate = (info or {}).get("cache_creation_input_token_cost", 0.0) or 0.0
     cr_rate = (info or {}).get("cache_read_input_token_cost", 0.0) or 0.0
     if cc_rate == 0.0:
         failures.append(
-            f"claude-opus-4-7 cache_creation_input_token_cost is 0.0 "
-            f"(expected 0.00001875); litellm.register_model() may not have run"
+            f"claude-opus-5 cache_creation_input_token_cost is 0.0 "
+            f"(expected 0.00000625); litellm.register_model() may not have run"
         )
     if cr_rate == 0.0:
         failures.append(
-            f"claude-opus-4-7 cache_read_input_token_cost is 0.0 "
-            f"(expected 0.0000015); litellm.register_model() may not have run"
+            f"claude-opus-5 cache_read_input_token_cost is 0.0 "
+            f"(expected 0.0000005); litellm.register_model() may not have run"
         )
-    expected_cc = 0.00001875
-    expected_cr = 0.0000015
+    expected_cc = 0.00000625
+    expected_cr = 0.0000005
     if abs(cc_rate - expected_cc) > 1e-12:
-        failures.append(f"claude-opus-4-7 cache_creation rate {cc_rate} != {expected_cc}")
+        failures.append(f"claude-opus-5 cache_creation rate {cc_rate} != {expected_cc}")
     if abs(cr_rate - expected_cr) > 1e-14:
-        failures.append(f"claude-opus-4-7 cache_read rate {cr_rate} != {expected_cr}")
+        failures.append(f"claude-opus-5 cache_read rate {cr_rate} != {expected_cr}")
     return failures
 
 

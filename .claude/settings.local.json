@@ -101,7 +101,8 @@
       "Bash(node -e ' *)",
       "Bash(grep -n \"\\\\[.*\\\\\\\\\\\\]\\\\\\\\$\\\\|normalize\\\\|strip.*\\\\[\" /mnt/nfs/Florian/Gin-AI/projects/SoHoAI/main.py)",
       "Bash(nvidia-smi --query-gpu=name --format=csv,noheader)",
-      "Bash(sudo -n systemctl status rag-ingest.timer)"
+      "Bash(sudo -n systemctl status rag-ingest.timer)",
+      "Bash(sudo -n true)"
     ],
     "additionalDirectories": [
       "/home/florian/Gin-AI",

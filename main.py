@@ -107,20 +107,19 @@ def _read_active_orchestra_session_id() -> str | None:
 
 
 # -- LiteLLM model rate overrides -----------------------------------------------
-# LiteLLM's model registry has zero cache rates for claude-opus-4-7 (not yet in its
-# database as of 2025-08). Register correct Anthropic list rates so completion_cost()
-# and get_model_info() return accurate values for both the forward path and the
-# litellm fallback cost source in telemetry-summarize.py.
+# LiteLLM's model registry may not have current rates for claude-opus-5. Register
+# correct Anthropic list rates so completion_cost() and get_model_info() return
+# accurate values for both the forward path and the litellm fallback cost source.
 litellm.register_model({
-    "claude-opus-4-7": {
-        "input_cost_per_token": 0.000015,
-        "output_cost_per_token": 0.000075,
-        "cache_creation_input_token_cost": 0.00001875,
-        "cache_read_input_token_cost": 0.0000015,
+    "claude-opus-5": {
+        "input_cost_per_token": 0.000005,
+        "output_cost_per_token": 0.000025,
+        "cache_creation_input_token_cost": 0.00000625,
+        "cache_read_input_token_cost": 0.0000005,
         "litellm_provider": "anthropic",
         "mode": "chat",
-        "max_tokens": 32000,
-        "max_input_tokens": 200000,
+        "max_tokens": 128000,
+        "max_input_tokens": 1000000,
     },
     "claude-fable-5": {
         "input_cost_per_token": 0.000010,
@@ -1080,7 +1079,7 @@ _TOOL_ID_VALID = re.compile(r'^[a-zA-Z0-9_-]+$')
 def _sanitize_tool_use_id(raw_id: str | None) -> str:
     """Ensure a tool_use id satisfies Anthropic's '^[a-zA-Z0-9_-]+$' pattern.
 
-    Some non-Anthropic models (e.g. Ollama kimi-k2.7) return IDs like
+    Some non-Anthropic models (e.g. Ollama kimi-k3) return IDs like
     'functions.Bash:38' containing '.' and ':'.  Replace invalid chars with '_'
     so the ID stays recognisable and round-trips deterministically through CC's
     conversation history.  Falls back to a fresh UUID-based ID if raw_id is
@@ -1571,9 +1570,11 @@ async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResp
     have no effect on non-Anthropic providers (no API cost on local inference).
 
     Reliability per provider:
-    - `ollama-cloud/qwen3-coder-next` and `ollama-cloud/deepseek-v4-pro`: native
-      OpenAI function calling, expected reliable.
-    - `ollama-cloud/kimi-k2.7` and `ollama-cloud/glm-5.1`: untested.
+    - `ollama-cloud/deepseek-v4-pro`: native OpenAI function calling, expected
+      reliable. (`ollama-cloud/qwen3-coder-next` retired by Ollama Cloud
+      2026-07-15 — removed from config.)
+    - `ollama-cloud/kimi-k3`, `ollama-cloud/kimi-k2.7-code`, and
+      `ollama-cloud/glm-5.1`: untested.
     - `local/qwen3-4b-q6`: tool-call JSON reliability at Q6_K_XL is unvalidated;
       may need grammar-constrained generation as a fallback. See docs/TODO.md.
 

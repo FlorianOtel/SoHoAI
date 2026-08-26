@@ -2112,7 +2112,7 @@ Prompt caching and rolling summarization are mildly antagonistic:
 
 ### Future: premium/high-stakes mode
 
-A future enhancement (not implemented): optional per-request flag `"model": "opus-4.7"` to route critical or review-heavy tasks to Opus 4.7 (most expensive). This would be explicitly opt-in by the user, logged, and clearly documented as a cost-incurring choice. Useful for Phase 4 RL review, sensitive document synthesis, or user-triggered "generate my best answer" mode.
+A future enhancement (not implemented): optional per-request flag `"model": "opus-5"` to route critical or review-heavy tasks to Opus 5 (most expensive). This would be explicitly opt-in by the user, logged, and clearly documented as a cost-incurring choice. Useful for Phase 4 RL review, sensitive document synthesis, or user-triggered "generate my best answer" mode.
 
 ---
 

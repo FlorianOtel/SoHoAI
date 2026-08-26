@@ -80,14 +80,14 @@ picks the bare-name YAML entry that carries `ANTHROPIC_API_KEY` for authenticati
 | `local/qwen3-9b-q4` | `local/qwen3-9b-q4` | LiteLLM | dummy key | 262,144 |
 | `anthropic/claude-haiku-4-5` | `claude-haiku-4-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 200,000 |
 | `anthropic/claude-sonnet-5` | `claude-sonnet-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
-| `anthropic/claude-opus-4-7` | `claude-opus-4-7` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
+| `anthropic/claude-opus-5` | `claude-opus-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `anthropic/claude-fable-5` | `claude-fable-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `ollama-cloud/deepseek-v4-flash` | `ollama-cloud/deepseek-v4-flash` | LiteLLM | Ollama API key | — |
 | `ollama-cloud/deepseek-v4-pro` | `ollama-cloud/deepseek-v4-pro` | LiteLLM | Ollama API key | **~70% 503 rate** — see §2.3 |
 | `ollama-cloud/minimax-m2.5` | `ollama-cloud/minimax-m2.5` | LiteLLM | Ollama API key | — |
-| `ollama-cloud/kimi-k2.7` | `ollama-cloud/kimi-k2.7` | LiteLLM | Ollama API key | — |
+| `ollama-cloud/kimi-k3` | `ollama-cloud/kimi-k3` | LiteLLM | Ollama API key | **402 paid-tier gate** — see below |
+| `ollama-cloud/kimi-k2.7-code` | `ollama-cloud/kimi-k2.7-code` | LiteLLM | Ollama API key | — |
 | `ollama-cloud/glm-5.1` | `ollama-cloud/glm-5.1` | LiteLLM | Ollama API key | — |
-| `ollama-cloud/qwen3-coder-next` | `ollama-cloud/qwen3-coder-next` | LiteLLM | Ollama API key | — |
 
 **Why `/proxy/v1/models` exposes all 10 — including `anthropic/*`:** Cline builds its
 model dropdown entirely from this endpoint; it has no hardcoded built-in model list.
@@ -106,11 +106,25 @@ correctly. The `anthropic_messages` and `count_tokens` endpoints also strip `[�
 the model name before forwarding to `api.anthropic.com` (Anthropic only accepts bare
 names; the annotation caused a 404 that blocked CC's auto-mode Bash safety classifier).
 
-**Ollama cloud models are reasoning models** (DeepSeek V4 Pro, Kimi K2.7, GLM-5.1
-in particular). They spend a variable number of tokens on internal reasoning before
-emitting visible output. Use `max_tokens ≥ 500` for these models; requests with low
-limits (e.g. `max_tokens=20`) will hit the limit during the thinking phase and return
-empty `content[0].text` with `stop_reason: max_tokens`.
+**Ollama cloud models are reasoning models** (DeepSeek V4 Pro, Kimi K3/K2.7-Code,
+GLM-5.2 in particular). They spend a variable number of tokens on internal reasoning
+before emitting visible output. Use `max_tokens ≥ 500` for these models; requests with
+low limits (e.g. `max_tokens=20`) will hit the limit during the thinking phase and
+return empty `content[0].text` with `stop_reason: max_tokens`.
+
+> **Ollama Cloud catalog changes — verified live 2026-07-30:** `qwen3-coder-next` was
+> retired by Ollama on 2026-07-15 (confirmed via direct `POST /v1/chat/completions`
+> against `https://ollama.com/v1` — returns `410 Gone`) and has been removed from
+> `SoHoAI-config.yaml`. The plain `kimi-k2.7` tag is also gone (confirmed `404 Not
+> Found` against the same endpoint) — Ollama split it into two successors: `kimi-k2.7-code`
+> (works on the standard plan, added here as `ollama-cloud/kimi-k2.7-code`) and `kimi-k3`
+> (works, but returns `402 Payment Required` — *"this model uses extra usage only... your
+> extra usage balance is empty"* — until extra-usage billing/auto-reload is enabled at
+> https://ollama.com/settings). **Because `router_settings.fallbacks` silently reroutes a
+> failed `ollama-cloud/kimi-k3` call to `anthropic/claude-sonnet-5`, requesting `kimi-k3`
+> today quietly bills Anthropic tokens instead of failing loudly or staying free** — check
+> `GET /v1/usage/stats` for unexpected Sonnet 5 cost if you request `kimi-k3` before
+> enabling extra usage.
 
 ### Cline configuration
 
@@ -253,12 +267,14 @@ The conversion now handles full Anthropic→OpenAI transformation:
 - **Parallel (5 simultaneous tools):** FAIL on both stream and no-stream. Model emits 1 `tool_use` block instead of all requested. Root cause confirmed from raw llama-server response: `reasoning_content` correctly reasons "I'll make all five function calls at the same time" but `tool_calls` array contains only the first call. This is a 4B-scale model-capacity limitation — not a proxy, template, or streaming-parsing issue. `--no-stream` produces the identical result.
 - **Verdict:** Use `local/qwen3-4b-q6` for single-tool-per-turn tasks (sequentially chained tool calls are fine). Parallel tool dispatch requires an ollama-cloud or Anthropic model. Grammar-constrained generation (`--grammar`) is unlikely to help since the failure is in generation scope, not argument formatting. See `docs/TODO.md` for the remaining real-orchestra validation open item.
 
-For `ollama-cloud/deepseek-v4-pro` and `ollama-cloud/qwen3-coder-next`: both support OpenAI
+For `ollama-cloud/deepseek-v4-pro` and `ollama-cloud/kimi-k2.7-code`: both support OpenAI
 function calling natively and are expected to be reliable for tool use **when the endpoint
 is reachable** — see §2.3 for the reliability caveat on deepseek-v4-pro specifically.
+(`ollama-cloud/qwen3-coder-next`, previously recommended here for coding, was retired by
+Ollama Cloud on 2026-07-15 — removed from config.)
 
 **Appropriate use cases for the LiteLLM path:**
-- Full Claude Code sessions with ollama-cloud models (qwen3-coder-next recommended; deepseek-v4-pro usable but unreliable — see §2.3)
+- Full Claude Code sessions with ollama-cloud models (kimi-k2.7-code recommended for coding; deepseek-v4-pro usable but unreliable — see §2.3)
 - Sub-agents using ollama-cloud models that need to read files, write code, or run bash commands
 - Multi-turn tool call chains with cloud models (zero API cost vs Anthropic)
 - Summarization tasks (`local/qwen3-9b-q4` used by `maybe_summarize()`)
@@ -329,7 +345,7 @@ HTTP 529 is Anthropic's own "overloaded" code — Claude Code renders it as a cl
 user-visible error rather than an opaque crash. The message includes a `/model` hint.
 
 **Recommendation:** For interactive Claude Code sessions that need reliability, use
-`ollama-cloud/qwen3-coder-next` (coding) or an `anthropic/*` model. Reserve deepseek-v4-pro
+`ollama-cloud/kimi-k2.7-code` (coding) or an `anthropic/*` model. Reserve deepseek-v4-pro
 for exploratory/disposable sessions where occasional failures are acceptable.
 
 ### §2.4 Subagent blocking for Ollama Cloud sessions
@@ -354,7 +370,7 @@ Add future versioned Haiku model names here as needed.
 
 ### §2.5 Tool_use ID sanitization
 
-Ollama Cloud models (confirmed: kimi-k2.7) return tool call IDs in the format
+Ollama Cloud models (confirmed: kimi-k3) return tool call IDs in the format
 `functions.{name}:{index}` — e.g. `functions.Bash:38`. These contain `.` and `:` which
 violate Anthropic's required pattern `^[a-zA-Z0-9_-]+$`. Without sanitization, CC stores
 these IDs in its conversation history and the next call to an Anthropic-native model fails
@@ -416,7 +432,7 @@ Both are independent Anthropic API calls with independent prompt-cache slots.
 ### /brain pipeline model tiers
 
 ```
-Brain    — claude-opus-4-7   → transparent forward → Anthropic Opus 4.7   (tools ✅, cache ✅)
+Brain    — claude-opus-5     → transparent forward → Anthropic Opus 5     (tools ✅, cache ✅)
 Planner  — claude-sonnet-4-6 → transparent forward → Anthropic Sonnet 4.6 (tools ✅, cache ✅)
 Actor    — claude-haiku-4-5  → transparent forward → Anthropic Haiku 4.5  (tools ✅, cache ✅)
 Reviewer — claude-sonnet-4-6 → transparent forward → Anthropic Sonnet 4.6 (tools ✅, cache ✅)
@@ -429,9 +445,9 @@ the Actor's costs.
 ### Local sub-agent (qwen3-4b) — tool-use status
 
 A sub-agent with `model: local/qwen3-4b-q6` or `model: ollama-cloud/*` routes via the LiteLLM local path.
-**Tool use is now supported on this path** (implemented 2026-05-10). Validated target models — `ollama-cloud/qwen3-coder-next`, `ollama-cloud/deepseek-v4-pro`, `ollama-cloud/kimi-k2.7`, and `ollama-cloud/glm-5.1` — passed the synthetic two-turn smoke (`utils/tool_use_smoke_test.py`) on both streaming and non-streaming. `ollama-cloud/deepseek-v4-flash` and `ollama-cloud/minimax-m2.5` are not yet smoke-validated.
+**Tool use is now supported on this path** (implemented 2026-05-10). Validated target models (as `ollama-cloud/kimi-k2.7` — retired by Ollama Cloud 2026-07-15, renamed `ollama-cloud/kimi-k2.7-code` in config, smoke not yet re-run) — `ollama-cloud/deepseek-v4-pro` and `ollama-cloud/glm-5.1` — passed the synthetic two-turn smoke (`utils/tool_use_smoke_test.py`) on both streaming and non-streaming. `ollama-cloud/qwen3-coder-next` was also validated at the time but has since been retired by Ollama Cloud (2026-07-15) and removed from config. `ollama-cloud/deepseek-v4-flash` and `ollama-cloud/minimax-m2.5` are not yet smoke-validated.
 
-For `ollama-cloud/*` models (deepseek-v4-pro, qwen3-coder-next), such an agent can:
+For `ollama-cloud/*` models (deepseek-v4-pro, kimi-k2.7-code, kimi-k3), such an agent can:
 - Read files (Read tool supported, smoke-validated)
 - Write or edit files (Write/Edit tools supported)
 - Run bash commands (Bash tool supported)
@@ -442,7 +458,7 @@ For `local/qwen3-4b-q6`, such an agent was validated with the previous Gemma mod
 
 Recommended Actor-tier model selection:
 - **Anthropic transparent forward** (`anthropic/claude-haiku-4-5`): the safest choice for production-grade Actor tasks that require reliable tools. Cost ≈ $0.01/session.
-- **Ollama cloud** (`ollama-cloud/qwen3-coder-next` for coding tasks, `ollama-cloud/deepseek-v4-pro` for reasoning): smoke-validated, cost ≈ $0/session. Reasoning models need `max_tokens ≥ 500`.
+- **Ollama cloud** (`ollama-cloud/kimi-k2.7-code` for coding tasks, `ollama-cloud/deepseek-v4-pro` for reasoning): smoke-validated, cost ≈ $0/session. Reasoning models need `max_tokens ≥ 500`. (`ollama-cloud/kimi-k3` also works, but currently returns HTTP 402 from Ollama Cloud until extra-usage billing is enabled — see the note in §2.)
 - **Local Qwen** (`local/qwen3-4b-q6`): previously validated with Gemma model, cost = $0, post-swap validation pending. Recommended for cost-sensitive non-critical Actor work; not yet recommended for primary tool-using subagents until broader validation completes.
 
 ---
@@ -477,13 +493,13 @@ All models exposed via `_PROXY_EXPOSED_MODELS` in `main.py`:
 | `local/qwen3-4b-q6` | LiteLLM conversion | llama-server, Server 2 | $0/session; tool-use smoke PASS (Gemma); post-swap validation pending |
 | `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | Safest Actor-tier choice; ~$0.01/session |
 | `anthropic/claude-sonnet-5` | Transparent forward | Anthropic API | Default interactive model |
-| `anthropic/claude-opus-4-7` | Transparent forward | Anthropic API | Brain tier in /brain pipeline |
+| `anthropic/claude-opus-5` | Transparent forward | Anthropic API | Brain tier in /brain pipeline |
 | `ollama-cloud/deepseek-v4-flash` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; not yet validated |
 | `ollama-cloud/deepseek-v4-pro` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; **~70% 503 rate** — see §2.3; not recommended for critical tasks |
 | `ollama-cloud/minimax-m2.5` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; not yet validated |
-| `ollama-cloud/kimi-k2.7` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
+| `ollama-cloud/kimi-k3` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; **HTTP 402 from Ollama Cloud** — extra-usage billing required (verified 2026-07-30); silently falls back to `anthropic/claude-sonnet-5` (paid) until enabled at ollama.com/settings |
+| `ollama-cloud/kimi-k2.7-code` | LiteLLM conversion | Ollama cloud | Coding model; `max_tokens ≥ 500`; replaces retired `ollama-cloud/qwen3-coder-next`; pending re-validation (smoke test target updated 2026-07-30, not yet re-run); **recommended** for $0 coding tasks |
 | `ollama-cloud/glm-5.1` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
-| `ollama-cloud/qwen3-coder-next` | LiteLLM conversion | Ollama cloud | Coding model; standard `max_tokens`; tool-use smoke PASS; **recommended** for $0 coding tasks |
 
 ### 4.3 Tool calling via sub-agents (LiteLLM path)
 
@@ -506,12 +522,14 @@ for tool calls, including `message_delta` with `stop_reason: "tool_use"`.
 | Model | Single-tool smoke | 5-tool parallel smoke | Notes |
 |-------|------------------|-----------------------|-------|
 | `local/qwen3-4b-q6` | PASS (streaming + non-streaming, 2026-05-10 with Gemma) | INFO: 1/5 tools only | Post-swap validation pending |
-| `ollama-cloud/qwen3-coder-next` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | — |
 | `ollama-cloud/deepseek-v4-flash` | — | — | Not yet validated |
 | `ollama-cloud/deepseek-v4-pro` | PASS (streaming, 2026-05-10) | FAIL — live 503 (2026-05-11) | Reasoning model: `max_tokens ≥ 500`; see §2.3 |
 | `ollama-cloud/minimax-m2.5` | — | — | Not yet validated |
-| `ollama-cloud/kimi-k2.7` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | Reasoning model: `max_tokens ≥ 500` |
+| `ollama-cloud/kimi-k2.7-code` | pending (as `kimi-k2.7`: PASS streaming 2026-05-10, PASS parallel 2026-05-11) | pending | Renamed 2026-07-30 (Ollama retired plain `kimi-k2.7`); smoke not yet re-run |
+| `ollama-cloud/kimi-k3` | pending | pending | Reasoning model: `max_tokens ≥ 500`; currently HTTP 402 (extra-usage billing required) — smoke will fail until enabled |
 | `ollama-cloud/glm-5.1` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | Reasoning model: `max_tokens ≥ 500` |
+
+`ollama-cloud/qwen3-coder-next` — retired by Ollama Cloud 2026-07-15 (confirmed `410 Gone`, verified 2026-07-30) and removed from `SoHoAI-config.yaml`. Its prior PASS/PASS smoke record is historical only.
 
 Smoke harness: `utils/tool_use_smoke_test.py`
 - Standard: `--server http://192.168.1.93:8000` — 2-turn, single tool
@@ -572,7 +590,7 @@ model = "claude-*"        →  _anthropic_messages_forward()   (transparent rela
 model = "local/qwen3-*"   →  _anthropic_messages_litellm()  (LiteLLM conversion)
 ```
 
-LiteLLM's `/anthropic` passthrough endpoint has no such branching — it can only forward to Anthropic. It cannot route local models. SoHoAI's implementation handles both paths behind the same `ANTHROPIC_BASE_URL`, which is what allows `claude-haiku-4-5`, `claude-sonnet-5`, `claude-opus-4-7`, and `local/qwen3-4b-q6` to all be valid `model:` values in agent frontmatter while sharing one endpoint configuration in `settings.json`.
+LiteLLM's `/anthropic` passthrough endpoint has no such branching — it can only forward to Anthropic. It cannot route local models. SoHoAI's implementation handles both paths behind the same `ANTHROPIC_BASE_URL`, which is what allows `claude-haiku-4-5`, `claude-sonnet-5`, `claude-opus-5`, and `local/qwen3-4b-q6` to all be valid `model:` values in agent frontmatter while sharing one endpoint configuration in `settings.json`.
 
 ### 5.3 Observation regarding caching — the one finding worth noting
 
@@ -613,7 +631,7 @@ becomes available (account upgrade, region change), no proxy changes are needed.
 
 | Model | Input (uncached) | Input (cached read) | Output |
 |---|---|---|---|
-| Opus 4.7 | $15/MTok | $1.50/MTok | $75/MTok |
+| Opus 5 | $5/MTok | $0.50/MTok | $25/MTok |
 | Sonnet 5 | $2/MTok | $0.20/MTok | $10/MTok |
 | Haiku 4.5 | $0.80/MTok | $0.08/MTok | $4/MTok |
 | Qwen3.5 (local) | $0 | $0 | $0 |
@@ -646,15 +664,15 @@ becomes available (account upgrade, region change), no proxy changes are needed.
 - Tools broken → task fails or Claude Code injects files inline (even larger context)
 - Effective cost 3–5× higher and task likely incomplete
 
-### /brain session cost (Opus 4.7 Brain tier)
+### /brain session cost (Opus 5 Brain tier)
 
 | Tier | Model | Turns | Est. cost |
 |---|---|---|---|
-| Brain | Opus 4.7 | 3–5 research turns | $0.50–$1.20 |
+| Brain | Opus 5 | 3–5 research turns | $0.15–$0.40 |
 | Planner | Sonnet 4.6 | 1–2 planning turns | $0.05–$0.10 |
 | Actor | Haiku 4.5 | implementation | $0.01–$0.03 |
 | Reviewer | Sonnet 4.6 | 1 review turn | $0.03–$0.05 |
-| **Total** | | | **$0.60–$1.40** |
+| **Total** | | | **$0.24–$0.58** |
 
 Prompt caching cuts the Opus Brain cost by ~70% after the first turn (large research
 context is re-read cached). Without caching (broken path), costs would be 3–4× higher.
