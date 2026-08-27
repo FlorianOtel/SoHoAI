@@ -2,8 +2,8 @@
 title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Opus 4.7)
-updated_at: 2026-05-27--13-40
+updated_by: Claude Code (Claude Opus 5)
+updated_at: 2026-08-27--14-45
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -16,9 +16,124 @@ context: >
   timeout parameter added.
   Updated 2026-05-14: hybrid search activation — three qdrant-client API name mismatches
   (sparse_vectors attribute, Prefetch.filter, FusionQuery); corpus migration completed.
+  Updated 2026-08-27: cross-encoder reranker had been down since the 2026-08-21 reboot —
+  it was never a managed service. Now a llama-swap model reached at :8000/v1/rerank.
+  Corrects two false claims in the 2026-05-14 reranker section (that it shared the chat
+  llama-server process, and its Gemma-era VRAM budget) and records measured GPU tenancy:
+  qwen3.5-9b-q4 (10,796 MiB) cannot coexist with the reranker.
 ---
 
 # SoHoAI RAG Pipeline — Troubleshooting
+
+---
+
+## 2026-08-27 — Reranker Down Since Reboot: llama-swap Now Owns Its Lifecycle
+
+### Symptom
+
+`curl http://192.168.1.95:8001/v1/rerank` → `Failed to connect ... Couldn't connect to server`.
+Nothing was listening on port 8001 on Server 2. RAG kept answering, so nothing looked broken
+from the outside — the gateway log just carried a steady drip of:
+
+```
+[rag_engine.rerank] WARNING: reranker failed: All connection attempts failed — falling back to Qdrant order
+```
+
+That is the designed fallback (RAG-strategy.md §13.5). No outage, only silently unranked results.
+
+### Root cause
+
+The reranker had **never** been a managed service. From its introduction (2026-05-14) it was a
+hand-started `llama-server`:
+
+```bash
+llama-server -m .../bge-reranker-v2-m3-q8_0.gguf \
+  -c 768 -b 768 -ub 768 --reranking --pooling rank --host 0.0.0.0 --port 8001
+```
+
+No systemd unit, no start script, no entry in `llama-swap--config.yaml` — nothing that would
+ever restart it. Server 2 rebooted 2026-08-21 12:14; llama-swap was restarted by hand in tmux
+at 23:28, the reranker was not.
+
+### Fix — llama-swap manages it now
+
+`bge-reranker-v2-m3` is a llama-swap model (backing port 8012), reached through llama-swap's
+proxy at **`http://192.168.1.95:8000/v1/rerank`**. llama-swap routes `/v1/rerank` by the
+request's `model` field, so the llama-swap model key must stay identical to `rag.rerank.model`
+in `SoHoAI-config.yaml`. `rag.rerank.server_url` moved from `:8001` to `:8000` to match.
+
+### GPU tenancy — measured, not estimated
+
+Card is 12,227 MiB. Measured 2026-08-27:
+
+| Resident | VRAM |
+|---|---|
+| `qwen3.5-4b-q6` @ 262144 ctx | 9,600 MiB |
+| `bge-reranker-v2-m3` | 518–590 MiB |
+| Ollama `bge-m3` embeddings (now on Server 2 — see `rag.ollama_url`) | 826 MiB |
+| **total / free** | **11,040 MiB / 735 MiB** |
+| `qwen3.5-9b-q4` @ 262144 ctx | **10,796 MiB** |
+
+**The 9B and the reranker cannot coexist.** Verified in both directions: with the reranker
+resident, the 9B dies with `ExitError >> signal: segmentation fault` during CUDA init; with the
+reranker stopped, the same 9B loads in 5.4 s. The 9B plus Ollama's bge-m3 leaves 137 MiB free —
+the reranker needs 518 MiB plus a CUDA context.
+
+This differs from May, when the chat model was Gemma 4 E4B (~4.8 GB) and embeddings ran on
+Server 1. Two later changes closed the gap: Qwen3.5-9B at the full 262144 ctx, and
+`rag.ollama_url` moving to Server 2.
+
+### Group policy
+
+`llama-swap--config.yaml` encodes the constraint as two exclusive groups:
+
+```yaml
+groups:
+  resident:                                    # default GPU tenants
+    members: ["qwen3.5-4b-q6", "bge-reranker-v2-m3"]
+    swap: false        # coexist — do not evict each other
+    exclusive: true    # requesting either evicts the heavy group
+  heavy:
+    members: ["qwen3.5-9b-q4"]
+    swap: true
+    exclusive: true    # requesting the 9B evicts BOTH resident members
+```
+
+Both resident members are in `hooks.on_startup.preload`, so they come up with llama-swap.
+
+**Known gap:** llama-swap v214 has no eviction or idle hook — `hooks.on_startup.preload` is the
+only hook in its config schema. When the 9B's 300 s TTL expires the GPU is left empty and the
+resident pair returns **lazily**, on the next request needing each one (~45 s cold load for the
+4B over NFS, ~15 s for the reranker). Making that eager would need an external timer pinging
+both endpoints.
+
+### Checking and restarting the reranker
+
+```bash
+# Is it up? Go through llama-swap, NOT a direct port.
+curl http://192.168.1.95:8000/v1/rerank -sS \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"bge-reranker-v2-m3","query":"test","documents":["foo"]}'
+
+# What is llama-swap serving, and what is actually on the GPU?
+curl -sS http://192.168.1.95:8000/v1/models
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+
+# Restart the lot — llama-swap runs in tmux window "llama-swap" on Server 2
+tmux send-keys -t llama-swap:0.0 C-c
+tmux send-keys -t llama-swap:0.0 'source ./llama-swap--start.sh' Enter
+```
+
+llama-swap is itself only started by hand in tmux, so a Server 2 reboot still leaves the whole
+stack down until someone reattaches. That remains unfixed.
+
+### Gotcha — the gateway does not hot-reload config edited over NFS
+
+After `SoHoAI-config.yaml` was edited, the gateway kept calling the old `:8001`. `main.py` reads
+the config once at import (~line 138) and exposes no reload endpoint; `uvicorn --reload` watches
+via inotify, which **does not fire for NFS writes made from another host**. Editing the config
+from Server 2 leaves Server 1's gateway on stale values indefinitely. After any remote config
+edit, restart the gateway on Server 1 (or `touch` the file from Server 1 to fire its watcher).
 
 ---
 
@@ -107,7 +222,9 @@ python utils/rag_smoke_test.py --query "AWS certifications" --user florian --exp
 Check that the reranker server on Server 2 is responding to HTTP requests:
 
 ```bash
-curl http://192.168.1.95:8001/v1/rerank -sS \
+# NOTE: port 8001 is historical. Since 2026-08-27 the reranker is served through
+# llama-swap on port 8000 — see the 2026-08-27 entry at the top of this file.
+curl http://192.168.1.95:8000/v1/rerank -sS \
   -H 'Content-Type: application/json' \
   -d '{"model":"bge-reranker-v2-m3","query":"test","documents":["foo"]}'
 ```
@@ -144,35 +261,34 @@ If HTTP 500 is still returned, check that Server 2's llama-server was restarted 
 
 ### Reranker VRAM usage
 
-The reranker model (`bge-reranker-v2-m3`) shares the GPU on Server 2 with Gemma 4 E4B
-chat model. Smoke testing (2026-05-14) confirmed both models are resident in VRAM:
+> **Superseded 2026-08-27 — the numbers below are for a configuration that no longer exists.**
+> They were measured against Gemma 4 E4B (~4.8 GB) with 2 KV slots and embeddings running on
+> Server 1. The chat model is now Qwen3.5-4B at 262144 ctx (9,600 MiB) and embeddings run on
+> Server 2. For current measured figures, and for why the 9B cannot share the card with the
+> reranker, see the 2026-08-27 entry at the top of this file.
+
+Historical (2026-05-14), both models resident alongside Gemma 4 E4B:
 - Gemma 4 E4B Q8_0: ~4.8 GB
 - bge-reranker-v2-m3: ~0.5 GB
 - KV cache slots (2 × 110024 ctx): ~1.76 GB
 - Overhead: ~1 GB
 - **Total: ~9.3 GB / 12 GB available**
 
-No VRAM OOM observed under typical load. If you observe OOM errors, check:
-1. Are other processes consuming GPU VRAM? (e.g., `nvidia-smi`)
-2. Is the model quantization stale? (old Q6_K Gemma causing higher VRAM use)
+If you observe OOM or a segfault during CUDA init, check:
+1. What is actually on the card: `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv`
+2. Whether `qwen3.5-9b-q4` is resident — it needs 10.8 GB and cannot share with the reranker.
+3. Whether Ollama's `bge-m3` is holding VRAM on Server 2: `curl -sS http://192.168.1.95:11434/api/ps`
 
 ### Reranker process restart
 
-The reranker runs on Server 2 as part of the same `llama-server` process that serves
-the chat endpoint (Gemma 4 on port 8000). The reranker listens on port 8001. To check:
+> **Corrected 2026-08-27.** This section previously claimed the reranker was "served by the same
+> process via model routing" as the chat endpoint, and that restarting the chat `llama-server`
+> would bring port 8001 back. **That was never true** — `llama-server` serves exactly one model
+> on one port, and the reranker was always a separate, hand-started process. Following the old
+> procedure would never have restored reranking.
 
-```bash
-ssh Server2
-ps aux | grep llama-server
-# Should see one llama-server process with flags: --ctx-size 262144 --port 8000 --slot-save-path ...
-# (port 8001 reranker is served by the same process via model routing)
-```
-
-To restart the reranker:
-1. Stop the llama-server process (kills both port 8000 and 8001).
-2. Restart: `llama-server ... (full command from CLAUDE.md)`
-3. Wait ~10 seconds for model to load.
-4. Verify: `curl http://192.168.1.95:8001/v1/rerank ...` (should succeed).
+The reranker is now a llama-swap-managed model. To check and restart it, see
+"Checking and restarting the reranker" in the 2026-08-27 entry at the top of this file.
 
 ---
 

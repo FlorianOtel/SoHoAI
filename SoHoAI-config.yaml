@@ -278,13 +278,17 @@ rag:
   # -- Cross-encoder reranking (§13) -----------------------------------------
   rerank:
     enabled: true                             # on by default; override via ?rerank=false or --no-rerank
-    server_url: "http://192.168.1.95:8001/v1/rerank"
+    server_url: "http://192.168.1.95:8000/v1/rerank"
     model: "bge-reranker-v2-m3"
     fetch_multiplier: 6                       # Qdrant fetch = min(top_k * fetch_multiplier, fetch_cap)
     fetch_cap: 30                             # hard cap on Qdrant fetch pool
     timeout_seconds: 10.0                     # per-request HTTP timeout
-    # Reranker server launched with -c 768 -b 768 for consistent context and batch handling.
-    # Client does not truncate; server handles all typical queries and child chunks.
+    # Served by llama-swap on Server 2 (port 8000), which routes /v1/rerank by the
+    # "model" field above -- so `model` must match the llama-swap model key exactly.
+    # Backing llama-server runs with -c 768 -b 768 -ub 768 --reranking --pooling rank,
+    # so the client does not truncate; the server handles typical queries + child chunks.
+    # It shares the GPU with qwen3.5-4b-q6 (both ~10.1 GB combined) and is swapped out
+    # together with it whenever qwen3.5-9b-q4 is requested -- see llama-swap--config.yaml.
 
   # -- Hybrid sparse+dense retrieval (§14) -----------------------------------
   hybrid:

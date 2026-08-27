@@ -13,10 +13,28 @@ models:
     proxy: http://127.0.0.1:8010
     ttl: 0  # disable the idle timeout so it NEVER shuts down on its own
 
+#### bge-reranker-v2-m3 — cross-encoder reranker for RAG retrieval (SoHoAI rag.rerank)
+# Measured 2026-08-27: 518 MiB VRAM. Small enough to sit alongside the 4B all day,
+# which is why it shares the "resident" group below rather than swapping.
+# -c 768 -b 768 -ub 768 keeps context and both batch sizes consistent, so no
+# client-side truncation is needed for typical queries + child chunks.
+# Reached by SoHoAI at http://192.168.1.95:8000/v1/rerank — llama-swap routes
+# /v1/rerank by the request's "model" field, so this key must stay in sync with
+# rag.rerank.model in SoHoAI-config.yaml.
+  bge-reranker-v2-m3:
+    cmd: |
+      llama-server -m /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/bge-reranker-v2-m3-q8_0.gguf --no-mmap -ngl 99 -c 768 -b 768 -ub 768 --reranking --pooling rank --host 0.0.0.0 --port 8012
+    proxy: http://127.0.0.1:8012
+    ttl: 0  # never idle-evicted; only the 9B group can push it off the GPU
+
 #### Qwen3.5-9B-Q4
 # Hybrid attention (full_attention_interval=4): only 8/32 layers store KV for all tokens.
 # Effective KV/token (q8_0) = 2×8 layers×4 KV heads×256 head_dim×1.0625 = 17,408 bytes.
-# At 262144 ctx → ~4.25 GB KV + ~6.4 GB weights ≈ 10.8 GB total → fits in 12 GB (~1 GB headroom).
+# At 262144 ctx → ~4.25 GB KV + ~6.4 GB weights. MEASURED 2026-08-27: 10,796 MiB of
+# the card's 12,227 MiB, leaving ~1.4 GB — and Ollama's bge-m3 embedding model
+# (~0.8-1.1 GB, see SoHoAI-config.yaml rag.ollama_url) usually holds most of that.
+# It therefore cannot coexist with the reranker: tested and llama-server segfaults
+# during CUDA init. Hence the two exclusive groups below.
   qwen3.5-9b-q4:
     cmd: |
       llama-server -m /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/Qwen3.5-9B-UD-Q4_K_XL.gguf --jinja --flash-attn on --no-mmap --cache-type-k q8_0 --cache-type-v q8_0 -ngl 99 --ctx-size 262144 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0 --host 0.0.0.0 --port 8011
@@ -24,15 +42,32 @@ models:
     ttl: 300 # Evict after 5 minutes of inactivity
 
 groups:
-  gpu-exclusive:
+#### Default GPU tenants: the 4B chat model and the reranker, loaded together.
+# swap: false      -> members do NOT evict each other; both stay resident at once.
+# exclusive: true  -> requesting either one evicts every OTHER group (i.e. the 9B).
+  resident:
     members:
       - "qwen3.5-4b-q6"  # <-- list items need "-"
+      - "bge-reranker-v2-m3"
+    swap: false
+    exclusive: true
+
+#### The 9B is a sole tenant — it needs 10.8 GB of a 12 GB card.
+# exclusive: true  -> requesting it evicts the whole "resident" group above,
+#                     i.e. BOTH the 4B and the reranker are swapped out.
+  heavy:
+    members:
       - "qwen3.5-9b-q4"
-    swap: true # unload the other when one is requested
+    swap: true
+    exclusive: true
 
 # The secret sauce for "Always On"
-#### (!!!) 2026-05-16 :  Apparently this is NOT working yet -- i.e. there is no ability to bring back "default" model after TTL is expired -- 5mins for Qwen3.5-9B-Q4 -- and is removed from the GPU VRAM. 
-#### Leaving it commented though... 
+#### (!!!) 2026-05-16 :  Apparently this is NOT working yet -- i.e. there is no ability to bring back "default" model after TTL is expired -- 5mins for Qwen3.5-9B-Q4 -- and is removed from the GPU VRAM.
+#### Leaving it commented though...
+#### 2026-08-27 re-check: still no eviction hook in llama-swap v214 — the only hook
+#### is hooks.on_startup.preload. After the 9B's TTL expires the GPU sits empty until
+#### the next request, which then pays the cold-load cost (~45 s for the 4B over NFS,
+#### ~15 s for the reranker). Both DO come back automatically, just lazily.
 
 # fallback:
 #  default: "qwen3.5-4b-q6" # Automatically reloads the 4B model when the 9B model unloads/expires
@@ -40,7 +75,8 @@ groups:
 hooks:
   on_startup:
     preload:
-      - "qwen3.5-4b-q6" # Boot the 4B model instantly on application startup
+      - "qwen3.5-4b-q6"       # Boot the 4B model instantly on application startup
+      - "bge-reranker-v2-m3"  # ...and the reranker alongside it
 
-### (!!!) Apparently this doesn't have any effect -- it needs to be given as CLI argument at start. Yuck. 
+### (!!!) Apparently this doesn't have any effect -- it needs to be given as CLI argument at start. Yuck.
 # listen: ":8000"

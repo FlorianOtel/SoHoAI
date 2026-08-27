@@ -2,8 +2,8 @@
 title: "SoHoAI — Future work and deferred tasks"
 created_at: 2026-05-04--17-30
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (claude-code-kimi-k2.7)
-updated_at: 2026-05-16--08-41
+updated_by: Claude Code (Claude Opus 5)
+updated_at: 2026-08-27--14-45
 context: >
   Tracks deferred implementation work that is understood, scoped, and intentionally
   left for a future session. Each entry includes the motivation, the known approach,
@@ -11,6 +11,43 @@ context: >
 ---
 
 # SoHoAI — Future work
+
+---
+
+## KV cache slot save/restore is dead under llama-swap (found 2026-08-27)
+
+**Status:** broken, silently, since llama-swap was deployed (~2026-05-16).
+
+`llama-swap--config.yaml` launches `qwen3.5-4b-q6` **without `--slot-save-path`**, so every
+KV-slot operation the orchestrator makes is rejected:
+
+```
+$ curl -X POST 'http://192.168.1.95:8010/slots/0?action=save' -d '{"filename":"probe.bin"}'
+{"error":{"code":501,"message":"This server does not support slots action. Start it with `--slot-save-path`"}}
+```
+
+`/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v-caches/` has been empty since 2026-05-15.
+Meanwhile `SoHoAI-config.yaml` still declares `llama_server.slot_save_path`, `kv_cache.py` still
+calls these endpoints, and CLAUDE.md's runbook documented a hand-written `llama-server` command
+that *did* include the flag — which is why the gap went unnoticed: the documented command and the
+command llama-swap actually runs had silently diverged.
+
+Nothing user-visible breaks (the third memory tier just never engages; Redis + SQLite still work),
+which is exactly why it stayed invisible.
+
+**The fix is one flag** — add `--slot-save-path /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v-caches/`
+to the `qwen3.5-4b-q6` cmd in `llama-swap--config.yaml`. It was deliberately **not** applied on
+2026-08-27 because:
+- It restarts the 4B, and the session that found it was scoped to the reranker.
+- KV cache slot **session pinning** is still unresolved (design-history 2026-05-27). Re-enabling
+  slot save/restore on a single-slot server without pinning may resurrect the original bug — a
+  chat resuming into a slot that holds someone else's KV state.
+
+Decide the pinning question first, then re-enable. Verify afterwards with:
+```bash
+curl -X POST 'http://192.168.1.95:8010/slots/0?action=save' -H 'Content-Type: application/json' \
+  -d '{"filename":"__probe.bin"}'   # expect 200, and a .bin appearing in k-v-caches/
+```
 
 ---
 

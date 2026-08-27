@@ -2,8 +2,8 @@
 title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Opus 4.7)
-updated_at: 2026-05-27--14-15
+updated_by: Claude Code (Claude Opus 5)
+updated_at: 2026-08-27--14-45
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -17,6 +17,10 @@ context: >
   Updated 2026-05-05: §10 RAG Ingestion Service — systemd timer + NFS lock +
   multi-user sync wrapper. Updated 2026-05-12: §4.3 incremental sync — Qdrant
   deletions use wait=False (fire-and-forget); get_client() timeout parameter.
+  Updated 2026-08-27: §13.3.1 added — reranker is now llama-swap-managed at :8000/v1/rerank
+  (was an unsupervised hand-started process on :8001, down since the 2026-08-21 reboot);
+  measured GPU tenancy, 9B/reranker mutual exclusion, rerank_score clarified as an
+  unbounded logit rather than a 0-1 score.
   Updated 2026-05-14: §13 cross-encoder reranking (bge-reranker-v2-m3);
   §14 hybrid sparse+dense search (fastembed BM25 + Qdrant RRF) — code complete,
   migration complete 2026-05-14, hybrid live; §14.7 qdrant-client API name
@@ -2635,12 +2639,15 @@ User query
     │      Score key: "score" (cosine similarity, 0–1)
     │
     ├─→ Cross-encoder reranking [NEW]
-    │      (bge-reranker-v2-m3 on Server 2, llama.cpp /v1/rerank endpoint)
-    │      Server launched with: -c 768 -b 768 --reranking --pooling rank
+    │      (bge-reranker-v2-m3 on Server 2, llama.cpp /v1/rerank endpoint,
+    │       fronted by llama-swap on :8000 since 2026-08-27)
+    │      Backing server: -c 768 -b 768 -ub 768 --reranking --pooling rank
     │      Input:  query (raw, no client-side truncation)
     │              candidate texts (FIELD_TEXT, child chunks, raw)
     │      Output: list of {index, relevance_score} sorted by score descending
-    │      Score key: "rerank_score" (Spearman correlation, 0–1, not directly comparable to cosine)
+    │      Score key: "rerank_score" — an UNBOUNDED cross-attention logit, not a 0–1
+    │        score (observed range roughly -11 … +8). Only its ordering is meaningful;
+    │        it is not comparable to, and must not be mixed with, the cosine score.
     │
     └─→ Top-K results returned to LLM
            (reranked order, or Qdrant order if reranker unavailable)
@@ -2650,7 +2657,7 @@ The reranker does **not** consume embedding dimensions (it uses contrastive cros
 and thus can re-rank 30+ candidates at inference time without re-embedding. Latency is
 ~40ms per candidate (sequential server-side), i.e., 1.2s for 30 candidates.
 
-**Context and batch handling:** The reranker server is configured with `-c 768 -b 768`,
+**Context and batch handling:** The reranker server is configured with `-c 768 -b 768 -ub 768`,
 ensuring both context and physical batch sizes are consistent and handle typical queries
 and child chunks without issue. If a (query, document) pair ever exceeds 768 tokens, the
 server returns HTTP 500 and the client gracefully falls back to Qdrant order (same fallback
@@ -2664,8 +2671,8 @@ All settings are in the `rag.rerank` block of `SoHoAI-config.yaml`:
 rag:
   rerank:
     enabled: true                             # on by default (override per-call)
-    server_url: "http://192.168.1.95:8001/v1/rerank"   # llama-server on Server 2
-    model: "bge-reranker-v2-m3"               # cross-encoder model name
+    server_url: "http://192.168.1.95:8000/v1/rerank"   # llama-swap on Server 2
+    model: "bge-reranker-v2-m3"               # MUST match the llama-swap model key
     fetch_multiplier: 6                       # Qdrant fetch = min(top_k × 6, fetch_cap)
     fetch_cap: 30                             # hard cap on Qdrant fetch pool
     timeout_seconds: 10.0                     # per-request HTTP timeout to reranker
@@ -2674,11 +2681,49 @@ rag:
 | Key | Default | Unit | Notes |
 |-----|---------|------|-------|
 | `enabled` | `true` | bool | Can be overridden by client: `?rerank=false` (API) or `--no-rerank` (CLI) |
-| `server_url` | `http://192.168.1.95:8001/v1/rerank` | URL | Fallback: Qdrant-order (no exception) |
-| `model` | `bge-reranker-v2-m3` | string | Model alias for the reranker server |
+| `server_url` | `http://192.168.1.95:8000/v1/rerank` | URL | llama-swap proxy. Fallback: Qdrant-order (no exception) |
+| `model` | `bge-reranker-v2-m3` | string | llama-swap routes `/v1/rerank` by this field — it must match the model key in `llama-swap--config.yaml` exactly |
 | `fetch_multiplier` | `6` | unitless | Qdrant candidate pool size = `limit × fetch_multiplier`, capped at `fetch_cap` |
 | `fetch_cap` | `30` | count | Max candidates to rerank per query |
 | `timeout_seconds` | `10.0` | seconds | HTTP request timeout; failure → fallback to Qdrant order |
+
+### 13.3.1 Serving and GPU tenancy (revised 2026-08-27)
+
+The reranker is a **llama-swap-managed model**, not a standalone process. It was originally
+hand-started on port 8001 with no supervision of any kind, and consequently vanished at the
+2026-08-21 reboot and stayed down until 2026-08-27.
+
+`llama-swap--config.yaml` places it in a `resident` group alongside the 4B chat model:
+
+```yaml
+groups:
+  resident:
+    members: ["qwen3.5-4b-q6", "bge-reranker-v2-m3"]
+    swap: false        # coexist — do not evict each other
+    exclusive: true    # requesting either evicts the heavy group
+  heavy:
+    members: ["qwen3.5-9b-q4"]
+    swap: true
+    exclusive: true    # requesting the 9B evicts BOTH resident members
+```
+
+Measured VRAM on the 12,227 MiB RTX 5070 (2026-08-27):
+
+| Model | VRAM |
+|-------|------|
+| `qwen3.5-4b-q6` @ 262144 ctx | 9,600 MiB |
+| `bge-reranker-v2-m3` | 518–590 MiB |
+| Ollama `bge-m3` embeddings (Server 2 since `rag.ollama_url` moved) | 826 MiB |
+| `qwen3.5-9b-q4` @ 262144 ctx | 10,796 MiB |
+
+The 4B + reranker + embeddings triple fits with 735 MiB to spare. The **9B cannot share the
+card with the reranker** — with the reranker resident, the 9B segfaults during CUDA init;
+alone it loads in 5.4 s. Hence the two mutually exclusive groups.
+
+llama-swap v214 has no eviction hook (`hooks.on_startup.preload` is its only hook), so after
+the 9B's 300 s TTL expires the resident pair returns lazily on the next request that needs
+each one — ~45 s cold load for the 4B over NFS, ~15 s for the reranker.
+
 
 ### 13.4 Latency budget
 

@@ -1,20 +1,27 @@
 """
 Cross-encoder reranking — semantic relevance refinement over retrieved candidates.
 
-Wire format (confirmed via probe 2026-05-14):
-  POST http://192.168.1.95:8001/v1/rerank
+Wire format (confirmed via probe 2026-05-14, re-confirmed 2026-08-27):
+  POST http://192.168.1.95:8000/v1/rerank
   Request:  {"model": "bge-reranker-v2-m3", "query": <str>, "documents": [<str>, ...]}
   Response: {"model": ..., "object": "list", "usage": {...}, "results": [
               {"index": <int>, "relevance_score": <float>}, ...
             ]}
 
-The reranker server is launched with `-c 768 -b 768 --reranking --pooling rank`,
-ensuring no context limit issues. Client does not truncate — the server's
-consistent batch size handles all typical queries and child chunks.
+Since 2026-08-27 the reranker is served by llama-swap on port 8000 rather than a
+hand-started llama-server on 8001. llama-swap routes /v1/rerank by the request's
+"model" field, so rag.rerank.model must match the model key in
+llama-swap--config.yaml exactly. The backing llama-server runs with
+`-c 768 -b 768 -ub 768 --reranking --pooling rank`, so the client does not
+truncate — the server handles all typical queries and child chunks.
 
 Candidates are ranked by relevance_score (higher = more relevant); results are
 sorted desc and remapped back to original index. A rerank_score field is attached
 to each candidate (alongside existing score field — not replacing it).
+
+Note: relevance_score is an unbounded cross-attention logit, NOT a 0-1 score
+(observed range roughly -11 .. +8). Only its ordering is meaningful; it is not
+comparable to the Qdrant cosine score and the two must never be mixed or averaged.
 
 If the reranker becomes unavailable or any exception occurs during HTTP request
 or parsing, a single WARN is logged and candidates are returned unchanged

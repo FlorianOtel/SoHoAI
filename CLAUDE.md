@@ -60,21 +60,21 @@ for family photos and RL training data collection from chat interactions.
                          │  rolling prefix breakpoints)  │
                          └───────────────────────────────┘
                                     │
-Server 1 (192.168.1.93)             │          Server 2 (192.168.1.95)
-┌──────────────────────────┐  fallback/       ┌──────────────────────────┐
-│ FastAPI orchestrator:8000│──summarize/────→ │ llama-server :8000       │
-│  SmartRouter (LiteLLM)   │  variants →      │  Qwen3.5-4B Q6_K_XL     │
-│  ConversationCache       │─── /slots ─────→ │  262144 ctx (1 slot)     │
-│    Redis (short-term)    │                  │  KV slot save/restore    │
-│    KV cache mgr          │                  │  CLIP (Phase 4)          │
-│    rolling summarization │                  └──────────────────────────┘
-│ SQLite (long-term)       │                             │
-│  + summary_text +        │                             │
-│    covers_through_msg_id │                             │
-│ MCP server :3001 (HTTP)  │                             │
-│ Qdrant server :6333      │                             │
-│  active storage: NVMe    │                             │
-│  snapshots → NAS daily   │                             │
+Server 1 (192.168.1.93)                     Server 2 (192.168.1.95)
+┌──────────────────────────┐  fallback/     ┌────────────────────────────────┐
+│ FastAPI orchestrator:8000│──summarize/───→│ llama-swap :8000               │
+│  SmartRouter (LiteLLM)   │   variants     │  ┌ resident (coexist) ───────┐ │
+│  ConversationCache       │                │  │ qwen3.5-4b-q6      :8010  │ │
+│    Redis (short-term)    │─── /slots ────→│  │   262144 ctx (1 slot)     │ │
+│    KV cache mgr          │ (direct :8010) │  │   (no --slot-save-path!)  │ │
+│    rolling summarization │                │  │ bge-reranker-v2-m3 :8012  │ │
+│ SQLite (long-term)       │── /v1/rerank ─→│  └───────────────────────────┘ │
+│  + summary_text +        │                │  ┌ heavy (evicts resident) ──┐ │
+│    covers_through_msg_id │                │  │ qwen3.5-9b-q4      :8011  │ │
+│ MCP server :3001 (HTTP)  │                │  └───────────────────────────┘ │
+│ Qdrant server :6333      │                │ Ollama bge-m3 :11434 (embed)   │
+│  active storage: NVMe    │                │ CLIP (Phase 4)                 │
+│  snapshots → NAS daily   │                └────────────────────────────────┘
 └──────────────────────────┘                             │
            │                                             │
            └──── both mount ──→ NAS (27TB NFS) ──────────┘
@@ -224,18 +224,41 @@ Managed via `pyproject.toml` (uv). Key packages:
 # Activate the project virtualenv (required on Server 1)
 source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
 
-# Server 2 — llama-server (GPU inference + KV cache)
-# Qwen3.5-4B Q6_K_XL — ChatML format, --jinja for template, q8_0 KV
-# VRAM: ~3.4 GB model weights + ~3 GB KV (q8_0, single slot × 262144 ctx) ≈ 6.5 GB / 12 GB
+# Server 2 — llama-swap (owns every GPU model; runs in a tmux window named "llama-swap")
+# Do NOT start llama-server by hand — llama-swap launches all three backends from
+# llama-swap--config.yaml. It listens on :8000 and proxies /v1/chat/completions and
+# /v1/rerank, routing by the request's "model" field.
+bash ./llama-swap--start.sh          # or: tmux send-keys -t llama-swap:0.0 'source ./llama-swap--start.sh' Enter
+#
+#   model                backing port   VRAM (measured 2026-08-27)   group / policy
+#   qwen3.5-4b-q6        8010            9,600 MiB                   resident, ttl 0
+#   bge-reranker-v2-m3   8012              518-590 MiB               resident, ttl 0
+#   qwen3.5-9b-q4        8011           10,796 MiB                   heavy,    ttl 300
+#
+# The 4B + reranker are preloaded together and coexist (735 MiB spare on the 12 GB card).
+# The 9B is a sole tenant: requesting it evicts BOTH; it CANNOT share the card with the
+# reranker (llama-server segfaults during CUDA init). After the 9B's 300 s TTL expires the
+# pair returns lazily on the next request — ~45 s for the 4B over NFS, ~15 s for the reranker.
+# llama-swap v214 has no eviction hook, so eager reload is not available.
+#
 # Single slot for now (no --parallel) until KV cache slot session pinning is resolved.
 # NOTE: existing .bin KV slot files are incompatible when switching models — erase k-v-caches/*.bin first
-llama-server \
-  -m ~/Gin-AI/LLMs-cache/llama-server/Qwen3.5-4B-UD-Q6_K_XL.gguf \
-  --jinja --flash-attn on \
-  --cache-type-k q8_0 --cache-type-v q8_0 \
-  -ngl 99 --ctx-size 262144 \
-  --slot-save-path ~/Gin-AI/LLMs-cache/llama-server/k-v-caches/ \
-  --host 0.0.0.0 --port 8000
+# KV cache ops bypass llama-swap and hit the 4B natively on :8010 (llama_server.base_url).
+#
+# (!!!) KV slot save/restore is currently NON-FUNCTIONAL. llama-swap launches the 4B
+# without --slot-save-path, so POST /slots/{id}?action=save returns 501
+# "This server does not support slots action". k-v-caches/ has been empty since
+# 2026-05-15. SoHoAI-config.yaml still declares llama_server.slot_save_path, and
+# kv_cache.py still calls these endpoints. See docs/TODO.md. Fixing it means adding
+# --slot-save-path to the qwen3.5-4b-q6 cmd in llama-swap--config.yaml, but slot
+# session pinning is still unresolved (see design-history 2026-05-27) so this was
+# left alone pending a decision.
+
+# Server 2 — health checks
+curl -sS http://192.168.1.95:8000/v1/models                       # what llama-swap serves
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv   # what is on the GPU
+curl -sS http://192.168.1.95:8000/v1/rerank -H 'Content-Type: application/json' \
+  -d '{"model":"bge-reranker-v2-m3","query":"test","documents":["foo"]}'    # reranker alive?
 
 # Server 1 — Qdrant vector store (enabled at boot; restart after reboot)
 sudo systemctl start qdrant          # starts /usr/local/bin/qdrant on port 6333

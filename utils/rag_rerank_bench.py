@@ -13,7 +13,7 @@ Usage (run from project root):
     python utils/rag_rerank_bench.py --user florian --mode hybrid           # hybrid only
     python utils/rag_rerank_bench.py --user florian --mode hybrid+rerank    # hybrid+rerank only
     python utils/rag_rerank_bench.py --user florian --top-k 10              # fetch more
-    python utils/rag_rerank_bench.py --user florian --rerank-url http://192.168.1.95:8001/v1/rerank
+    python utils/rag_rerank_bench.py --user florian --rerank-url http://192.168.1.95:8000/v1/rerank
 
 Queries file format (utils/rag_bench_queries.txt by default):
     query text | expected_path_substring   # lines starting with # are comments
@@ -299,7 +299,7 @@ def main() -> int:
     qdrant_client = get_client(qdrant_url)
 
     rerank_cfg = rag_cfg.get("rerank", {})
-    rerank_url = args.rerank_url or rerank_cfg.get("server_url", "http://192.168.1.95:8001/v1/rerank")
+    rerank_url = args.rerank_url or rerank_cfg.get("server_url", "http://192.168.1.95:8000/v1/rerank")
 
     print(f"\n  Reranking benchmark  user={args.user}  top_k={args.top_k}")
     print(f"  Qdrant: {qdrant_url}  |  queries: {len(queries)}  |  mode: {args.mode}")
