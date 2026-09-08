@@ -19,12 +19,14 @@ Turn 2: POST with 5 tool_result blocks in a single user message.
         → Expect final text referencing "42", "root", "644", "2024-03-15", and "17".
 
 Targets: ollama-cloud/deepseek-v4-pro, ollama-cloud/kimi-k2.7-code,
-         ollama-cloud/kimi-k3, ollama-cloud/glm-5.1,
+         ollama-cloud/kimi-k3, ollama-cloud/glm-5.2, ollama-cloud/glm-5.3-flash,
          local/qwen3-4b-q6 (informational, non-gating).
 
 Note: ollama-cloud/qwen3-coder-next was retired by Ollama Cloud on 2026-07-15
-(confirmed via direct API probe 2026-07-30 — returns HTTP 410 Gone) and has been
-removed as a target.
+(confirmed via direct API probe 2026-07-30 — returns HTTP 410 Gone; re-confirmed
+2026-09-08) and has been removed as a target. ollama-cloud/glm-5.3-flash was
+added 2026-09-08 as its substitute; glm-5.1 was superseded by glm-5.2 in
+SoHoAI-config.yaml and the target updated accordingly.
 
 Exit code: 0 if all ollama-cloud targets PASS, non-zero if any fail.
            Qwen3 failure is printed but does not affect exit code.
@@ -641,7 +643,8 @@ def main():
         ("ollama-cloud/deepseek-v4-pro", False),
         ("ollama-cloud/kimi-k2.7-code", False),
         ("ollama-cloud/kimi-k3", False),
-        ("ollama-cloud/glm-5.1", False),
+        ("ollama-cloud/glm-5.2", False),
+        ("ollama-cloud/glm-5.3-flash", False),
         ("local/qwen3-4b-q6", True),
     ]
 
