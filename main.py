@@ -107,9 +107,12 @@ def _read_active_orchestra_session_id() -> str | None:
 
 
 # -- LiteLLM model rate overrides -----------------------------------------------
-# LiteLLM's model registry may not have current rates for claude-opus-5. Register
-# correct Anthropic list rates so completion_cost() and get_model_info() return
-# accurate values for both the forward path and the litellm fallback cost source.
+# LiteLLM's model registry may lag current Anthropic rates. Register correct
+# Anthropic list rates so completion_cost() and get_model_info() return accurate
+# values for both the forward path and the litellm fallback cost source.
+# Rates verified against https://docs.anthropic.com/en/docs/about-claude/pricing
+# on 2026-09-08 (Sonnet 5's $2/$10 introductory pricing is now permanent; the
+# installed LiteLLM registry already carries it, so no override needed there).
 litellm.register_model({
     "claude-opus-5": {
         "input_cost_per_token": 0.000005,
@@ -126,6 +129,18 @@ litellm.register_model({
         "output_cost_per_token": 0.000050,
         "cache_creation_input_token_cost": 0.00001250,
         "cache_read_input_token_cost": 0.000001,
+        "litellm_provider": "anthropic",
+        "mode": "chat",
+        "max_tokens": 128000,
+        "max_input_tokens": 1000000,
+    },
+    # Fable 5.1: same $10/$50 base rates as Fable 5, but cache reads are priced
+    # at 0.025x input ($0.25/MTok) instead of the standard 0.1x multiplier.
+    "claude-fable-5-1": {
+        "input_cost_per_token": 0.000010,
+        "output_cost_per_token": 0.000050,
+        "cache_creation_input_token_cost": 0.00001250,
+        "cache_read_input_token_cost": 0.00000025,
         "litellm_provider": "anthropic",
         "mode": "chat",
         "max_tokens": 128000,

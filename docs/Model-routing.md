@@ -82,14 +82,24 @@ picks the bare-name YAML entry that carries `ANTHROPIC_API_KEY` for authenticati
 | `anthropic/claude-sonnet-5` | `claude-sonnet-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `anthropic/claude-opus-5` | `claude-opus-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `anthropic/claude-fable-5` | `claude-fable-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
+| `anthropic/claude-fable-5-1` | `claude-fable-5-1` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `ollama-cloud/deepseek-v4-flash` | `ollama-cloud/deepseek-v4-flash` | LiteLLM | Ollama API key | — |
 | `ollama-cloud/deepseek-v4-pro` | `ollama-cloud/deepseek-v4-pro` | LiteLLM | Ollama API key | **~70% 503 rate** — see §2.3 |
-| `ollama-cloud/minimax-m2.5` | `ollama-cloud/minimax-m2.5` | LiteLLM | Ollama API key | — |
+| `ollama-cloud/minimax-m3` | `ollama-cloud/minimax-m3` | LiteLLM | Ollama API key | — |
 | `ollama-cloud/kimi-k3` | `ollama-cloud/kimi-k3` | LiteLLM | Ollama API key | **402 paid-tier gate** — see below |
 | `ollama-cloud/kimi-k2.7-code` | `ollama-cloud/kimi-k2.7-code` | LiteLLM | Ollama API key | — |
-| `ollama-cloud/glm-5.1` | `ollama-cloud/glm-5.1` | LiteLLM | Ollama API key | — |
+| `ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | LiteLLM | Ollama API key | — |
+| `ollama-cloud/glm-5.3-flash` | `ollama-cloud/glm-5.3-flash` | LiteLLM | Ollama API key | — |
 
-**Why `/proxy/v1/models` exposes all 10 — including `anthropic/*`:** Cline builds its
+> **Fable 5.1 pricing note (verified 2026-09-08):** base rates match Fable 5
+> ($10 in / $50 out per MTok), but cache reads are 0.025x input ($0.25/MTok)
+> instead of the standard 0.1x. Registered in `main.py` via `litellm.register_model()`.
+
+> **glm-5.3-flash (added 2026-09-08):** substitute for the retired
+> `ollama-cloud/qwen3-coder-next` (410 Gone since 2026-07-15 — see catalog note
+> below). 1M context, multimodal, tool calling; Ollama Cloud tag `glm-5.3-flash:cloud`.
+
+**Why `/proxy/v1/models` exposes all of these — including `anthropic/*`:** Cline builds its
 model dropdown entirely from this endpoint; it has no hardcoded built-in model list.
 Exposing `anthropic/*` here simply tells Cline those models are selectable — no
 duplication risk. This differs from the old `GET /v1/models` endpoint: that endpoint excluded `anthropic/*` because Claude Code

@@ -119,6 +119,16 @@ model_list:
       max_input_tokens: 999000
       context_window: 1000000
 
+  - model_name: "anthropic/claude-fable-5-1"
+    litellm_params:
+      model: anthropic/claude-fable-5-1
+    model_info:
+      id: "anthropic/claude-fable-5-1"
+      description: "Claude Fable 5.1 — CC transparent forward. No API key configured."
+      max_tokens: 128000
+      max_input_tokens: 999000
+      context_window: 1000000
+
   ####
   #### Models exposed to proxy clients (Cline, OpenCode) — auth via SoHoAI's ANTHROPIC_API_KEY.
   #### Bare names (no provider prefix) so _PROXY_EXPOSED_MODELS can route anthropic/ → these.
@@ -145,6 +155,11 @@ model_list:
   - model_name: claude-fable-5
     litellm_params:
       model: anthropic/claude-fable-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-fable-5-1
+    litellm_params:
+      model: anthropic/claude-fable-5-1
       api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: "ollama-cloud/deepseek-v4-flash"
@@ -219,6 +234,20 @@ model_list:
       max_input_tokens: 1000000 
       context_window: 1000000
 
+  # Added 2026-09-08 as substitute for ollama-cloud/qwen3-coder-next, which was
+  # retired by Ollama Cloud on 2026-07-15 (POST /v1/chat/completions → 410 Gone).
+  - model_name: "ollama-cloud/glm-5.3-flash"
+    litellm_params:
+      model: openai/glm-5.3-flash:cloud
+      api_base: https://ollama.com/v1
+      api_key: os.environ/OLLAMA_API_KEY
+    model_info:
+      id: "ollama-cloud/glm-5.3-flash"
+      description: "GLM 5.3 Flash — Ollama Cloud (multimodal, 1M ctx, tools)"
+      max_tokens: 32000
+      max_input_tokens: 1000000
+      context_window: 1000000
+
 
 # -- Routing Policy ------------------------------------------------------------
 routing:
@@ -244,6 +273,7 @@ router_settings:
     - "ollama-cloud/kimi-k3": ["anthropic/claude-sonnet-5"]
     - "ollama-cloud/kimi-k2.7-code": ["anthropic/claude-sonnet-5"]
     - "ollama-cloud/glm-5.2": ["anthropic/claude-sonnet-5"]
+    - "ollama-cloud/glm-5.3-flash": ["anthropic/claude-sonnet-5"]
 
 #### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
 rag:
