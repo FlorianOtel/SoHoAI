@@ -2,8 +2,8 @@
 title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Opus 5)
-updated_at: 2026-08-27--14-45
+updated_by: OpenCode (Claude Sonnet 5)
+updated_at: 2026-09-11--17-10
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -12,6 +12,88 @@ context: >
 ---
 
 # SoHoAI Design History
+
+---
+
+## 2026-09-11 — Idle-chunk timeout for streaming responses (`router.py`)
+
+### What was wrong
+
+An `ollama-cloud/glm-5.3` streaming request from an octmux `/brain` pipeline (session
+`ses_f745c04b5ffeJyHtX3cG0M4lp8`, project `AYA--ai-assistant`) opened its SSE stream
+normally — LiteLLM logged `200 OK` for the `acompletion(stream=True)` call at
+2026-09-10 21:13:10 — then emitted no further bytes, ever. `SoHoAI-gateway.log` shows
+zero log lines of any kind for the following **11h37m** (next request at 08:50:31 the
+next morning): no exception, no `Proxy stream failed`, no connection close. The
+consuming client (opencode, via `@ai-sdk/openai-compatible`) had no read/idle timeout
+of its own at the time, so it blocked on the same dead stream for the full 11h37m —
+the `/brain` pipeline never completed and the operator saw no error, just a spinner
+that never resolved.
+
+### Root cause
+
+`SmartRouter.complete(stream=True)` only ever guarded **opening** a stream: the
+3-step backoff loop (`request_timeout=60/90/120`) wraps the `litellm_router.acompletion()`
+call that returns the stream object, and `litellm.Timeout` there triggers a retry.
+But once that call succeeds and returns a `CustomStreamWrapper`, nothing in `router.py`
+or in either of `main.py`'s two streaming consumers (`proxy_chat_completions`'s
+`event_stream()`, `_anthropic_messages_litellm`'s `anthropic_event_stream()`) put any
+timeout on **consuming** it — `async for chunk in response_gen:` will wait forever for
+the next chunk if the upstream provider stops sending bytes without closing the
+connection or raising an error on its end. This is a known Ollama Cloud / any
+long-lived-SSE-provider failure mode: a stall is silent by design (no RST, no FIN,
+just nothing) unless the consumer enforces its own idle timeout.
+
+Client-side mitigation was added separately the same day (`opencode.json`'s `sohoai`
+provider now sets `chunkTimeout: 45000` / `headerTimeout: 20000` — see the opencode
+`@ai-sdk/openai-compatible` provider's built-in per-chunk/per-header timeout options).
+This entry is the server-side counterpart: a backstop for every OTHER client of this
+gateway (Cline, direct API callers, anything that doesn't set its own stream timeout),
+and a source of a clean, loggable error instead of requiring log/DB correlation across
+two systems to diagnose (as this incident did).
+
+### Fix (`router.py`)
+
+Added `IDLE_CHUNK_TIMEOUT_S = 60` and `_with_idle_timeout(stream, timeout_s)` — a thin
+async-generator wrapper that races each `stream.__anext__()` against
+`asyncio.wait_for(..., timeout=timeout_s)`, raising `StreamStalledError` if no chunk
+arrives in time. `SmartRouter.complete()` now wraps the stream object at both of its
+`stream=True` return points (the non-Anthropic backoff branch and the Anthropic
+branch) before returning it: `return _with_idle_timeout(raw_stream)`.
+
+No changes were needed in `main.py`: both streaming consumers already wrap their
+`async for chunk in response_gen:` loop in `except Exception as e:` that logs the
+error and yields a clean SSE error frame + `[DONE]` — `StreamStalledError` is an
+`Exception` subclass and flows through that existing handling automatically, now
+correctly identified as `type(e).__name__ == "StreamStalledError"` in the log instead
+of the stream simply never terminating.
+
+60s is deliberately generous relative to normal inter-chunk gaps observed in
+`SoHoAI-gateway.log` (typically <10s) and sits above the opencode-side `chunkTimeout`
+(45s) so the client-side protection fires first in the common case; this is purely a
+backstop for clients that don't set their own timeout.
+
+### What does NOT change
+
+- Non-streaming (`stream=False`) requests are untouched.
+- The existing `request_timeout`/backoff retry logic for opening a stream is untouched
+  — `_with_idle_timeout` only wraps the stream after it has successfully opened.
+- No change to `main.py`.
+
+### Verified
+
+Standalone async test against synthetic fast / slow-but-alive / stalled streams (not
+checked into the repo as a formal test file — this project has no pytest harness;
+smoke-tested via `utils/tool_use_smoke_test.py` conventions instead): a fast stream
+passes through byte-for-byte unchanged; a stream whose per-chunk gaps are individually
+under the timeout completes without raising even though its total duration exceeds the
+timeout; a stream that goes silent for longer than the timeout raises
+`StreamStalledError` with a clear message instead of hanging.
+
+### Code locations
+
+- `router.py`: `IDLE_CHUNK_TIMEOUT_S`, `StreamStalledError`, `_with_idle_timeout()`,
+  both `stream=True` branches of `SmartRouter.complete()`.
 
 ---
 

@@ -19,8 +19,9 @@ automatically disables the Anthropic-specific cache_control injection.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, AsyncIterator, Optional
 
 import litellm
 import yaml
@@ -32,6 +33,43 @@ if TYPE_CHECKING:
 from usage_tracker import UsageTracker
 
 logger = logging.getLogger(__name__)
+
+# Idle-chunk timeout for streaming responses (incident 2026-09-10/11: an
+# ollama-cloud/glm-5.3 stream opened, emitted its first chunk, then went
+# silent forever — no further bytes, no close, no error — and the `async for`
+# loop consuming it in main.py blocked for 11h37m with nothing anywhere in the
+# stack to time it out. `complete(stream=True)` only ever guarded *opening*
+# the stream (the retry/backoff loop below); nothing guarded *consuming* it.
+# This wraps every streaming response in an idle-chunk watchdog so a stalled
+# upstream fails fast and visibly instead of hanging the caller indefinitely.
+# Deliberately generous relative to observed normal inter-chunk gaps (<10s in
+# SoHoAI-gateway.log) and relative to the opencode-side `chunkTimeout` (45s)
+# added for the same incident, so this is a backstop for OTHER clients (Cline,
+# direct API callers) that don't set their own stream timeout.
+IDLE_CHUNK_TIMEOUT_S = 60
+
+
+class StreamStalledError(Exception):
+    """Raised by `_with_idle_timeout` when a streaming response goes silent
+    for longer than `IDLE_CHUNK_TIMEOUT_S` without closing or erroring."""
+
+
+async def _with_idle_timeout(stream: AsyncIterator, timeout_s: float = IDLE_CHUNK_TIMEOUT_S) -> AsyncIterator:
+    """Wrap a streaming LLM response so a stalled upstream (headers/first
+    chunk arrive fine, then nothing further — ever) raises `StreamStalledError`
+    instead of hanging the consumer forever. See `IDLE_CHUNK_TIMEOUT_S` above.
+    """
+    it = stream.__aiter__()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(it.__anext__(), timeout=timeout_s)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            raise StreamStalledError(
+                f"no chunk received for {timeout_s}s — upstream stream appears stalled"
+            ) from None
+        yield chunk
 
 
 class SmartRouter:
@@ -162,9 +200,10 @@ class SmartRouter:
                 kw = {**kwargs, "request_timeout": timeout}
                 try:
                     if stream:
-                        return await self.litellm_router.acompletion(
+                        raw_stream = await self.litellm_router.acompletion(
                             model=target, messages=messages_to_send, stream=True, **kw
                         )
+                        return _with_idle_timeout(raw_stream)
                     else:
                         return await self.litellm_router.acompletion(
                             model=target, messages=messages_to_send, stream=False, **kw
@@ -179,12 +218,13 @@ class SmartRouter:
         else:
             try:
                 if stream:
-                    return await self.litellm_router.acompletion(
+                    raw_stream = await self.litellm_router.acompletion(
                         model=target,
                         messages=messages_to_send,
                         stream=True,
                         **kwargs,
                     )
+                    return _with_idle_timeout(raw_stream)
                 else:
                     return await self.litellm_router.acompletion(
                         model=target,
