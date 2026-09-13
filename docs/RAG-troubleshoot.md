@@ -2,8 +2,8 @@
 title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Opus 5)
-updated_at: 2026-08-27--14-45
+updated_by: OpenCode (Claude Sonnet 5)
+updated_at: 2026-09-13--21-55
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -21,9 +21,120 @@ context: >
   Corrects two false claims in the 2026-05-14 reranker section (that it shared the chat
   llama-server process, and its Gemma-era VRAM budget) and records measured GPU tenancy:
   qwen3.5-9b-q4 (10,796 MiB) cannot coexist with the reranker.
+  Updated 2026-09-13: recurring `history.jsonl` ingestion timeouts traced to two compounding
+  bugs — a config exclude-pattern that never matched the real (symlinked) `.claude` dirname,
+  and a missing Qdrant payload index on `source_path` that made every delete-before-insert an
+  unindexed scan across the full (2.5M-point) collection. Refines the 2026-04-22 timeout
+  diagnosis below: raising the client timeout treated the symptom at 473K points; the real
+  fix at multi-million-point scale is the payload index.
 ---
 
 # SoHoAI RAG Pipeline — Troubleshooting
+
+---
+
+## 2026-09-13 — Recurring `history.jsonl` Timeouts: Exclude-Pattern Miss + Missing Payload Index
+
+### Symptom
+
+`rag_ingest_daemon.py` repeatedly failed to ingest
+`/mnt/nfs/Florian/Gin-AI/dot.claude-Linux/history.jsonl` with:
+
+```
+ERROR: Ingestion failed for .../dot.claude-Linux/history.jsonl: timed out
+qdrant_client.http.exceptions.ResponseHandlingException: timed out
+```
+
+Most cycles logged `WARNING: Empty document, skipping` for the same file instead (harmless
+but wasteful) — the timeout was intermittent, appearing whenever the file happened to be
+re-queued during a slow Qdrant window. `grep -c "Ingestion failed.*timed out"` against
+`rag-ingest.log` found **1,003** occurrences across dozens of unrelated files (`.md`, `.yaml`,
+`.html`, `.docx`, `.jsonl`), confirming this was never specific to `history.jsonl` — that file
+just had far more "at-bats" than any other (see root cause #1).
+
+### Root cause #1 — `exclude_dir_names: ".claude/"` doesn't match the real on-disk dirname
+
+`/home/florian/.claude` is a symlink → `/home/florian/Gin-AI/dot.claude-Linux` → (NFS)
+`/mnt/nfs/Florian/Gin-AI/dot.claude-Linux`. `scan_nfs_roots()` walks the NFS root directly, so
+`os.walk()` sees the real directory name `dot.claude-Linux`, never `.claude`.
+`_is_excluded_dir()` (`rag_engine/scanner.py`) does exact trailing-slash name matching, so the
+existing `.claude/` entry in `rag.scanner.exclude_dir_names` never fires for this tree.
+
+Result: the generic NFS scanner freely ingested, as ordinary documents:
+- `history.jsonl` — Claude Code's CLI *input-history* log (schema: `display`/`pastedContents`/
+  `timestamp`/`project`/`sessionId` — not a session transcript). `_parse_claude_chat()` expects
+  `type: user/assistant` entries, finds none, so text is always empty.
+- `native-sessions/sessions.jsonl`, `native-sessions/telemetry.jsonl` — internal telemetry.
+- `shell-snapshots/*.sh` — ephemeral files Claude Code deletes right after use (separate
+  `[Errno 2] No such file or directory` errors for the same tree).
+- `projects/**/*.jsonl` — the **same** session transcripts already correctly ingested via the
+  dedicated `claude_chats.roots: /home/florian/.claude/projects` scanner, now duplicated a
+  second time under the NFS path with a different `source_path`.
+
+`history.jsonl` specifically is live-appended (every prompt Florian types), so its mtime
+advances on almost every scan cycle — it's reset to `pending` and reprocessed far more often
+than any static file, which is why it disproportionately hit the timeout window in root cause #2.
+
+**Fix:** added `"dot.claude-Linux/"` to `rag.scanner.exclude_dir_names` in
+`SoHoAI-config.yaml`. `scan_claude_chats()` is a separate function scanning
+`/home/florian/.claude/projects` directly — unaffected by this change.
+
+### Root cause #2 — no Qdrant payload index on `source_path`
+
+`GET /collections/documents` returned `"payload_schema": {}` — no payload index existed on
+any field, despite the collection having grown to **2,561,962 points** (vs. 98,737 at Phase 2
+completion in April; the duplication in root cause #1 contributed to this growth). Every
+ingestion's step 0 (`rag_engine/ingest.py::ingest_file()`) deletes stale points via:
+
+```python
+qdrant_client.delete(
+    points_selector=FilterSelector(filter=Filter(must=[
+        FieldCondition(key=FIELD_SOURCE_PATH, match=MatchValue(value=file_path))
+    ]))
+)
+```
+
+Without an index this is an unindexed linear scan across every point in the collection —
+routinely exceeding the `QdrantClient(timeout=60)` set in `get_client()` (`rag_engine/
+collection.py`) at this scale. This is a **refinement**, not a contradiction, of the
+2026-04-22 entry below: at 473K points the 60s timeout bump was sufficient because Qdrant's
+own index-optimization pauses were the bottleneck; at 2.5M+ points the *lack of a payload
+index* became the dominant cost, and no client timeout increase fixes an O(n) scan that grows
+with corpus size.
+
+**Fix:** `rag_engine/collection.py::ensure_payload_indexes()` — called from `ensure_collection()`
+on every process, cached per-process after the first check — creates a `KEYWORD` index on
+`source_path` via `create_payload_index()` (idempotent; Qdrant no-ops if already present).
+Verified on the live collection:
+
+```bash
+$ curl -sS http://192.168.1.93:6333/collections/documents | python3 -c "..."
+payload_schema: {'source_path': {'data_type': 'keyword', 'points': 2561962}}
+```
+
+— built in the background across the full existing collection with no downtime.
+
+### Verification
+
+1. `python3 -c "from rag_engine.collection import get_client, ensure_collection; ..."` — index
+   created and confirmed via `get_collection().payload_schema`.
+2. `python utils/rag_sync_nfs.py --user florian` — with the exclude fix live, the scanner
+   correctly flagged 2,629 now-excluded files under `dot.claude-Linux/` (including
+   `history.jsonl`) as stale and queued fast, non-blocking Qdrant deletes for all of them
+   (`wait=False`); point count dropped from 2,561,962 → 2,452,671.
+3. `python utils/rag_ingest_daemon.py --workers 1 --batch 5` — drained the remaining queue
+   (`pending: 0, failed: 0`) with no further `timed out` errors.
+4. Ad-hoc `points/count` filtered query against `source_path` for `history.jsonl` returned in
+   ~0.03s post-fix (vs. routinely >60s before).
+
+### Known pre-existing, unrelated finding
+
+`utils/rag_status.py` reports `"Qdrant: collection 'documents' does not exist yet"` even
+though the collection is healthy — it checks `get_collections()` (real collection names only)
+and doesn't resolve the `documents` → `documents_new` alias created by a prior
+`rag_sparse_migrate.py --swap`. `ensure_collection()` already resolves aliases correctly; this
+is a cosmetic bug in `rag_status.py`'s own existence check, pre-dating this session and out of
+scope for this fix.
 
 ---
 

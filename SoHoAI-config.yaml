@@ -354,7 +354,11 @@ rag:
       - "__pycache__/"
       - ".git/"
       - "node_modules/"
-      - ".claude/" 
+      - ".claude/"
+      - "dot.claude-Linux/"     # ~/.claude is symlinked here (NFS-hosted) — real on-disk dirname
+                                # doesn't match ".claude/" above; without this the generic NFS
+                                # scanner sweeps up history.jsonl, native-sessions/*.jsonl,
+                                # shell-snapshots/*.sh, and duplicates of claude_chats.roots content
       - ".vscode/"
       - ".venv/"
       - "Library/"              # macOS stuff
