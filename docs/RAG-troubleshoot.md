@@ -26,7 +26,12 @@ context: >
   and a missing Qdrant payload index on `source_path` that made every delete-before-insert an
   unindexed scan across the full (2.5M-point) collection. Refines the 2026-04-22 timeout
   diagnosis below: raising the client timeout treated the symptom at 473K points; the real
-  fix at multi-million-point scale is the payload index.
+  fix at multi-million-point scale is the payload index. Same-session follow-up corrected an
+  in-flight point-count measurement (mid-drain `wait=False` snapshot vs. settled count — actual
+  cleanup was 241,013 points, not the originally reported 109,291) and added a file_type
+  breakdown showing the ~2.46M-point growth since Phase 2 is overwhelmingly legitimate corpus
+  growth, not duplication. Classified as a one-off; noted what would need to recur for it to
+  become a pattern worth dedicated tooling.
 ---
 
 # SoHoAI RAG Pipeline — Troubleshooting
@@ -135,6 +140,87 @@ and doesn't resolve the `documents` → `documents_new` alias created by a prior
 `rag_sparse_migrate.py --swap`. `ensure_collection()` already resolves aliases correctly; this
 is a cosmetic bug in `rag_status.py`'s own existence check, pre-dating this session and out of
 scope for this fix.
+
+### Follow-up correction (same session) — settled point count and growth breakdown
+
+The verification numbers above (`2,561,962 → 2,452,671`) were captured **immediately** after
+`rag_sync_nfs.py` returned. Its cleanup path uses `wait=False` (fire-and-forget) deletes by
+design (§4.3 of `RAG-strategy.md` — the script must not block on Qdrant's re-optimization), so
+that snapshot was taken mid-flight, before Qdrant's internal update queue had finished draining
+the 2,629 queued deletes. Rechecking later with `update_queue.length == 0` (i.e. fully settled)
+gave the true count:
+
+| Checkpoint | Points |
+|---|---|
+| Before cleanup | 2,561,962 |
+| Mid-flight snapshot (queue still draining) — **originally reported, incorrect** | 2,452,671 |
+| Settled (queue empty, confirmed) — **correct** | **2,320,949** |
+
+So the exclude-pattern fix actually removed **241,013** junk/duplicate points, not 109,291 as
+first reported — more than double. **Lesson:** any point-count delta measured right after a
+`wait=False` bulk delete must not be trusted until `GET /collections/documents` shows
+`update_queue.length: 0`; this file's own §4.3 already documents that scripts get an immediate
+return, but this session is the first record of someone (an agent) using that immediate return
+value as if it were the settled count.
+
+That still leaves 241,013 as only ~9.8% of the ~2.46M point growth since the 98,737-point Phase
+2 baseline (April). A temporary diagnostic payload index on `file_type` (created for this
+investigation, then dropped afterward — not part of the shipped fix) broke down the settled
+2,320,949 points:
+
+| file_type | points |
+|---|---|
+| pdf | 1,293,427 |
+| txt | 413,857 |
+| csv | 374,296 |
+| html | 73,352 |
+| md | 62,539 |
+| claude_chat | 47,961 |
+| ipynb | 16,457 |
+| docx | 15,341 |
+| opencode | 14,859 |
+| pptx | 5,192 |
+| yaml | 2,208 |
+| sh | 1,209 |
+| yml | 251 |
+| **sum** | **2,320,949** (matches exactly) |
+
+Conclusion: the ~2.22M point growth since Phase 2 is overwhelmingly legitimate —
+~2.16M from ordinary NFS document growth over five months (PDFs alone: 1.29M — a much larger
+document library than the Phase 2 test corpus), and ~63K from two corpus categories
+(`claude_chat` + `opencode`) that didn't exist yet at Phase 2. The exclude-pattern bug's 241,013
+points is real but a minor contributor, not the main driver of collection growth.
+
+### Is this a pattern? — one-off, but flagged for future awareness
+
+Classified as a **one-off**, not a recurring failure mode — but recording the reasoning here
+so a future incident can be checked against it rather than re-investigated from scratch:
+
+- **The exclude-pattern miss itself** (`.claude/` vs. real dirname `dot.claude-Linux/`) is, as
+  far as this investigation went, a single instance: one NFS-hosted symlink target with a
+  non-obvious rename. It is *not* known to be a systemic pattern across other config entries —
+  the other `exclude_dir_names` entries (`.git/`, `.vscode/`, `.venv/`, etc.) all refer to
+  directories that are genuinely named that way on disk, not symlink targets. However, since
+  this bug class (config pattern silently not matching a symlinked-and-renamed real path) is
+  cheap for a home-lab NFS setup to reproduce (any other dotfile directory rehomed to NFS the
+  same way `.claude` was would evade its own exclude pattern identically), it is worth an
+  occasional manual check — no dedicated tooling was built for this, to avoid overengineering a
+  single-incident fix. A quick manual audit: `find /mnt/nfs/Florian -maxdepth 3 -type d -name
+  "dot.*"` (or `ls -la ~` for new symlinked dotfiles) compared against `rag.scanner.exclude_dir_names`.
+  If a second such mismatch turns up, that would upgrade this from "one-off" to "pattern" and
+  justify a real fix (e.g. resolving `os.path.realpath()` before exclude-matching in
+  `scanner.py::_is_excluded_dir()`, or matching against the symlink target name too).
+- **The missing payload index** was a one-time gap in `ensure_collection()` since the collection
+  was first created (Phase 2, April) — not something that recurs per se, since
+  `ensure_payload_indexes()` is now permanent, idempotent, and runs on every process start. The
+  thing to watch here is different: whether *other* frequently-filtered payload fields (e.g.
+  `owner`, used by per-user search filtering) hit the same unindexed-scan wall as the corpus
+  keeps growing. No index exists yet for `owner` — not fixed here (out of scope; `source_path`
+  was the field actually causing the reported timeouts), but worth adding proactively if
+  per-user search latency degrades, rather than waiting for another timeout incident.
+- **The measurement error** (trusting a `wait=False` snapshot) is on me (the assisting agent),
+  not the codebase — flagging it here mainly so any future agent session re-reads this note
+  before quoting a post-cleanup point count.
 
 ---
 
