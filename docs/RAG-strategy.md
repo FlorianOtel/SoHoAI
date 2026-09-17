@@ -3,7 +3,7 @@ title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
 updated_by: Claude Code (Claude Opus 5)
-updated_at: 2026-08-27--14-45
+updated_at: 2026-09-17--21-10
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -21,6 +21,11 @@ context: >
   (was an unsupervised hand-started process on :8001, down since the 2026-08-21 reboot);
   measured GPU tenancy, 9B/reranker mutual exclusion, rerank_score clarified as an
   unbounded logit rather than a 0-1 score.
+  Updated 2026-09-17: corrected four claims — §3.1's two-phase "mixing models" non sequitur
+  (both hosts serve a byte-identical bge-m3; the real hazard is OLLAMA_CONTEXT_LENGTH divergence,
+  768 on Server 2 vs Ollama's 4096 default on Server 1), the non-existent two-Ollama search split
+  (one `rag.ollama_url` feeds both ingest and search), the stale "bge-m3 on Server 1" in the §13.2
+  diagram, and §13.6's residual "rerank_score (0–1)".
   Updated 2026-05-14: §13 cross-encoder reranking (bge-reranker-v2-m3);
   §14 hybrid sparse+dense search (fastembed BM25 + Qdrant RRF) — code complete,
   migration complete 2026-05-14, hybrid live; §14.7 qdrant-client API name
@@ -367,10 +372,14 @@ queue behind the embedding batch. The `embed_text()` HTTP timeout is **120s** to
 this wait. Do not reduce below 60s while the ingest daemon may be running.
 To reduce search latency during ingestion in CPU mode, lower `--batch` (e.g. `--batch 2`).
 
-**Query latency (GPU mode)**: ~10–20ms/chunk. Search queries are not meaningfully blocked
-by ingestion since Ollama on Server 2 is not used for search (Server 1 search path uses
-Server 1's Ollama). Ensure `ollama_url` in `SoHoAI-config.yaml` is set consistently for both
-the daemon and the search path — mixing servers will produce wrong cosine distances.
+**Query latency (GPU mode)**: ~10–20ms/chunk. There is a single `rag.ollama_url` key, read by
+both `rag_engine/search.py:88` and `rag_engine/ingest.py:697`, so ingestion and search *cannot*
+diverge — there is nothing to keep "consistent". Queries do still contend with ingestion, since
+both hit the same Ollama instance; on GPU the queue simply drains fast enough not to be noticed.
+
+*(Corrected 2026-09-17: this paragraph previously read "Ollama on Server 2 is not used for search
+(Server 1 search path uses Server 1's Ollama)". That describes a two-Ollama split which has never
+existed in the code — one config key feeds both paths.)*
 
 **Why Server 2 VRAM permits bge-m3 when llama-server is idle:**
 When llama-server is stopped on Server 2, bge-m3 (~1.2GB) fits easily in the RTX 5070's
@@ -379,9 +388,38 @@ but inference latency becomes unpredictable under VRAM pressure. Do not run bulk
 with `--workers 3` on GPU while llama-server handles active conversations.
 KV cache grows dynamically during active turns (up to ~4.1 GB for a full 53,248-token slot),
 so free headroom effectively drops to zero under load. No embedding model fits alongside
-llama-server on Server 2. A two-phase approach (bulk ingest on Server 2, incremental on Server 1)
-is also unworkable: embedding model must be consistent between ingestion and real-time query
-embedding — mixing models corrupts Qdrant search results.
+llama-server on Server 2.
+
+**Splitting embedding across hosts — what actually constrains it.** The rule that matters is that
+the embedding *model* be identical between ingestion and query: cosine distance between vectors
+from two different models is meaningless, which is why `mxbai-embed-large` and `qwen3-embedding:8b`
+below are rejected outright rather than mixed in. That rule does **not** forbid running the same
+model on a different host. Verified 2026-09-17: Server 1 and Server 2 serve a byte-identical
+bge-m3 — same Ollama digest `7907646426070047a77226ac…`, same 1,157,672,605-byte blob, F16,
+566.70M params, `bert.context_length` 8192.
+
+Two real differences exist between the hosts, and only one matters:
+
+- **Numerical — negligible.** CPU and CUDA F16 kernels disagree at ~1e-6 relative on an
+  L2-normalised vector, so cosine shifts by ~1e-6. Adjacent hits in this corpus separate by
+  ~0.02–0.2, four to five orders of magnitude above that. Not a corruption risk.
+- **`OLLAMA_CONTEXT_LENGTH` divergence — the one to watch.** Server 2 sets `768` (see
+  `docs/RAG-troubleshoot.md` §"Session — 2026-05-04", the 22× compute-buffer fix); Server 1 sets
+  nothing and takes Ollama's 4096 default. Ollama ties `batch_size` to context for embedding
+  models, so a chunk longer than the configured context is truncated — and a chunk truncated on
+  one host but not the other yields genuinely different vectors. Bounded by the chunk budgets in
+  `rag_engine/ingest.py:105-110` (child 250, flat 512, measured in tiktoken `cl100k_base` per
+  `:128-129`), but bge-m3 tokenises with XLM-R SentencePiece, which runs longer than tiktoken on
+  dense technical content — the same effect described under "Why not `mxbai-embed-large`?" below
+  — so a 512-cl100k flat chunk can straddle 768. **If embedding is ever served from Server 1, set
+  `OLLAMA_CONTEXT_LENGTH=768` there first.**
+
+*(Corrected 2026-09-17: this passage previously concluded that a two-phase approach — bulk ingest
+on Server 2, incremental on Server 1 — was "unworkable" because "mixing models corrupts Qdrant
+search results". The model-consistency premise is right, but the conclusion does not follow from
+it: both hosts run the same model, so a host split is not a model mix. The collection has in fact
+held vectors from both hosts since the 2026-05-04 incident workaround, with no retrieval defect
+attributed to it.)*
 
 **Why not `mxbai-embed-large`?**
 `mxbai-embed-large` uses a BERT WordPiece tokenizer with a hard 512-token limit. Chunk sizes are
@@ -2632,7 +2670,7 @@ reranking addresses this by rescoring a larger dense-retrieved pool using a spec
 User query
     │
     ├─→ Embedding layer
-    │      (bge-m3 on Server 1, Ollama)
+    │      (bge-m3 on Server 2, Ollama — see `rag.ollama_url`)
     │
     ├─→ Qdrant dense retrieval
     │      (top-N candidates, e.g. N = limit × fetch_multiplier, capped at fetch_cap)
@@ -2751,8 +2789,10 @@ fallback visible for debugging (see `docs/RAG-troubleshoot.md` §2026-05-14).
 
 ### 13.6 Scoring and backward compatibility
 
-- **`rerank_score`** (0–1): new field added to results; measures relevance via cross-attention.
-  Not directly comparable to `score` (cosine similarity). Used for final ranking.
+- **`rerank_score`** (unbounded): new field added to results; a raw cross-attention logit,
+  observed roughly −11 … +8 — **not** a 0–1 score. Only its ordering is meaningful. Not
+  comparable to `score` (cosine similarity) on any scale. Used for final ranking.
+  *(Corrected 2026-09-17: this line previously said "(0–1)", contradicting §13.2 above.)*
 - **`score`** (0–1): cosine similarity, preserved in results for backward compatibility.
   When reranking is disabled, results are ordered by `score` (Qdrant order).
 

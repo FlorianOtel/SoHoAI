@@ -162,14 +162,14 @@ model_list:
       model: anthropic/claude-fable-5-1
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  - model_name: "ollama-cloud/deepseek-v4-flash"
+  - model_name: "ollama-cloud/deepseek-v4.1-flash"
     litellm_params:
-      model: openai/deepseek-v4-flash:cloud
+      model: openai/deepseek-v4.1-flash:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
     model_info:
-      id: "ollama-cloud/deepseek-v4-flash"
-      description: "DeepSeek V4 Flash — Ollama Cloud"
+      id: "ollama-cloud/deepseek-v4.1-flash"
+      description: "DeepSeek V4.1 Flash — Ollama Cloud"
       max_tokens: 32000
       max_input_tokens: 1000000
       context_window: 1000000
@@ -277,7 +277,7 @@ router_settings:
 
 #### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
 rag:
-  embedding_model: "bge-m3"                      # 1024-dim, 8192-tok context, served by Ollama on Server 1
+  embedding_model: "bge-m3"                      # 1024-dim, 8192-tok context, served by Ollama on Server 2 (see ollama_url)
   # ollama_url: "http://192.168.1.93:11434/api/embeddings"   # Ollama on Server 1 (explicit IP — not localhost)
   ollama_url: "http://192.168.1.95:11434/api/embeddings"   # Ollama on Server 2 (explicit IP — not localhost)
   opencode_api_url: "http://192.168.1.95:4096"  # OpenCode server — must match opencode.api_url
