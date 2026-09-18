@@ -3,7 +3,7 @@ title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
 updated_by: Claude Code (Claude Opus 5)
-updated_at: 2026-09-18--12-36
+updated_at: 2026-09-18--12-56
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -2745,12 +2745,11 @@ groups:
   resident:
     members: ["qwen3.5-9b-q4", "bge-reranker-v2-m3"]
     swap: false        # coexist — do not evict each other
-    exclusive: true    # requesting either evicts the ondemand group
-  ondemand:
-    members: ["qwen3.5-4b-q6"]
-    swap: true
-    exclusive: true
+    exclusive: true    # inert — since 2026-09-18 this is the only group
 ```
+
+`qwen3.5-4b-q6` was removed from llama-swap on 2026-09-18: unreachable since the 9B became
+the default, yet still able to evict the resident pair if anything had asked for it.
 
 Measured VRAM on the 12,227 MiB RTX 5070:
 
@@ -2758,7 +2757,6 @@ Measured VRAM on the 12,227 MiB RTX 5070:
 |-------|------|
 | `qwen3.5-9b-q4` @ **131072** ctx (2026-09-17) | **8,382 MiB** |
 | `qwen3.5-9b-q4` @ 262144 ctx (2026-08-27) | 10,796 MiB |
-| `qwen3.5-4b-q6` @ 262144 ctx | 9,600 MiB |
 | `bge-reranker-v2-m3` | 518–590 MiB |
 | Ollama `bge-m3` embeddings | 816–826 MiB |
 

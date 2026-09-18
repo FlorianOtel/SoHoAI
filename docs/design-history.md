@@ -3,7 +3,7 @@ title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Opus 5)
-updated_at: 2026-09-18--12-37
+updated_at: 2026-09-18--12-56
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -79,6 +79,16 @@ retired models), plus `routing.summarization_model` still on the pre-rename `loc
 `local_model_pricing` key. Separately, `llama_server.base_url` pointed at `:8010`, the retired
 4B's port, with **nothing listening**; the gateway logged `KVCacheManager ready ... 8010,
 2 slot(s) ✓` on every start because it never probes. Repointed to `:8011`, `num_slots` 2 → 1.
+
+### Follow-up 2026-09-18 — the 4B removed from llama-swap
+
+`qwen3.5-4b-q6` was left as an `ondemand` member when the 9B took over. That was a loaded gun:
+nothing could route to it (gone from `model_list` and `opencode.json`), but llama-swap would
+still have launched it on request and, being `exclusive: true`, **evicted the resident 9B +
+reranker pair to do so** — a full swap triggered by a model no longer in service. Entry and
+group both removed; `resident` is now the only group, so its `exclusive: true` is inert and
+kept only so adding a second group stays safe. The GGUF stays in `LLMs-cache`, so restoring it
+is a config-only change.
 
 ### Gotcha
 

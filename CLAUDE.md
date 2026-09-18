@@ -29,7 +29,7 @@ for family photos and RL training data collection from chat interactions.
 | Server | IP | Role | Hardware |
 |--------|------|------|----------|
 | Server 1 | 192.168.1.93 | Orchestrator, front-end, Redis cache, RAG, MCP server | 32GB RAM, AMD iGPU Radeon 680M |
-| Server 2 | 192.168.1.95 | LLM inference engine | 16GB RAM, Nvidia RTX 5070 12GB, llama-server (Qwen3.5-4B) |
+| Server 2 | 192.168.1.95 | LLM inference engine | 16GB RAM, Nvidia RTX 5070 12GB, llama-swap (Qwen3.5-9B + reranker) |
 | NAS | NFS-mounted | Persistent storage for everything | 27TB |
 
 ### Storage paths
@@ -70,9 +70,8 @@ Server 1 (192.168.1.93)                     Server 2 (192.168.1.95)
 │    rolling summarization │                │  │   (no --slot-save-path!)  │ │
 │ SQLite (long-term)       │── /v1/rerank ─→│  │ bge-reranker-v2-m3 :8012  │ │
 │  + summary_text +        │                │  └───────────────────────────┘ │
-│    covers_through_msg_id │                │  ┌ ondemand ─────────────────┐ │
-│ MCP server :3001 (HTTP)  │                │  │ qwen3.5-4b-q6      :8010  │ │
-│                          │                │  └───────────────────────────┘ │
+│    covers_through_msg_id │                │                                │
+│ MCP server :3001 (HTTP)  │                │                                │
 │ Qdrant server :6333      │                │ Ollama bge-m3 :11434 (embed)   │
 │  active storage: NVMe    │                │ CLIP (Phase 4)                 │
 │  snapshots → NAS daily   │                └────────────────────────────────┘
@@ -234,13 +233,14 @@ bash ./llama-swap--start.sh          # or: tmux send-keys -t llama-swap:0.0 'sou
 #   model                backing port   VRAM (measured)              group / policy
 #   qwen3.5-9b-q4        8011            8,382 MiB @131072 ctx       resident, ttl 0
 #   bge-reranker-v2-m3   8012              518-590 MiB               resident, ttl 0
-#   qwen3.5-4b-q6        8010            9,600 MiB @262144 ctx       ondemand, ttl 300
 #
 # 2026-09-17: the 9B became the resident default (routing.default_model) at --ctx-size 131072
 # with --reasoning off. At that context it COEXISTS with the reranker and the bge-m3 embedder:
 # 9,810 MiB used, 1,965 free, verified by a 10-min concurrent soak (30/30 samples, 0 errors).
 # The 262144-ctx mutual exclusion recorded 2026-08-27 applies only at that larger context.
-# The 4B is on-demand and currently unreferenced by SoHoAI and opencode.json.
+# qwen3.5-4b-q6 was REMOVED from llama-swap on 2026-09-18 — it had been unreachable since
+# the 9B became default (gone from SoHoAI model_list and opencode.json). Its GGUF remains in
+# LLMs-cache, so restoring it is a config-only change.
 # llama-swap v214 has no eviction hook, so eager reload after a TTL expiry is not available.
 #
 # (!!!) A llama-swap config reload (--watch-config polls every 2 s) restarts the backends and
