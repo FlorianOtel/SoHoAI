@@ -2,8 +2,8 @@
 title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: OpenCode (Claude Sonnet 5)
-updated_at: 2026-09-11--17-10
+updated_by: Claude Code (Claude Opus 5)
+updated_at: 2026-09-18--12-37
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -15,6 +15,86 @@ context: >
 
 ---
 
+
+## 2026-09-17/18 — Qwen3.5-9B becomes the resident default; the 9B/reranker exclusion was a context-size artefact
+
+### What changed
+
+`llama-swap--config.yaml`: the 9B moved to `--ctx-size 131072` (was 262144), gained
+`--reasoning off`, took `ttl: 0` and joined the `resident` group with the reranker. The 4B
+dropped to an `ondemand` group at `ttl: 300`. `SoHoAI-config.yaml`: `routing.default_model`
+is now `local/qwen3.5-9b-q4`.
+
+### Why — the premise that started this was wrong
+
+The work began as "move the reranker and/or embedder to Server 1 to make room for the 9B".
+Two measurements killed that: Server 1 has no usable accelerator (ROCm absent, `vulkaninfo`
+sees only `llvmpipe` because `/dev/dri/renderD128` is `root:render` and the user is not in
+`render`), and CPU is precisely what these workloads cannot afford — embedding is ~650 ms/chunk
+on CPU vs ~10–20 ms on GPU (~65×), both on the real-time query path.
+
+Cutting the 9B's context does the whole job instead. KV is 17,408 B/token, so 262144 → 131072
+frees ~2.2 GB.
+
+| | @262144 | @131072 |
+|---|---|---|
+| `qwen3.5-9b-q4` | 10,796 MiB | **8,382 MiB** |
+| + reranker + bge-m3 | 12,212 (segfault) | **9,810 → 1,965 free** |
+
+**This supersedes the 2026-08-27 finding that the 9B and reranker cannot coexist.** That
+finding is correct only at 262144. Validated by a 10-minute concurrent soak driving generation,
+reranking and embedding simultaneously: 30/30 samples, 0 errors, all three resident throughout.
+Retrieval was unaffected — 1.37–1.98 s under load, median ~1.49 s, inside its documented budget.
+
+### Gate G0 against the local 9B
+
+AYA's H3.5 exit gate had only ever run on cloud models. Added a `C5` arm
+(`sohoai/qwen3.5-9b-q4`) and ran the full matrix: **0/150 confident false negatives = 0.00%,
+95% CI [0.00%, 2.50%]** — identical to both `claude-haiku-4-5` arms, better than
+`deepseek-v4-flash` (2.00%) and `glm-5.3-flash` (0.67%). Warm turn p50 1,526 ms vs
+haiku-native's 1,535 ms. One `OTHER` row hand-adjudicated: answered "87" where the key wanted
+"87 percent", correct SOURCE cited — a formatting variance, not a false negative. The CI
+overlaps the cloud pooled rate, so the supported claim is **"no worse than cloud on this
+fixture"**, not "better".
+
+### Thinking suppression, and two aliases onto one process
+
+Qwen3.5 emits `reasoning_content` by default and will spend a small `max_tokens` budget
+entirely on it. `--reasoning off` on the llama-server cmd line is the server default; a request
+carrying `chat_template_kwargs.enable_thinking` **overrides it in both directions** (verified).
+OpenCode's session API body has no slot for provider params, so injection must happen in
+SoHoAI — and LiteLLM does forward `extra_body` from `litellm_params` (verified end-to-end, not
+just read from `litellm/main.py:3304-3306`). Hence `local/qwen3.5-9b-agentic`: a second alias
+onto the *same* llama-swap model that re-enables thinking. Two behaviours, one 8,382 MiB
+process, no swapping. Two concurrent 9B processes are impossible — weights alone are 6,206 MiB
+each, so 2× overshoots the card even at 16k/16k context.
+
+### Stale references cleaned out of SoHoAI-config.yaml
+
+An audit cross-checking every model reference against `model_list` found five broken ones, of
+which only two had been noticed: `routing.default_model` and the `glm-5.2` fallback source (both
+retired models), plus `routing.summarization_model` still on the pre-rename `local/qwen3-9b-q4`
+— that one would have thrown mid-conversation at the ~100K-token summarization trigger —
+`rag.multi_query.variant_model` on `local/qwen3-4b`, a name that never existed, and a
+`local_model_pricing` key. Separately, `llama_server.base_url` pointed at `:8010`, the retired
+4B's port, with **nothing listening**; the gateway logged `KVCacheManager ready ... 8010,
+2 slot(s) ✓` on every start because it never probes. Repointed to `:8011`, `num_slots` 2 → 1.
+
+### Gotcha
+
+A llama-swap config reload (`--watch-config`, 2 s poll) restarts the backends and returns 503
+on `/v1/rerank` for ~20–40 s. Caught by the soak, which logged 11 errors clustered in exactly
+that window and none outside it. Do not edit that file mid-meeting.
+
+Worse, and hit for real while committing this change: **two edits inside one load window
+collide.** The second reload fires while the first is still loading, llama-swap logs
+`swapState() Unexpected current state starting, expected stopped`, and can finish holding a
+*working* backend it no longer believes it owns — `curl :8012` succeeds while `:8000` returns
+`unable to start process: upstream command exited prematurely but successfully`, because it
+keeps respawning onto an already-bound port. Recovery: kill the desynced child and let it
+respawn. Batch edits into one write.
+
+---
 ## 2026-09-11 — Idle-chunk timeout for streaming responses (`router.py`)
 
 ### What was wrong

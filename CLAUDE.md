@@ -64,14 +64,15 @@ Server 1 (192.168.1.93)                     Server 2 (192.168.1.95)
 ┌──────────────────────────┐  fallback/     ┌────────────────────────────────┐
 │ FastAPI orchestrator:8000│──summarize/───→│ llama-swap :8000               │
 │  SmartRouter (LiteLLM)   │   variants     │  ┌ resident (coexist) ───────┐ │
-│  ConversationCache       │                │  │ qwen3.5-4b-q6      :8010  │ │
-│    Redis (short-term)    │─── /slots ────→│  │   262144 ctx (1 slot)     │ │
-│    KV cache mgr          │ (direct :8010) │  │   (no --slot-save-path!)  │ │
-│    rolling summarization │                │  │ bge-reranker-v2-m3 :8012  │ │
-│ SQLite (long-term)       │── /v1/rerank ─→│  └───────────────────────────┘ │
-│  + summary_text +        │                │  ┌ heavy (evicts resident) ──┐ │
-│    covers_through_msg_id │                │  │ qwen3.5-9b-q4      :8011  │ │
-│ MCP server :3001 (HTTP)  │                │  └───────────────────────────┘ │
+│  ConversationCache       │                │  │ qwen3.5-9b-q4      :8011  │ │
+│    Redis (short-term)    │─── /slots ────→│  │   131072 ctx (1 slot)     │ │
+│    KV cache mgr          │ (direct :8011) │  │   --reasoning off         │ │
+│    rolling summarization │                │  │   (no --slot-save-path!)  │ │
+│ SQLite (long-term)       │── /v1/rerank ─→│  │ bge-reranker-v2-m3 :8012  │ │
+│  + summary_text +        │                │  └───────────────────────────┘ │
+│    covers_through_msg_id │                │  ┌ ondemand ─────────────────┐ │
+│ MCP server :3001 (HTTP)  │                │  │ qwen3.5-4b-q6      :8010  │ │
+│                          │                │  └───────────────────────────┘ │
 │ Qdrant server :6333      │                │ Ollama bge-m3 :11434 (embed)   │
 │  active storage: NVMe    │                │ CLIP (Phase 4)                 │
 │  snapshots → NAS daily   │                └────────────────────────────────┘
@@ -230,27 +231,38 @@ source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
 # /v1/rerank, routing by the request's "model" field.
 bash ./llama-swap--start.sh          # or: tmux send-keys -t llama-swap:0.0 'source ./llama-swap--start.sh' Enter
 #
-#   model                backing port   VRAM (measured 2026-08-27)   group / policy
-#   qwen3.5-4b-q6        8010            9,600 MiB                   resident, ttl 0
+#   model                backing port   VRAM (measured)              group / policy
+#   qwen3.5-9b-q4        8011            8,382 MiB @131072 ctx       resident, ttl 0
 #   bge-reranker-v2-m3   8012              518-590 MiB               resident, ttl 0
-#   qwen3.5-9b-q4        8011           10,796 MiB                   heavy,    ttl 300
+#   qwen3.5-4b-q6        8010            9,600 MiB @262144 ctx       ondemand, ttl 300
 #
-# The 4B + reranker are preloaded together and coexist (735 MiB spare on the 12 GB card).
-# The 9B is a sole tenant: requesting it evicts BOTH; it CANNOT share the card with the
-# reranker (llama-server segfaults during CUDA init). After the 9B's 300 s TTL expires the
-# pair returns lazily on the next request — ~45 s for the 4B over NFS, ~15 s for the reranker.
-# llama-swap v214 has no eviction hook, so eager reload is not available.
+# 2026-09-17: the 9B became the resident default (routing.default_model) at --ctx-size 131072
+# with --reasoning off. At that context it COEXISTS with the reranker and the bge-m3 embedder:
+# 9,810 MiB used, 1,965 free, verified by a 10-min concurrent soak (30/30 samples, 0 errors).
+# The 262144-ctx mutual exclusion recorded 2026-08-27 applies only at that larger context.
+# The 4B is on-demand and currently unreferenced by SoHoAI and opencode.json.
+# llama-swap v214 has no eviction hook, so eager reload after a TTL expiry is not available.
+#
+# (!!!) A llama-swap config reload (--watch-config polls every 2 s) restarts the backends and
+# returns 502/503 on /v1/rerank for ~20-40 s. Do not edit llama-swap--config.yaml mid-meeting.
+# WORSE: two edits within one load window collide — the second reload fires while the first is
+# still loading, llama-swap logs "swapState() Unexpected current state starting, expected
+# stopped", and it can end up with a WORKING backend it no longer believes it owns. Symptom:
+# curl :8012 succeeds but :8000 returns "unable to start process: upstream command exited
+# prematurely but successfully", because llama-swap keeps respawning onto an already-bound port
+# (ExitError exit status 1). Recovery: kill the desynced child; llama-swap respawns it cleanly.
+# Batch edits to this file into ONE write, then wait for the health checks before touching it.
 #
 # Single slot for now (no --parallel) until KV cache slot session pinning is resolved.
 # NOTE: existing .bin KV slot files are incompatible when switching models — erase k-v-caches/*.bin first
-# KV cache ops bypass llama-swap and hit the 4B natively on :8010 (llama_server.base_url).
+# KV cache ops bypass llama-swap and hit the 9B natively on :8011 (llama_server.base_url).
 #
-# (!!!) KV slot save/restore is currently NON-FUNCTIONAL. llama-swap launches the 4B
+# (!!!) KV slot save/restore is currently NON-FUNCTIONAL. llama-swap launches the 9B
 # without --slot-save-path, so POST /slots/{id}?action=save returns 501
 # "This server does not support slots action". k-v-caches/ has been empty since
 # 2026-05-15. SoHoAI-config.yaml still declares llama_server.slot_save_path, and
 # kv_cache.py still calls these endpoints. See docs/TODO.md. Fixing it means adding
-# --slot-save-path to the qwen3.5-4b-q6 cmd in llama-swap--config.yaml, but slot
+# --slot-save-path to the qwen3.5-9b-q4 cmd in llama-swap--config.yaml, but slot
 # session pinning is still unresolved (see design-history 2026-05-27) so this was
 # left alone pending a decision.
 

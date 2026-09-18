@@ -37,41 +37,40 @@ litellm_settings: {}
 
 # LiteLLM Model Routing ----------------------------------------------------
 model_list:
-  #### First use-case: interactive chat, and local actor/implementer -- local LLM on GPU inference on Server 2
-  #### Note, this is loaded via llama-swap by default -- TTL 0sec (always resident unless evicted) 
-  - model_name: "local/qwen3-4b-q6"
-    litellm_params:
-      model: openai/qwen3.5-4b-q6
-      api_base: "http://${server2_ip}:8000/v1"
-      api_key: "dummy-key"
-    model_info:
-      id: "local/qwen3-4b-q6"
-      description: "Qwen3.5-4B-UD-Q6_K_XL -- local implementer model "
-      # Advertised context window: per-slot capacity with "--ctx-size 262144 --parallel 2"
-      # 262144 / 2 = 131072. This is what external clients (Cline, Claude Code) read via
-      # /proxy/v1/model/info for their contextWindow setting.
-      ### Update 20260526 -- Only one slot, no "--parallel 2", until we figure out K-V cache slot session pinning
-      max_tokens: 262144
-      max_input_tokens: 262144
-      context_window: 262144
-
-
-  #### Second use-case: summarize, and emergency local fallback -- local LLM on GPU inference on Server 2
-  #### Note, this is loaded via llama-swap only when needed, TTL of 300sec
-  - model_name: "local/qwen3-9b-q4"
+  #### 20260917 -- Made primary local model 
+  - model_name: "local/qwen3.5-9b-q4"
     litellm_params:
       model: openai/qwen3.5-9b-q4
       api_base: "http://${server2_ip}:8000/v1"
       api_key: "dummy-key"
     model_info:
-      id: "local/qwen3-9b-q4"
+      id: "local/qwen3.5-9b-q4"
       description: "Qwen3.5-9B-UD-Q4_K_XL -- local chat model "
       # Hybrid attention (full_attention_interval=4): 8/32 layers are full-attention.
       # Effective KV/token (q8_0, full-attn layers only) = 2×8×4×256×1.0625 = 17,408 bytes.
-      # At 262144 ctx → ~4.25 GB KV + ~6.4 GB weights ≈ 10.8 GB total → fits in 12 GB.
-      max_tokens: 262144
-      max_input_tokens: 262144
-      context_window: 262144
+      max_tokens: 131072
+      max_input_tokens: 131072
+      context_window: 131072
+
+  #### TEST 2026-09-18 (extra_body passthrough) -- REMOVE IF THE PROBE FAILS.
+  #### Same llama-swap model as above => SAME process, no extra VRAM. The only
+  #### difference is that this alias re-enables Qwen3.5 thinking, which the
+  #### server turns off by default via `--reasoning off`. If `extra_body` reaches
+  #### llama-server, this alias returns reasoning_content and the plain alias does not.
+  - model_name: "local/qwen3.5-9b-agentic"
+    litellm_params:
+      model: openai/qwen3.5-9b-q4
+      api_base: "http://${server2_ip}:8000/v1"
+      api_key: "dummy-key"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: true
+    model_info:
+      id: "local/qwen3.5-9b-agentic"
+      description: "Qwen3.5-9B-UD-Q4_K_XL -- agentic alias, thinking ON (same process as local/qwen3.5-9b-q4)"
+      max_tokens: 131072
+      max_input_tokens: 131072
+      context_window: 131072
 
   ####
   #### Models consumed transparently by CC — auth is client-side (OAuth or x-api-key).
@@ -251,16 +250,16 @@ model_list:
 
 # -- Routing Policy ------------------------------------------------------------
 routing:
-  default_model: "local/qwen3-4b-q6"
+  default_model: "local/qwen3.5-9b-q4"
   #### Fallback chains are now implemented via "router_settings" above. Leaving this commented anyway.
   # Fallback for Ollama-cloud when throttled
   # fallback_chain: ["anthropic/claude-sonnet-5", "ollama-cloud/kimi-k3"]
   # Route to cloud when context exceeds threshold.
-  # Hard limit: -c 220048 / 2 = 110024 tokens per slot. At 100K we route to cloud,
-  # leaving ~10K headroom for output (default max_tokens=1024 + safety margin).
+  # Hard limit: the 9B runs --ctx-size 131072 on a single slot (2026-09-17). At 100K we
+  # route to cloud, leaving ~31K headroom for output and prompt growth.
   complexity_threshold_tokens: 100000
   cloud_model: "ollama-cloud/minimax-m3"
-  summarization_model: "local/qwen3-9b-q4"
+  summarization_model: "local/qwen3.5-9b-q4"
 
 
 #### --- LiteLLM  configuration --- 
@@ -272,7 +271,7 @@ router_settings:
     - "ollama-cloud/minimax-m3": ["anthropic/claude-opus-5"]
     - "ollama-cloud/kimi-k3": ["anthropic/claude-sonnet-5"]
     - "ollama-cloud/kimi-k2.7-code": ["anthropic/claude-sonnet-5"]
-    - "ollama-cloud/glm-5.2": ["anthropic/claude-sonnet-5"]
+    - "ollama-cloud/glm-5.3": ["anthropic/claude-sonnet-5"]
     - "ollama-cloud/glm-5.3-flash": ["anthropic/claude-sonnet-5"]
 
 #### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
@@ -303,7 +302,7 @@ rag:
     n_variants: 3
     lambda: 0.5
     pool_multiplier: 4
-    variant_model: "local/qwen3-4b"
+    variant_model: "local/qwen3.5-9b-q4"
 
   # -- Cross-encoder reranking (§13) -----------------------------------------
   rerank:
@@ -412,12 +411,12 @@ opencode:
 
 # -- llama-server native API (KV cache slot management) -----------------------
 llama_server:
-  base_url: "http://${server2_ip}:8010"
+  base_url: "http://${server2_ip}:8011"
   # Must match --slot-save-path passed to llama-server on Server 2
   slot_save_path: "/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v-caches/"
   # Number of parallel slots (must match --parallel N on llama-server).
-  # Qwen3.5-4B Q6_K_XL + q8_0 KV + --jinja; 2 slots × 110024 ctx.
-  num_slots: 2
+  # Qwen3.5-9B Q4_K_XL + q8_0 KV + --jinja; 1 slot x 131072 ctx (single-slot stopgap).
+  num_slots: 1
   timeout_seconds: 120
 
 # -- Chat Persistence ----------------------------------------------------------
@@ -426,7 +425,7 @@ chat:
   export_format: "markdown"  # markdown | jsonl
   # Rolling summarization: when total Redis context size exceeds threshold,
   # summarize older turns and keep only the most recent N turns verbatim.
-  # ~400K chars ≈ 100K tokens (4 chars/token). Hard limit is 110024 tokens per slot;
+  # ~400K chars ≈ 100K tokens (4 chars/token). Hard limit is 131072 tokens (9B, 1 slot);
   # 100K input + 1024 output = ~101K, leaving ~9K safety margin.
   summarize_threshold_chars: 400000
   summarize_keep_turns: 20
@@ -435,7 +434,7 @@ chat:
 # litellm.completion_cost() returns 0.0 for local models (correct — no API cost).
 # This block is a placeholder for future electricity-cost estimates if needed.
 local_model_pricing:
-  qwen3-4b:
+  qwen3.5-9b-q4:
     cost_per_million_input_tokens: 0.0    # no API cost
     cost_per_million_output_tokens: 0.0
-    notes: "Qwen3.5-4B Q6_K_XL on RTX 5070; electricity cost not tracked"
+    notes: "Qwen3.5-9B Q4_K_XL on RTX 5070; electricity cost not tracked"

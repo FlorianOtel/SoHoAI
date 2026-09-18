@@ -3,7 +3,7 @@ title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
 updated_by: Claude Code (Claude Opus 5)
-updated_at: 2026-09-17--21-10
+updated_at: 2026-09-18--12-36
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -26,6 +26,10 @@ context: >
   768 on Server 2 vs Ollama's 4096 default on Server 1), the non-existent two-Ollama search split
   (one `rag.ollama_url` feeds both ingest and search), the stale "bge-m3 on Server 1" in the §13.2
   diagram, and §13.6's residual "rerank_score (0–1)".
+  Updated 2026-09-18: §13.3.1 revised — the 9B/reranker mutual exclusion holds only at 262144;
+  at 131072 they coexist (9,810 MiB used, 1,965 free, 10-min soak clean) and the 9B is now the
+  resident default. §13.2 reranker throughput corrected from ~40 ms/candidate to a measured
+  2–4 ms; §13.4 adds an under-load retrieval re-measurement.
   Updated 2026-05-14: §13 cross-encoder reranking (bge-reranker-v2-m3);
   §14 hybrid sparse+dense search (fastembed BM25 + Qdrant RRF) — code complete,
   migration complete 2026-05-14, hybrid live; §14.7 qdrant-client API name
@@ -2693,7 +2697,10 @@ User query
 
 The reranker does **not** consume embedding dimensions (it uses contrastive cross-attention)
 and thus can re-rank 30+ candidates at inference time without re-embedding. Latency is
-~40ms per candidate (sequential server-side), i.e., 1.2s for 30 candidates.
+~2–4 ms per candidate, i.e. **0.05–0.12 s for 30 candidates** (measured 2026-09-17/18,
+repeatedly, under concurrent load). *(Corrected: this line previously read "~40ms per
+candidate … 1.2s for 30", overstating the cost by 10–25×. That figure was the main
+argument for moving the reranker off the GPU, so it is worth not trusting from memory.)*
 
 **Context and batch handling:** The reranker server is configured with `-c 768 -b 768 -ub 768`,
 ensuring both context and physical batch sizes are consistent and handle typical queries
@@ -2731,32 +2738,39 @@ The reranker is a **llama-swap-managed model**, not a standalone process. It was
 hand-started on port 8001 with no supervision of any kind, and consequently vanished at the
 2026-08-21 reboot and stayed down until 2026-08-27.
 
-`llama-swap--config.yaml` places it in a `resident` group alongside the 4B chat model:
+`llama-swap--config.yaml` places it in a `resident` group alongside the 9B chat model:
 
 ```yaml
 groups:
   resident:
-    members: ["qwen3.5-4b-q6", "bge-reranker-v2-m3"]
+    members: ["qwen3.5-9b-q4", "bge-reranker-v2-m3"]
     swap: false        # coexist — do not evict each other
-    exclusive: true    # requesting either evicts the heavy group
-  heavy:
-    members: ["qwen3.5-9b-q4"]
+    exclusive: true    # requesting either evicts the ondemand group
+  ondemand:
+    members: ["qwen3.5-4b-q6"]
     swap: true
-    exclusive: true    # requesting the 9B evicts BOTH resident members
+    exclusive: true
 ```
 
-Measured VRAM on the 12,227 MiB RTX 5070 (2026-08-27):
+Measured VRAM on the 12,227 MiB RTX 5070:
 
 | Model | VRAM |
 |-------|------|
+| `qwen3.5-9b-q4` @ **131072** ctx (2026-09-17) | **8,382 MiB** |
+| `qwen3.5-9b-q4` @ 262144 ctx (2026-08-27) | 10,796 MiB |
 | `qwen3.5-4b-q6` @ 262144 ctx | 9,600 MiB |
 | `bge-reranker-v2-m3` | 518–590 MiB |
-| Ollama `bge-m3` embeddings (Server 2 since `rag.ollama_url` moved) | 826 MiB |
-| `qwen3.5-9b-q4` @ 262144 ctx | 10,796 MiB |
+| Ollama `bge-m3` embeddings | 816–826 MiB |
 
-The 4B + reranker + embeddings triple fits with 735 MiB to spare. The **9B cannot share the
-card with the reranker** — with the reranker resident, the 9B segfaults during CUDA init;
-alone it loads in 5.4 s. Hence the two mutually exclusive groups.
+**Revised 2026-09-17 — the 9B and the reranker DO coexist at 131072 ctx.** The mutual
+exclusion recorded on 2026-08-27 is real only at 262144. KV is 17,408 B/token, so halving
+the context frees ~2.2 GB: 9B + reranker + embeddings = **9,810 MiB, leaving 1,965 free**.
+Validated by a 10-minute concurrent soak (generation + rerank + embed simultaneously):
+30/30 samples, **0 errors**, all three resident throughout. The 9B is now the resident
+default (`routing.default_model`) and the 4B is on-demand.
+
+At 262144 the old finding stands: with the reranker resident the 9B segfaults during CUDA
+init; alone it loads in 5.4 s.
 
 llama-swap v214 has no eviction hook (`hooks.on_startup.preload` is its only hook), so after
 the 9B's 300 s TTL expires the resident pair returns lazily on the next request that needs
@@ -2768,7 +2782,9 @@ each one — ~45 s cold load for the 4B over NFS, ~15 s for the reranker.
 Measured end-to-end latency impact on a single-turn retrieval call:
 
 - **Dense only** (current): ~200–250ms (Ollama embed + Qdrant query)
-- **Dense + rerank** (fetch_cap=30): ~1.2–1.5s (Ollama embed + Qdrant fetch 30 + reranker rescore)
+- **Dense + rerank** (fetch_cap=30): ~1.2–1.5s end-to-end (Ollama embed + Qdrant fetch 30 +
+  reranker rescore). Re-measured 2026-09-17 with the 9B resident and under concurrent load:
+  **1.37–1.98 s, median ~1.49 s** — i.e. making the 9B the resident model costs retrieval nothing.
 - **Two-iteration retrieval** (rag_mode=on with max_iterations=2): up to 2.4–3.0s total
 
 This is acceptable for interactive chat (user sees streaming token output in parallel),
