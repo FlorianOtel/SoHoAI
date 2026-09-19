@@ -32,6 +32,12 @@ proxy:
   # which would incur unexpected Anthropic cost.
   blocked_models:
     - claude-haiku-4-5-20251001
+  # Meta-aliases for direct testing. Not derivable from model_list generically, because they
+  # do not name one specific model. Each target MUST be a real model_list model_name —
+  # _build_proxy_aliases() in main.py raises at import time if it drifts, rather than silently
+  # falling back to a dead literal (which is what caused `model=local` to return HTTP 500).
+  aliases:
+    local: "local/qwen3.5-9b-q4"
 
 litellm_settings: {}
 
@@ -228,7 +234,7 @@ model_list:
       api_key: os.environ/OLLAMA_API_KEY
     model_info:
       id: "ollama-cloud/glm-5.3"
-      description: "GLM 5.2 — Ollama Cloud"
+      description: "GLM 5.3 — Ollama Cloud"
       max_tokens: 32000
       max_input_tokens: 1000000 
       context_window: 1000000
@@ -316,8 +322,7 @@ rag:
     # "model" field above -- so `model` must match the llama-swap model key exactly.
     # Backing llama-server runs with -c 768 -b 768 -ub 768 --reranking --pooling rank,
     # so the client does not truncate; the server handles typical queries + child chunks.
-    # It shares the GPU with qwen3.5-4b-q6 (both ~10.1 GB combined) and is swapped out
-    # together with it whenever qwen3.5-9b-q4 is requested -- see llama-swap--config.yaml.
+    # Coexists with qwen3.5-9b-q4 on GPU; verified 9,810 MiB used / 1,965 MiB free (10-min soak).
 
   # -- Hybrid sparse+dense retrieval (§14) -----------------------------------
   hybrid:

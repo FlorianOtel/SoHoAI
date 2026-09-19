@@ -2,8 +2,8 @@
 title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 5)
-updated_at: 2026-07-15--15-00
+updated_by: Claude Code (Claude Opus 5)
+updated_at: 2026-09-19--02-52
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -26,6 +26,8 @@ context: >
   claude-sonnet-5 (SoHoAI-config.yaml); routing/pricing tables refreshed.
 ---
 
+**⚠️ Staleness notice (2026-09-19):** only §0's model-tier summary and §1 (model mapping, alias resolution, Cline setup) were verified and corrected in the 2026-09-18 model cleanup. **§2–§9 still contain stale model identifiers** — references to `local/qwen3-4b-q6`, `local/qwen3-9b-q4`, `ollama-cloud/glm-5.1`, `glm-5.2`, `deepseek-v4-flash` and `minimax-m2.5` in those sections describe models that no longer exist. Treat them as historical until a dedicated staleness pass lands. The frontmatter `context:` block is likewise historical narrative and is not maintained.
+
 # SoHoAI model routing — Cline and Claude Code integration
 
 Both proxy paths are **stateless**: no Redis, no SQLite, no RAG, no KV cache, no rolling
@@ -35,11 +37,11 @@ summarization. The caller manages its own conversation history.
 
 ## 0. LLM routing overview
 
-SoHoAI routes conversation inference across two model tiers: **external** (Claude Sonnet 5 via Anthropic API, primary cloud default) and **local** (Qwen3.5-4B Q6_K_XL and Qwen3.5-9B Q4_K_XL on Server 2 via llama-swap, fallback/summarization). Routing logic is implemented in `router.py`. The default is external (Sonnet 5); if Anthropic becomes unreachable, the router automatically falls back to local Qwen. Rolling summarization at ~100K tokens uses local/qwen3-9b-q4 to keep per-token costs predictable and persists summaries to SQLite for cold-resume recovery.
+SoHoAI routes conversation inference across two model tiers: **external** (Claude Sonnet 5 via Anthropic API, primary cloud default) and **local** (Qwen3.5-9B Q4_K_XL on Server 2 via llama-swap, fallback/summarization). Routing logic is implemented in `router.py`. The default is external (Sonnet 5); if Anthropic becomes unreachable, the router automatically falls back to local Qwen. Rolling summarization at ~100K tokens uses local/qwen3.5-9b-q4 to keep per-token costs predictable and persists summaries to SQLite for cold-resume recovery.
 
 **External (Sonnet 5) path** goes through LiteLLM with prompt caching enabled — cache_control markers are injected on the system message (long-lived anchor) and on `messages[-2]` (rolling prefix anchor), reducing input cost by ~90% on cache hits. Prompt caching is active only on the Anthropic-compatible path; the local path uses Anthropic prompt caching instead.
 
-**Local (Qwen3.5-4B / Qwen3.5-9B) path** bypasses LiteLLM and calls llama-server's native `/completion` endpoint directly, which is mandatory to pass `slot_id` for KV cache targeting. This path is used only on fallback (Anthropic down), for rolling summarization operations, and for background/offline tasks. Rolling summarization erases the KV slot before calling Qwen, and both summarization and the subsequent main inference start cold sequentially on the same slot. Prompt caching is irrelevant for local inference (no API cost).
+**Local (Qwen3.5-9B) path** bypasses LiteLLM and calls llama-server's native `/completion` endpoint directly, which is mandatory to pass `slot_id` for KV cache targeting. This path is used only on fallback (Anthropic down), for rolling summarization operations, and for background/offline tasks. Rolling summarization erases the KV slot before calling Qwen, and both summarization and the subsequent main inference start cold sequentially on the same slot. Prompt caching is irrelevant for local inference (no API cost).
 
 **Design rationale**: Sonnet 5 is now the interactive default (2026-04-22 flip). At ~50–100 turns/day for a 4-user family, Sonnet with prompt caching costs ~$30–60/mo — tolerable — while delivering substantially better reasoning and tool-use fidelity than a 4B local model. Qwen's role is as a "specialized worker" for fallback and summarization without removing the infrastructure.
 
@@ -76,8 +78,8 @@ picks the bare-name YAML entry that carries `ANTHROPIC_API_KEY` for authenticati
 
 | Public ID | Internal alias | Path | Auth | Context window |
 |---|---|---|---|---|
-| `local/qwen3-4b-q6` | `local/qwen3-4b-q6` | LiteLLM | dummy key | 131,072 |
-| `local/qwen3-9b-q4` | `local/qwen3-9b-q4` | LiteLLM | dummy key | 262,144 |
+| `local/qwen3.5-9b-q4` | `local/qwen3.5-9b-q4` | LiteLLM | dummy key | 131,072 |
+| `local/qwen3.5-9b-agentic` | `local/qwen3.5-9b-agentic` | LiteLLM | dummy key | 131,072 |
 | `anthropic/claude-haiku-4-5` | `claude-haiku-4-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 200,000 |
 | `anthropic/claude-sonnet-5` | `claude-sonnet-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `anthropic/claude-opus-5` | `claude-opus-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
@@ -90,6 +92,8 @@ picks the bare-name YAML entry that carries `ANTHROPIC_API_KEY` for authenticati
 | `ollama-cloud/kimi-k2.7-code` | `ollama-cloud/kimi-k2.7-code` | LiteLLM | Ollama API key | — |
 | `ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | LiteLLM | Ollama API key | — |
 | `ollama-cloud/glm-5.3-flash` | `ollama-cloud/glm-5.3-flash` | LiteLLM | Ollama API key | — |
+
+> **Note:** some rows in this table are still stale — see the staleness notice at the top of this document.
 
 > **Fable 5.1 pricing note (verified 2026-09-08):** base rates match Fable 5
 > ($10 in / $50 out per MTok), but cache reads are 0.025x input ($0.25/MTok)
@@ -106,8 +110,13 @@ duplication risk. This differs from the old `GET /v1/models` endpoint: that endp
 already has those IDs in its native built-in list and would show each model twice if
 the gateway also returned them.
 
-`_resolve_proxy_model()` also accepts legacy bare names (`qwen3-4b`, `claude-sonnet-5`
-etc.) via `_LEGACY_ALIASES` for backward compat with existing Cline configs.
+Model name resolution (`_resolve_proxy_model()` in `main.py`) supports two mechanisms:
+
+1. **Legacy bare names** — derived generically from `model_list` by stripping provider prefixes (e.g. `qwen3.5-9b-q4`, `deepseek-v4-pro`, `claude-sonnet-5`). These are generated automatically for backward compat with existing Cline configs.
+
+2. **Config-driven meta-alias `local`** — defined in `proxy.aliases` in `SoHoAI-config.yaml` and validated against `model_list` at import time by `_build_proxy_aliases()` in `main.py`. This allows a single alias to map to a model name that may change without updating all client configs.
+
+**Breaking change**: The hard-coded short alias `qwen3-4b` has been **removed**. Use `qwen3.5-9b-q4` (the full model name) or the `local` meta-alias instead. The previously-documented `"auto"` alias was never implemented and has been removed from the codebase.
 
 **Model name normalization** (2026-05-22): `_resolve_proxy_model()` now strips CC
 context-window annotations (`[1m]`) and Anthropic date suffixes (`-20251001`) before
@@ -143,7 +152,7 @@ In Cline VSCode settings, choose **LiteLLM** as the provider (not "OpenAI Compat
 ```
 Base URL : http://192.168.1.93:8000/proxy
 API Key  : sohoai-local  (any non-empty string)
-Model    : qwen3-4b  (local, 131K ctx)  OR  claude-sonnet-5  (cloud, 1M ctx)
+Model    : qwen3.5-9b-q4  (local, 131K ctx)  OR  claude-sonnet-5  (cloud, 1M ctx)
 ```
 
 API key must be non-empty — Cline's client-side gate rejects an empty string regardless
@@ -158,7 +167,8 @@ curl http://192.168.1.93:8000/proxy/v1/model/info | python3 -m json.tool | grep 
 ### Shared llama-server slot race
 
 Both SoHoAI's `local` path (summarization, offline fallback) and Cline's
-`qwen3-4b` proxy path hit the same llama-server on Server 2. A Cline request that
+`qwen3.5-9b-q4` proxy path hit the same llama-server on Server 2. The `local` meta-alias
+resolves to the same model, so both share the same KV cache slot. A Cline request that
 lands on a slot between SoHoAI's `restore → inference → save` sequence will corrupt that
 chat's KV state. Accepted risk: SoHoAI's local usage is rare post-flip, and the
 corruption self-heals on the next turn.

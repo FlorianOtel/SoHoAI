@@ -211,7 +211,12 @@ async def lifespan(app: FastAPI):
             "preserving all key facts, decisions, and context needed to continue:\n\n"
             + text
         )
-        summarization_model = config.get("routing", {}).get("summarization_model", "local/qwen3-9b-q4")
+        summarization_model = config.get("routing", {}).get("summarization_model")
+        if not summarization_model:
+            raise RuntimeError(
+                "SoHoAI-config.yaml: routing.summarization_model is required and missing. "
+                "Set it to a valid model_name from model_list."
+            )
         resp = await app.state.router.complete(
             messages=[{"role": "user", "content": prompt}],
             model=summarization_model,
@@ -236,13 +241,19 @@ async def lifespan(app: FastAPI):
 
     # Variant LLM function for multi-query expansion (§8.3).
     # Uses the internal model via LiteLLM's OpenAI-compat endpoint — no KV slot involved.
-    _variant_model = app.state.rag_cfg.get("multi_query", {}).get("variant_model", "local/qwen3-4b-q6")
+    _multi_query_cfg = app.state.rag_cfg.get("multi_query", {})
 
     async def variant_llm_fn(prompt: str) -> str:
+        variant_model = _multi_query_cfg.get("variant_model")
+        if not variant_model:
+            raise RuntimeError(
+                "rag.multi_query.variant_model is not set in SoHoAI-config.yaml — "
+                "cannot run multi-query expansion without an explicit variant model."
+            )
         resp = await app.state.router.complete(
             messages=[{"role": "user", "content": prompt}],
-            model=_variant_model,
-            force_cloud=(_variant_model == "anthropic/claude-sonnet-5"),
+            model=variant_model,
+            force_cloud=(variant_model == "anthropic/claude-sonnet-5"),
             stream=False,
         )
         return resp.choices[0].message.content.strip()
@@ -343,7 +354,7 @@ async def _server_managed_completion(req: ChatRequest, router: SmartRouter):
 
     # -- 4. Single inference --------------------------------------------------
     assistant_content = ""
-    model_used = "local/qwen3-4b-q6"
+    model_used = "unresolved"
     used_internal = False
     inference_ok = False
 
@@ -860,15 +871,34 @@ def _build_proxy_tables(cfg: dict) -> tuple[dict[str, str], frozenset[str], dict
             # Bare name (e.g. claude-sonnet-5) — internal alias; backward-compat legacy entry
             legacy[name] = name
 
-    # "qwen3-4b" is a short alias that cannot be derived from the config model_name;
-    # keep it hardcoded so existing Cline configs that use this short form still work.
-    if "local/qwen3-4b-q6" in exposed:
-        legacy["qwen3-4b"] = "local/qwen3-4b-q6"
-
     return exposed, frozenset(litellm_routed), legacy
 
 
 _PROXY_EXPOSED_MODELS, _LITELLM_ROUTED, _LEGACY_ALIASES = _build_proxy_tables(config)
+
+
+def _build_proxy_aliases(cfg: dict) -> dict[str, str]:
+    """Build meta-aliases (e.g. "local") from proxy.aliases in SoHoAI-config.yaml.
+
+    Unlike _LEGACY_ALIASES — which is derived generically from model_list prefixes —
+    these are hand-authored meta-aliases that do not map to one specific model_name by
+    convention. Validated against model_list at import time so a stale alias fails loudly
+    instead of silently resolving to a model that no longer exists.
+    """
+    known_model_names = {m.get("model_name") for m in cfg.get("model_list", [])}
+    aliases: dict[str, str] = {}
+    for alias_name, target in cfg.get("proxy", {}).get("aliases", {}).items():
+        if target not in known_model_names:
+            raise RuntimeError(
+                f"SoHoAI-config.yaml: proxy.aliases.{alias_name} = {target!r} does not "
+                f"match any model_list entry's model_name. "
+                f"Known model names: {sorted(n for n in known_model_names if n)}"
+            )
+        aliases[alias_name] = target
+    return aliases
+
+
+_PROXY_ALIASES = _build_proxy_aliases(config)
 
 
 def _build_proxy_model_entry(config: dict, public_name: str, internal_name: str) -> dict | None:
@@ -901,19 +931,17 @@ def _resolve_proxy_model(name: str | None) -> str | None:
     """Resolve a proxy client's model name to the internal router alias.
 
     Accepts any of:
-      - bare public name:   "qwen3-4b", "ollama-cloud/deepseek-v4-pro"
-      - provider-prefixed:  "openai/qwen3-4b", "anthropic/claude-sonnet-5", "ollama-cloud/deepseek-v4-pro"
+      - bare public name:   "qwen3.5-9b-q4", "ollama-cloud/deepseek-v4-pro"
+      - provider-prefixed:  "openai/qwen3.5-9b-q4", "anthropic/claude-sonnet-5", "ollama-cloud/deepseek-v4-pro"
       - legacy bare names:  "claude-sonnet-5" (backward compat)
-      - local aliases:      "local", "auto"  (for direct testing)
+      - config-driven meta-alias: "local" (proxy.aliases in SoHoAI-config.yaml)
     Returns the internal router alias or None if unknown.
     """
     if not name:
         return None
-    # Special aliases for direct testing
-    if name == "auto":
-        return None
-    if name == "local":
-        return "local/qwen3-4b-q6"
+    # Config-driven meta-aliases
+    if name in _PROXY_ALIASES:
+        return _PROXY_ALIASES[name]
     # Direct match on public name
     if name in _PROXY_EXPOSED_MODELS:
         return _PROXY_EXPOSED_MODELS[name]
@@ -926,8 +954,8 @@ def _resolve_proxy_model(name: str | None) -> str | None:
         return _PROXY_EXPOSED_MODELS[bare]
     if bare in _LEGACY_ALIASES:
         return _LEGACY_ALIASES[bare]
-    if bare == "local":
-        return "local/qwen3-4b-q6"
+    if bare in _PROXY_ALIASES:
+        return _PROXY_ALIASES[bare]
     # Allow the raw local alias to pass through
     all_aliases = set(_PROXY_EXPOSED_MODELS.values()) | set(_LEGACY_ALIASES.values())
     if name in all_aliases:
@@ -1136,7 +1164,7 @@ async def anthropic_messages_beta(req: Request):
 async def anthropic_messages(req: Request):
     """Anthropic Messages API — model-aware routing.
 
-    Local model (qwen3-4b-q6 → local alias) and Ollama cloud models:
+    Local model (qwen3.5-9b-q4, via the "local" meta-alias) and Ollama cloud models:
     routes via LiteLLM with Anthropic→OpenAI format conversion.
     Tool use is now forwarded on the LiteLLM path (implemented 2026-05-10).
     cache_control markers are also forwarded but have no effect on non-Anthropic
@@ -1148,7 +1176,7 @@ async def anthropic_messages(req: Request):
     cache_control, anthropic-beta headers, and native SSE streaming exactly.
     Full Claude Code tool loop and prompt caching work correctly on this path.
     For ollama-cloud models, tool use now also works on the LiteLLM path, but
-    local/qwen3-4b-q6 tool reliability remains unvalidated.
+    local/qwen3.5-9b-q4 tool reliability remains unvalidated.
     """
     try:
         body_bytes = await req.body()
@@ -1589,8 +1617,8 @@ async def _anthropic_messages_litellm(body: dict, req: Request) -> StreamingResp
       reliable. (`ollama-cloud/qwen3-coder-next` retired by Ollama Cloud
       2026-07-15 — removed from config.)
     - `ollama-cloud/kimi-k3`, `ollama-cloud/kimi-k2.7-code`, and
-      `ollama-cloud/glm-5.1`: untested.
-    - `local/qwen3-4b-q6`: tool-call JSON reliability at Q6_K_XL is unvalidated;
+      `ollama-cloud/glm-5.3`: untested.
+    - `local/qwen3.5-9b-q4`: tool-call JSON reliability is unvalidated;
       may need grammar-constrained generation as a fallback. See docs/TODO.md.
 
     Validation harness: `utils/tool_use_smoke_test.py`.

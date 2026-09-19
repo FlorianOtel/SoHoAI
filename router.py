@@ -118,7 +118,12 @@ class SmartRouter:
                 _litellm.callbacks.append(self._usage_tracker)
 
         self.routing_config = self.config.get("routing", {})
-        self.default_model = self.routing_config.get("default_model", "local/qwen3-4b-q6")
+        self.default_model = self.routing_config.get("default_model")
+        if not self.default_model:
+            raise ValueError(
+                "SoHoAI-config.yaml: routing.default_model is required and missing. "
+                "Set it to a valid model_name from model_list."
+            )
         self.cloud_model = self.routing_config.get("cloud_model", "anthropic/claude-sonnet-5")
         self.complexity_threshold = self.routing_config.get(
             "complexity_threshold_tokens", 2000

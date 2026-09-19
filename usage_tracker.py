@@ -91,7 +91,7 @@ class UsageTracker(CustomLogger):
                 # Fallback: parse model string prefix (e.g., "anthropic/claude-sonnet-5" → "anthropic")
                 if "/" in model:
                     provider = model.split("/")[0]
-                elif any(alias in model for alias in ["local", "gemma"]):
+                elif "local" in model:
                     provider = "local"
                 else:
                     provider = "unknown"

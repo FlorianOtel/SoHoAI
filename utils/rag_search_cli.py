@@ -28,17 +28,47 @@ from rag_engine.collection import get_client
 from rag_engine.search import search_rag
 
 
-async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_cfg: dict, file_types: list[str] | None = None, score_threshold: float = 0.0, multi_query: bool = False, rerank: bool | None = None) -> None:
+async def run(query: str, user_id: str | None, top_k: int, qdrant_url: str, rag_cfg: dict, model_list: list[dict] | None = None, file_types: list[str] | None = None, score_threshold: float = 0.0, multi_query: bool = False, rerank: bool | None = None) -> None:
     qdrant_client = get_client(qdrant_url)
 
     if multi_query:
         from rag_engine.multi_query import multi_query_search
 
+        variant_model_cfg = rag_cfg.get("multi_query", {}).get("variant_model")
+        if not variant_model_cfg:
+            raise RuntimeError(
+                "rag.multi_query.variant_model is not set in SoHoAI-config.yaml — "
+                "required for --multi-query."
+            )
+        # This CLI calls llama-swap on Server 2 directly, bypassing the SoHoAI proxy, so it needs
+        # the raw llama-swap model key. That key is NOT simply the SoHoAI model_name minus its
+        # "local/" prefix: local/qwen3.5-9b-agentic is a SoHoAI-side alias whose backing model is
+        # openai/qwen3.5-9b-q4. Resolve via model_list so a future alias cannot silently break.
+        if not model_list:
+            raise RuntimeError(
+                "model_list is required to resolve the llama-swap model key for multi-query."
+            )
+        _entry = next(
+            (m for m in model_list if m.get("model_name") == variant_model_cfg), None
+        )
+        if _entry is None:
+            raise RuntimeError(
+                f"rag.multi_query.variant_model = {variant_model_cfg!r} does not match any "
+                f"model_list entry in SoHoAI-config.yaml."
+            )
+        _backing = _entry.get("litellm_params", {}).get("model", "")
+        if not _backing:
+            raise RuntimeError(
+                f"model_list entry {variant_model_cfg!r} has no litellm_params.model — "
+                f"cannot determine the llama-swap model key."
+            )
+        variant_model = _backing.split("/", 1)[-1]
+
         async def _llm_fn(prompt: str) -> str:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
                     "http://192.168.1.95:8000/v1/chat/completions",
-                    json={"model": "qwen3-4b", "messages": [{"role": "user", "content": prompt}],
+                    json={"model": variant_model, "messages": [{"role": "user", "content": prompt}],
                           "max_tokens": 150, "temperature": 0.4},
                 )
                 resp.raise_for_status()
@@ -126,10 +156,11 @@ def main() -> None:
         config = yaml.safe_load(f)
 
     rag_cfg = config.get("rag", {})
+    model_list = config.get("model_list", [])
 
     rerank = False if args.no_rerank else None
 
-    asyncio.run(run(args.query, user_id, args.top_k, rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"), rag_cfg, file_types=args.file_types or None, score_threshold=args.score_threshold, multi_query=args.multi_query, rerank=rerank))
+    asyncio.run(run(args.query, user_id, args.top_k, rag_cfg.get("qdrant_url", "http://192.168.1.93:6333"), rag_cfg, model_list=model_list, file_types=args.file_types or None, score_threshold=args.score_threshold, multi_query=args.multi_query, rerank=rerank))
 
 
 if __name__ == "__main__":
