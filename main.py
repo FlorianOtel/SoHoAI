@@ -110,20 +110,12 @@ def _read_active_orchestra_session_id() -> str | None:
 # LiteLLM's model registry may lag current Anthropic rates. Register correct
 # Anthropic list rates so completion_cost() and get_model_info() return accurate
 # values for both the forward path and the litellm fallback cost source.
-# Rates verified against https://docs.anthropic.com/en/docs/about-claude/pricing
-# on 2026-09-08 (Sonnet 5's $2/$10 introductory pricing is now permanent; the
-# installed LiteLLM registry already carries it, so no override needed there).
+# Rates verified against https://platform.claude.com/docs/en/about-claude/pricing
+# on 2026-09-24 (Opus upgraded 5 -> 5.5: installed LiteLLM 1.82.6 already carries
+# correct native rates for both claude-opus-5 ($5/$25) and claude-opus-5-5
+# ($4/$20), so the prior claude-opus-5 override below was removed rather than
+# renamed — same reasoning as Sonnet 5's $2/$10 pricing, which needed no override).
 litellm.register_model({
-    "claude-opus-5": {
-        "input_cost_per_token": 0.000005,
-        "output_cost_per_token": 0.000025,
-        "cache_creation_input_token_cost": 0.00000625,
-        "cache_read_input_token_cost": 0.0000005,
-        "litellm_provider": "anthropic",
-        "mode": "chat",
-        "max_tokens": 128000,
-        "max_input_tokens": 1000000,
-    },
     "claude-fable-5": {
         "input_cost_per_token": 0.000010,
         "output_cost_per_token": 0.000050,

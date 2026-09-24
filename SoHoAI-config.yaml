@@ -104,12 +104,12 @@ model_list:
       max_input_tokens: 999000
       context_window: 1000000
 
-  - model_name: "anthropic/claude-opus-5"
+  - model_name: "anthropic/claude-opus-5-5"
     litellm_params:
-      model: anthropic/claude-opus-5
+      model: anthropic/claude-opus-5-5
     model_info:
-      id: "anthropic/claude-opus-5"
-      description: "Claude Opus 5 — CC transparent forward. No API key configured."
+      id: "anthropic/claude-opus-5-5"
+      description: "Claude Opus 5.5 — CC transparent forward. No API key configured."
       max_tokens: 1000000
       max_input_tokens: 999000
       context_window: 1000000
@@ -149,9 +149,9 @@ model_list:
       model: anthropic/claude-sonnet-5
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  - model_name: claude-opus-5
+  - model_name: claude-opus-5-5
     litellm_params:
-      model: anthropic/claude-opus-5
+      model: anthropic/claude-opus-5-5
       api_key: os.environ/ANTHROPIC_API_KEY
     model_info:
       context_window: 1000000
@@ -274,7 +274,7 @@ router_settings:
   routing_strategy: simple-shuffle
   # Each item in this list is an independent fallback rule
   fallbacks:
-    - "ollama-cloud/minimax-m3": ["anthropic/claude-opus-5"]
+    - "ollama-cloud/minimax-m3": ["anthropic/claude-opus-5-5"]
     - "ollama-cloud/kimi-k3": ["anthropic/claude-sonnet-5"]
     - "ollama-cloud/kimi-k2.7-code": ["anthropic/claude-sonnet-5"]
     - "ollama-cloud/glm-5.3": ["anthropic/claude-sonnet-5"]

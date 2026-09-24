@@ -2,8 +2,8 @@
 title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Opus 5)
-updated_at: 2026-09-19--02-52
+updated_by: Claude Code (Claude Sonnet 5)
+updated_at: 2026-09-24--11-31
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -24,6 +24,12 @@ context: >
   backoff now covers all non-Anthropic models (was ollama-cloud only).
   Update 2026-07-15: interactive default renamed claude-sonnet-4-6 →
   claude-sonnet-5 (SoHoAI-config.yaml); routing/pricing tables refreshed.
+  Update 2026-09-24: Opus renamed claude-opus-5 → claude-opus-5-5
+  (SoHoAI-config.yaml; the register_model() rate override for Opus was also
+  dropped — installed LiteLLM 1.82.6 already carries correct native rates for
+  both). §1 and §6 pricing/model tables refreshed. §3-5's /brain pipeline
+  diagram and cost table are unchanged — those describe oconona's own tier
+  config, per the existing staleness notice below.
 ---
 
 **⚠️ Staleness notice (2026-09-19):** only §0's model-tier summary and §1 (model mapping, alias resolution, Cline setup) were verified and corrected in the 2026-09-18 model cleanup. **§2–§9 still contain stale model identifiers** — references to `local/qwen3-4b-q6`, `local/qwen3-9b-q4`, `ollama-cloud/glm-5.1`, `glm-5.2`, `deepseek-v4-flash` and `minimax-m2.5` in those sections describe models that no longer exist. Treat them as historical until a dedicated staleness pass lands. The frontmatter `context:` block is likewise historical narrative and is not maintained.
@@ -82,7 +88,7 @@ picks the bare-name YAML entry that carries `ANTHROPIC_API_KEY` for authenticati
 | `local/qwen3.5-9b-agentic` | `local/qwen3.5-9b-agentic` | LiteLLM | dummy key | 131,072 |
 | `anthropic/claude-haiku-4-5` | `claude-haiku-4-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 200,000 |
 | `anthropic/claude-sonnet-5` | `claude-sonnet-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
-| `anthropic/claude-opus-5` | `claude-opus-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
+| `anthropic/claude-opus-5-5` | `claude-opus-5-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `anthropic/claude-fable-5` | `claude-fable-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `anthropic/claude-fable-5-1` | `claude-fable-5-1` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `ollama-cloud/deepseek-v4-flash` | `ollama-cloud/deepseek-v4-flash` | LiteLLM | Ollama API key | — |
@@ -513,7 +519,7 @@ All models exposed via `_PROXY_EXPOSED_MODELS` in `main.py`:
 | `local/qwen3-4b-q6` | LiteLLM conversion | llama-server, Server 2 | $0/session; tool-use smoke PASS (Gemma); post-swap validation pending |
 | `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | Safest Actor-tier choice; ~$0.01/session |
 | `anthropic/claude-sonnet-5` | Transparent forward | Anthropic API | Default interactive model |
-| `anthropic/claude-opus-5` | Transparent forward | Anthropic API | Brain tier in /brain pipeline |
+| `anthropic/claude-opus-5-5` | Transparent forward | Anthropic API | Brain tier in /brain pipeline (oconona-side config not yet updated to the new model name) |
 | `ollama-cloud/deepseek-v4-flash` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; not yet validated |
 | `ollama-cloud/deepseek-v4-pro` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; **~70% 503 rate** — see §2.3; not recommended for critical tasks |
 | `ollama-cloud/minimax-m2.5` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; not yet validated |
@@ -610,7 +616,7 @@ model = "claude-*"        →  _anthropic_messages_forward()   (transparent rela
 model = "local/qwen3-*"   →  _anthropic_messages_litellm()  (LiteLLM conversion)
 ```
 
-LiteLLM's `/anthropic` passthrough endpoint has no such branching — it can only forward to Anthropic. It cannot route local models. SoHoAI's implementation handles both paths behind the same `ANTHROPIC_BASE_URL`, which is what allows `claude-haiku-4-5`, `claude-sonnet-5`, `claude-opus-5`, and `local/qwen3-4b-q6` to all be valid `model:` values in agent frontmatter while sharing one endpoint configuration in `settings.json`.
+LiteLLM's `/anthropic` passthrough endpoint has no such branching — it can only forward to Anthropic. It cannot route local models. SoHoAI's implementation handles both paths behind the same `ANTHROPIC_BASE_URL`, which is what allows `claude-haiku-4-5`, `claude-sonnet-5`, `claude-opus-5-5`, and `local/qwen3-4b-q6` to all be valid `model:` values in agent frontmatter while sharing one endpoint configuration in `settings.json`.
 
 ### 5.3 Observation regarding caching — the one finding worth noting
 
@@ -651,7 +657,7 @@ becomes available (account upgrade, region change), no proxy changes are needed.
 
 | Model | Input (uncached) | Input (cached read) | Output |
 |---|---|---|---|
-| Opus 5 | $5/MTok | $0.50/MTok | $25/MTok |
+| Opus 5.5 | $4/MTok | $0.20/MTok | $20/MTok |
 | Sonnet 5 | $2/MTok | $0.20/MTok | $10/MTok |
 | Haiku 4.5 | $0.80/MTok | $0.08/MTok | $4/MTok |
 | Qwen3.5 (local) | $0 | $0 | $0 |
