@@ -2,8 +2,8 @@
 title: "SoHoAI — Project Context & Design Reference"
 created_at: 20260407-000000
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 5)
-updated_at: 2026-07-15--15-00
+updated_by: Claude Code (Claude Opus 5.5)
+updated_at: 2026-10-03--11-21
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   Project instructions and design decisions for Claude Code;
@@ -29,7 +29,7 @@ for family photos and RL training data collection from chat interactions.
 | Server | IP | Role | Hardware |
 |--------|------|------|----------|
 | Server 1 | 192.168.1.93 | Orchestrator, front-end, Redis cache, RAG, MCP server | 32GB RAM, AMD iGPU Radeon 680M |
-| Server 2 | 192.168.1.95 | LLM inference engine | 16GB RAM, Nvidia RTX 5070 12GB, llama-swap (Qwen3.5-9B + reranker) |
+| Server 2 | 192.168.1.95 | LLM inference engine | 16GB RAM, Nvidia RTX 5070 12GB, llama-swap (Qwen3.5-9B + reranker; or Qwen3-ASR + reranker, mutually exclusive) |
 | NAS | NFS-mounted | Persistent storage for everything | 27TB |
 
 ### Storage paths
@@ -63,14 +63,16 @@ for family photos and RL training data collection from chat interactions.
 Server 1 (192.168.1.93)                     Server 2 (192.168.1.95)
 ┌──────────────────────────┐  fallback/     ┌────────────────────────────────┐
 │ FastAPI orchestrator:8000│──summarize/───→│ llama-swap :8000               │
-│  SmartRouter (LiteLLM)   │   variants     │  ┌ resident (coexist) ───────┐ │
+│  SmartRouter (LiteLLM)   │   variants     │  ┌ resident + reranker ──────┐ │
 │  ConversationCache       │                │  │ qwen3.5-9b-q4      :8011  │ │
 │    Redis (short-term)    │─── /slots ────→│  │   131072 ctx (1 slot)     │ │
 │    KV cache mgr          │ (direct :8011) │  │   --reasoning off         │ │
 │    rolling summarization │                │  │   (no --slot-save-path!)  │ │
 │ SQLite (long-term)       │── /v1/rerank ─→│  │ bge-reranker-v2-m3 :8012  │ │
 │  + summary_text +        │                │  └───────────────────────────┘ │
-│    covers_through_msg_id │                │                                │
+│    covers_through_msg_id │                │  ┌ OR asr (evicts the 9B) ───┐ │
+│                          │                │  │ qwen3-asr-1.7b-q8  :8013  │ │
+│                          │                │  └───────────────────────────┘ │
 │ MCP server :3001 (HTTP)  │                │                                │
 │ Qdrant server :6333      │                │ Ollama bge-m3 :11434 (embed)   │
 │  active storage: NVMe    │                │ CLIP (Phase 4)                 │
@@ -226,13 +228,30 @@ source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
 
 # Server 2 — llama-swap (owns every GPU model; runs in a tmux window named "llama-swap")
 # Do NOT start llama-server by hand — llama-swap launches all three backends from
-# llama-swap--config.yaml. It listens on :8000 and proxies /v1/chat/completions and
+# llama-swap--config.yaml (all three, incl. qwen3-asr-1.7b-q8). It listens on :8000 and proxies /v1/chat/completions and
 # /v1/rerank, routing by the request's "model" field.
 bash ./llama-swap--start.sh          # or: tmux send-keys -t llama-swap:0.0 'source ./llama-swap--start.sh' Enter
 #
 #   model                backing port   VRAM (measured)              group / policy
-#   qwen3.5-9b-q4        8011            8,382 MiB @131072 ctx       resident, ttl 0
-#   bge-reranker-v2-m3   8012              518-590 MiB               resident, ttl 0
+#   qwen3.5-9b-q4        8011            8,382 MiB @131072 ctx       resident (exclusive), ttl 0
+#   bge-reranker-v2-m3   8012              518-612 MiB               reranker (persistent), ttl 0
+#   qwen3-asr-1.7b-q8    8013            4,810 MiB @16384 ctx        asr (exclusive), ttl 0
+#
+# 2026-10-03: Qwen3-ASR added (AYA central ASR; measured in AYA's v1.1-PhaseC1 bake-off, see
+# AYA docs/ASR-engine-benchmarks--PhaseC1.md). Three groups, because llama-swap v214 allows a model
+# in only ONE group: the reranker has its own PERSISTENT group (never unloaded), the 9B and
+# Qwen3-ASR each an EXCLUSIVE group. So the GPU holds {9B + reranker} OR {Qwen3-ASR + reranker}:
+# a request for qwen3-asr-1.7b-q8 UNLOADS the 9B (chat is unavailable until the next chat request
+# reloads it, ~48-64 s cold load), and the next chat request unloads Qwen3-ASR. Verified end to end
+# 2026-10-03 (reranker kept the same PID through both swaps). Startup preload is still 9B + reranker.
+# Qwen3-ASR usage: POST /v1/chat/completions, model "qwen3-asr-1.7b-q8", content type "input_audio"
+# (base64 wav/mp3/flac, chunks <= 300 s at 16k ctx); the reply starts "language <X><asr_text>".
+#
+# 2026-10-03: system llama.cpp upgraded 81df3f7 (build 8855) -> a868c3e (build 11345), source
+# /usr/src/llama.cpp, installed to /usr/local (shared libs, CUDA, FA, NCCL). Needed for Qwen3-ASR:
+# builds before 2026-05-15 (PR #23073) return fluent nonsense with HTTP 200 for qwen3 audio.
+# The new build REJECTS --no-mmap; its equivalent is --load-mode none (both backends switched).
+# Rollback: ~/llama.cpp-8855-backup.tar.gz (old bins + libs), ~/llama-swap--config.yaml.pre-upgrade.
 #
 # 2026-09-17: the 9B became the resident default (routing.default_model) at --ctx-size 131072
 # with --reasoning off. At that context it COEXISTS with the reranker and the bge-m3 embedder:

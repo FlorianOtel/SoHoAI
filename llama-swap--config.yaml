@@ -1,6 +1,6 @@
 # llama-swap--config.yaml
 
-# Explicit health-check timeout for slow NFS model loads with --no-mmap.
+# Explicit health-check timeout for slow NFS model loads with --load-mode none.
 # 5.97 GB (9B) at ~200-500 MB/s NFS → 12-30 s load time; 180 s gives ample headroom.
 healthCheckTimeout: 180
 
@@ -23,9 +23,9 @@ models:
 # rag.rerank.model in SoHoAI-config.yaml.
   bge-reranker-v2-m3:
     cmd: |
-      llama-server -m /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/bge-reranker-v2-m3-q8_0.gguf --no-mmap -ngl 99 -c 768 -b 768 -ub 768 --reranking --pooling rank --host 0.0.0.0 --port 8012
+      llama-server -m /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/bge-reranker-v2-m3-q8_0.gguf --load-mode none -ngl 99 -c 768 -b 768 -ub 768 --reranking --pooling rank --host 0.0.0.0 --port 8012
     proxy: http://127.0.0.1:8012
-    ttl: 0  # never idle-evicted; only the 9B group can push it off the GPU
+    ttl: 0  # never idle-evicted; its group is persistent, so neither the 9B nor the ASR group unloads it
 
 #### Qwen3.5-9B-Q4
 # Hybrid attention (full_attention_interval=4): only 8/32 layers store KV for all tokens.
@@ -39,21 +39,44 @@ models:
 # in SoHoAI-config.yaml). This is the configuration that scored 0/150 on AYA Gate G0.
   qwen3.5-9b-q4:
     cmd: |
-      llama-server -m /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/Qwen3.5-9B-UD-Q4_K_XL.gguf --jinja --reasoning off --flash-attn on --no-mmap --cache-type-k q8_0 --cache-type-v q8_0 -ngl 99 --ctx-size 131072 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0 --host 0.0.0.0 --port 8011
+      llama-server -m /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/Qwen3.5-9B-UD-Q4_K_XL.gguf --jinja --reasoning off --flash-attn on --load-mode none --cache-type-k q8_0 --cache-type-v q8_0 -ngl 99 --ctx-size 131072 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0 --host 0.0.0.0 --port 8011
     proxy: http://127.0.0.1:8011
     ttl: 0  # resident default since 2026-09-17 (was 300); routing.default_model points here
 
+#### Qwen3-ASR-1.7B-Q8 -- AYA central ASR (added 2026-10-03; measured in the AYA v1.1-PhaseC1 bake-off)
+# ggml-org/Qwen3-ASR-1.7B-GGUF: Q8_0 2.17 GB + mmproj Q8_0 356 MB. Needs llama.cpp >= 2026-05-15 (PR #23073,
+# qwen3a preprocessing fix); system build a868c3e. MEASURED peak 4,810 MiB at --ctx-size 16384 (3,906 MiB at 8192);
+# 16384 holds a 300 s audio chunk (~13 prompt tokens per second of audio) plus its transcript.
+# Audio in via /v1/chat/completions content type "input_audio"; the reply starts "language <X><asr_text>".
+  qwen3-asr-1.7b-q8:
+    cmd: |
+      llama-server -m /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/Qwen3-ASR-1.7B-Q8_0.gguf --mmproj /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf --load-mode none -ngl 99 --ctx-size 16384 --temp 0 --host 0.0.0.0 --port 8013
+    proxy: http://127.0.0.1:8013
+    ttl: 0
+
 groups:
-#### Default GPU tenants: the 9B chat model and the reranker, loaded together.
-# swap: false      -> members do NOT evict each other; both stay resident at once.
-# exclusive: true  -> would evict every OTHER group; since 2026-09-18 this is the only
-#                     group, so it is inert — kept so adding a second group is safe.
-  resident:
+#### Two mutually exclusive GPU tenants, each paired with the reranker (2026-10-03):
+#   {qwen3.5-9b-q4 + bge-reranker-v2-m3}   or   {qwen3-asr-1.7b-q8 + bge-reranker-v2-m3}
+# llama-swap v214 allows a model in only ONE group, so the reranker gets its own PERSISTENT group:
+# an exclusive group stops every other group EXCEPT persistent ones (proxymanager.go swapProcessGroup:
+# `if groupId != processGroup.id && !otherGroup.persistent`). Loading the 9B unloads Qwen3-ASR and vice
+# versa; the reranker stays loaded throughout. VRAM: 9B 8,382 + reranker ~590 MiB; ASR 4,810 + ~590 MiB.
+  reranker:
     members:
-      - "qwen3.5-9b-q4"  # <-- list items need "-"
       - "bge-reranker-v2-m3"
     swap: false
-    exclusive: true
+    exclusive: false   # loading the reranker never unloads anything
+    persistent: true   # and no other group may unload it
+  resident:
+    members:
+      - "qwen3.5-9b-q4"
+    swap: false
+    exclusive: true    # loading the 9B unloads the asr group
+  asr:
+    members:
+      - "qwen3-asr-1.7b-q8"
+    swap: false
+    exclusive: true    # loading Qwen3-ASR unloads the resident 9B
 
 # The secret sauce for "Always On"
 #### (!!!) 2026-05-16 :  Apparently this is NOT working yet -- i.e. there is no ability to bring back "default" model after TTL is expired -- 5mins for Qwen3.5-9B-Q4 -- and is removed from the GPU VRAM.
