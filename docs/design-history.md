@@ -2,8 +2,8 @@
 title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Opus 5)
-updated_at: 2026-09-18--12-56
+updated_by: Claude Code (Claude Opus 5.5)
+updated_at: 2026-10-03--11-23
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -12,6 +12,80 @@ context: >
 ---
 
 # SoHoAI Design History
+
+---
+
+
+## 2026-10-03 — Qwen3-ASR joins llama-swap (exclusive with the 9B); system llama.cpp upgraded to a868c3e
+
+### What changed
+
+Commit `271af6f`. `llama-swap--config.yaml` gained `qwen3-asr-1.7b-q8` (port 8013;
+ggml-org Qwen3-ASR-1.7B Q8_0 + mmproj Q8_0; `--ctx-size 16384`, `--temp 0`, `ttl: 0`). The
+groups were rebuilt as three:
+
+| Group | Members | Policy |
+|---|---|---|
+| `reranker` | `bge-reranker-v2-m3` | `persistent: true`, `exclusive: false`, never unloaded |
+| `resident` | `qwen3.5-9b-q4` | `exclusive: true`, so loading it unloads `asr` |
+| `asr` | `qwen3-asr-1.7b-q8` | `exclusive: true`, so loading it unloads `resident` |
+
+The system llama.cpp went from `81df3f7` (build 8855) to `a868c3e` (build 11345). The source is
+`/usr/src/llama.cpp`, installed to `/usr/local` with the same CMake options (shared libs, CUDA,
+FA, NCCL). Both existing backends switched `--no-mmap` → `--load-mode none`.
+
+### Why
+
+AYA's v1.1-PhaseC1 ASR bake-off measured Qwen3-ASR as the most accurate engine on every test
+corpus. Its WER was 0.061 on the operator's recordings, against 0.071 for the best on-device
+streaming engine. It ran at RTF ~0.02 on the RTX 5070: a 16-minute meeting in ~19 s. See AYA
+`docs/ASR-engine-benchmarks--PhaseC1.md` §4.6. It is a batch engine, not a streaming one, so its
+use is a central after-the-meeting pass.
+
+**It cannot share the card with the 9B.** Peak VRAM is 4,810 MiB at 16k context (3,906 MiB at
+8k), measured over the whole bake-off. The card has ~2.8 GB free with the 9B and reranker
+resident. So the operator's choice was {9B + reranker} **or** {Qwen3-ASR + reranker}.
+
+**Why three groups and not two.** llama-swap v214 rejects a model in two groups
+(`model member %s is used in multiple groups`). An exclusive group stops every other group
+except persistent ones: in `proxymanager.go` `swapProcessGroup`, the condition is
+`if groupId != processGroup.id && !otherGroup.persistent`. A persistent group for the reranker
+therefore gives exactly the intended pairing.
+
+**Why the llama.cpp upgrade.** Qwen3 audio support landed on 2026-04-12, but builds before PR
+#23073 (2026-05-15, "mtmd: add chunks and fix preproc for qwen3a") mis-preprocess the audio.
+Build 8855 answered HTTP 200 with fluent nonsense ("Hello, my name is John, and I am the manager
+of this hotel") and looped "much, much, much" on 60 s. The fixed build transcribes correctly.
+
+### Verified (2026-10-03)
+
+| Step | Result | On the GPU after |
+|---|---|---|
+| chat → 9B | "OK" | 9B 8,402 MiB + reranker |
+| rerank | relevant document first (−3.875 vs −9.205) | unchanged |
+| Qwen3-ASR (20 s of LibriCSS) | matches the reference text | 9B unloaded; ASR 4,810 MiB + reranker |
+| chat again | "OK" | ASR unloaded; 9B reloaded + reranker |
+
+The reranker kept the same PID through both swaps. Before the switch-over, every model's
+command line was parsed by the new binary with a dummy model path, and none reported an argument
+error. A control confirmed that the check catches `--no-mmap`.
+
+### Accepted limitations
+
+- A Qwen3-ASR request takes chat down until the next chat request reloads the 9B (~48–64 s cold
+  load over NFS).
+- A Q4 Qwen3-ASR with a smaller context might coexist with the 9B, but it is unmeasured. ggml-org
+  ships only Q8_0 and bf16; Q4 builds come from third parties.
+
+### Gotchas
+
+- The new llama.cpp **rejects `--no-mmap`** ("invalid argument"). Its equivalent is
+  `--load-mode none`. Any copied-forward command line from older notes will fail to start.
+- `/usr/src/llama.cpp` held ~900 root-owned files from an earlier `sudo` pull or build, and git
+  could not check out over them. The tree was `chown`ed back to `florian`. Pull and build as the
+  user; only `cmake --install` and `ldconfig` need `sudo`.
+- Rollback: `~/llama.cpp-8855-backup.tar.gz` (old bins + libs),
+  `~/llama-swap--config.yaml.pre-upgrade`, `git -C /usr/src/llama.cpp checkout 81df3f7`.
 
 ---
 
