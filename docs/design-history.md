@@ -3,7 +3,7 @@ title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Opus 5.5)
-updated_at: 2026-10-03--11-23
+updated_at: 2026-10-04--16-45
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -14,6 +14,77 @@ context: >
 # SoHoAI Design History
 
 ---
+
+
+## 2026-10-04 — Nemotron 3 Diarization joins the `asr` group, co-resident with Qwen3-ASR
+
+### What changed
+
+Commit `ee8c147`. `llama-swap--config.yaml` gained `nemotron-3-diarization` (port 8014, `ttl: 0`), a second member of
+the `asr` group:
+
+| Group | Members | Policy |
+|---|---|---|
+| `reranker` | `bge-reranker-v2-m3` | `persistent: true`, `exclusive: false`, never unloaded |
+| `resident` | `qwen3.5-9b-q4` | `exclusive: true`, so loading it unloads `asr` |
+| `asr` | `qwen3-asr-1.7b-q8`, `nemotron-3-diarization` | `exclusive: true`, `swap: false`: both members run together |
+
+The backend is not llama-server but NVIDIA's **NeMo-Speech.cpp** v0.2.0 (Apache-2.0, ggml), the
+prebuilt `linux-x86_64-cuda` release. It is unpacked under `/usr/src/nemo-speech/v0.2.0`, with the
+release tarball and its `.sha256` beside it, and launched by llama-swap as `nemo-speech serve
+--diar-model … --device cuda --port 8014`. The weights are NVIDIA's official, ungated
+`Nemotron-3-Diarization.q8_0.gguf` (107 MB, OpenMDW-1.1), placed in the LLM model cache. Their sha256
+`08456d9e…` equals the Hugging Face LFS oid. The model is a streaming Sortformer that handles up to
+8 speakers, with 10 ms output.
+
+Requests go through llama-swap's passthrough, because llama-swap has no diarization route:
+`POST /upstream/nemotron-3-diarization/v1/audio/diarizations` (multipart `file`). The reply is
+`{"segments":[{"start","end","speaker"}]}`, with seconds and 1-based speakers.
+
+### Why
+
+AYA needs speaker diarization next to its central ASR. Both run on the same meeting audio at the
+same time, so the operator's target combination is {Qwen3-ASR + diarizer + reranker}, not the 9B.
+AYA's v1.1-PhaseD2 measures the same runtime and the same GGUF natively on the MacBook Pro (Metal).
+There it produced the correct known answer, ran at RTF ~0.03, and was callable from Rust over its
+C ABI. Running the same build on Server 2 means one model and one set of numbers everywhere. The
+operator chose NeMo-Speech.cpp over NeMo/PyTorch, which would have needed a custom HTTP wrapper and
+a torch CUDA context. NeMo/PyTorch is kept only for a one-off fidelity comparison
+(`~/aya-phaseD2-nemo-venv`).
+
+### Verified (2026-10-04)
+
+The diarizer alone answered sherpa-onnx's two-speaker known-answer clips correctly (s1a, s1b →
+speaker 1; s2a → speaker 2), identically to the Mac. Then a 10-minute concurrent soak ran three loops
+through llama-swap, with a 30 s warm-up excluded:
+- Qwen3-ASR on 300 s chunks;
+- diarization of a 374 s NOTSOFAR meeting capture;
+- rerank, one query against 20 documents.
+
+| Measure | Result |
+|---|---|
+| VRAM, 30 samples | 6,078–6,086 MiB = Qwen3-ASR 4,810 + diarizer 638–640 + reranker 614; ~6.1 GB free |
+| Errors | 0 (35 ASR, 99 diarization, 8,601 rerank) |
+| Diarization | p50 6.11 s for 374 s of audio (RTF 0.016); identical segments on all 99 requests |
+| ASR / rerank latency | p50 17.1 s per 300 s chunk / p50 74 ms |
+
+### Accepted limitations
+
+- The diarization HTTP route takes a whole file. Streaming exists in the C ABI and as the CLI's
+  default mode, but not as an HTTP route. A live use would call the C ABI or the CLI.
+- Like Qwen3-ASR, any request to the diarizer unloads the 9B, because the `asr` group is
+  exclusive.
+- The diarizer server binds `127.0.0.1`, so it is reachable only through llama-swap on `:8000`.
+
+### Gotchas
+
+- **Saving `llama-swap--config.yaml` restarts every model.** llama-swap runs with `--watch-config`,
+  so a save cold-reloads the 9B through the startup preload (~60 s).
+- **The diarizer needs `checkEndpoint: /v1/models`.** `nemo-speech serve` answers that route, and
+  it is set explicitly rather than relying on llama-swap's default.
+- **Nothing was built.** NeMo-Speech.cpp is the prebuilt release, kept under `/usr/src` by the
+  operator's convention for builds and binaries. A source build needs `cmake ninja sentencepiece
+  abseil`.
 
 
 ## 2026-10-03 — Qwen3-ASR joins llama-swap (exclusive with the 9B); system llama.cpp upgraded to a868c3e
