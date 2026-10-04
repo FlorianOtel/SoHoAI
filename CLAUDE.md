@@ -241,7 +241,10 @@ bash ./llama-swap--start.sh          # or: tmux send-keys -t llama-swap:0.0 'sou
 #
 # 2026-10-04: Nemotron-3-Diarization added to the asr group (AYA central speaker diarization, AYA
 # v1.1-PhaseD2). Backend: NVIDIA NeMo-Speech.cpp v0.2.0 prebuilt linux-x86_64-cuda under
-# /usr/src/nemo-speech/v0.2.0 (`nemo-speech serve`, not llama-server), weights
+# /usr/src/nemo-speech/v0.2.0 (`nemo-speech serve`, not llama-server), on the PATH as
+# /usr/local/bin/nemo-speech -> /usr/src/nemo-speech/current/bin/nemo-speech (symlinks only: its bundled
+# libggml 0.25.1 must NOT go into /usr/local/lib, where llama.cpp's 0.25.3 shares the SONAME; the binary's
+# RPATH $ORIGIN/../lib finds its own). Install/upgrade/rollback: docs/design-history.md 2026-10-04. Weights
 # LLMs-cache/llama-server/Nemotron-3-Diarization.q8_0.gguf. swap: false, so Qwen3-ASR and the
 # diarizer run TOGETHER: {Qwen3-ASR + diarizer + reranker} = 6,086 MiB peak, 0 errors in a 10-min
 # concurrent soak. Usage (llama-swap has no diarization route, so use the passthrough):

@@ -55,7 +55,7 @@ models:
     ttl: 0
 
 #### Nemotron-3-Diarization (q8_0 GGUF) -- AYA central speaker diarization (added 2026-10-04, AYA v1.1-PhaseD2)
-# NVIDIA NeMo-Speech.cpp v0.2.0 prebuilt linux-x86_64-cuda (Apache-2.0), unpacked under /usr/src/nemo-speech/v0.2.0;
+# NVIDIA NeMo-Speech.cpp v0.2.0 prebuilt linux-x86_64-cuda (Apache-2.0), unpacked under /usr/src/nemo-speech/v0.2.0, on the PATH as /usr/local/bin/nemo-speech (symlink; libs stay bundled);
 # weights nvidia/Nemotron-3-Diarization (OpenMDW-1.1), 107 MB, sha256 08456d9e... Same runtime and GGUF as the
 # AYA arm (iii) measurements on the Mac. Shares the asr group with Qwen3-ASR: both run during a meeting.
 # llama-swap has no /v1/audio/diarizations route; reach it through the passthrough:
@@ -65,7 +65,7 @@ models:
 # 0 errors (35 ASR, 99 diarization, 8,601 rerank); diarization RTF 0.016, output identical on every request.
   nemotron-3-diarization:
     cmd: |
-      /usr/src/nemo-speech/v0.2.0/nemo-speech-0.2.0-linux-x86_64-cuda/bin/nemo-speech serve --diar-model /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/Nemotron-3-Diarization.q8_0.gguf --device cuda --host 127.0.0.1 --port 8014
+      /usr/local/bin/nemo-speech serve --diar-model /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/Nemotron-3-Diarization.q8_0.gguf --device cuda --host 127.0.0.1 --port 8014
     proxy: http://127.0.0.1:8014
     checkEndpoint: /v1/models
     ttl: 0
