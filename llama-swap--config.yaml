@@ -54,6 +54,22 @@ models:
     proxy: http://127.0.0.1:8013
     ttl: 0
 
+#### Nemotron-3-Diarization (q8_0 GGUF) -- AYA central speaker diarization (added 2026-10-04, AYA v1.1-PhaseD2)
+# NVIDIA NeMo-Speech.cpp v0.2.0 prebuilt linux-x86_64-cuda (Apache-2.0), unpacked under /usr/src/nemo-speech/v0.2.0;
+# weights nvidia/Nemotron-3-Diarization (OpenMDW-1.1), 107 MB, sha256 08456d9e... Same runtime and GGUF as the
+# AYA arm (iii) measurements on the Mac. Shares the asr group with Qwen3-ASR: both run during a meeting.
+# llama-swap has no /v1/audio/diarizations route; reach it through the passthrough:
+#   POST http://192.168.1.95:8000/upstream/nemotron-3-diarization/v1/audio/diarizations  (multipart "file")
+# MEASURED 2026-10-04, 10-min concurrent soak (Qwen3-ASR 300 s chunks + diarization of a 374 s capture + rerank):
+# diarizer 638-640 MiB; group total 6,078-6,086 MiB (ASR 4,810 + diarizer ~640 + reranker 614), ~6.1 GB free;
+# 0 errors (35 ASR, 99 diarization, 8,601 rerank); diarization RTF 0.016, output identical on every request.
+  nemotron-3-diarization:
+    cmd: |
+      /usr/src/nemo-speech/v0.2.0/nemo-speech-0.2.0-linux-x86_64-cuda/bin/nemo-speech serve --diar-model /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/Nemotron-3-Diarization.q8_0.gguf --device cuda --host 127.0.0.1 --port 8014
+    proxy: http://127.0.0.1:8014
+    checkEndpoint: /v1/models
+    ttl: 0
+
 groups:
 #### Two mutually exclusive GPU tenants, each paired with the reranker (2026-10-03):
 #   {qwen3.5-9b-q4 + bge-reranker-v2-m3}   or   {qwen3-asr-1.7b-q8 + bge-reranker-v2-m3}
@@ -61,6 +77,8 @@ groups:
 # an exclusive group stops every other group EXCEPT persistent ones (proxymanager.go swapProcessGroup:
 # `if groupId != processGroup.id && !otherGroup.persistent`). Loading the 9B unloads Qwen3-ASR and vice
 # versa; the reranker stays loaded throughout. VRAM: 9B 8,382 + reranker ~590 MiB; ASR 4,810 + ~590 MiB.
+# 2026-10-04: the asr group also holds nemotron-3-diarization (swap: false, so both members run together):
+#   {qwen3-asr-1.7b-q8 + nemotron-3-diarization + bge-reranker-v2-m3} = 6,086 MiB peak under a concurrent soak.
   reranker:
     members:
       - "bge-reranker-v2-m3"
@@ -75,8 +93,9 @@ groups:
   asr:
     members:
       - "qwen3-asr-1.7b-q8"
+      - "nemotron-3-diarization"   # swap: false -> both members stay loaded together
     swap: false
-    exclusive: true    # loading Qwen3-ASR unloads the resident 9B
+    exclusive: true    # loading Qwen3-ASR (or the diarizer) unloads the resident 9B
 
 # The secret sauce for "Always On"
 #### (!!!) 2026-05-16 :  Apparently this is NOT working yet -- i.e. there is no ability to bring back "default" model after TTL is expired -- 5mins for Qwen3.5-9B-Q4 -- and is removed from the GPU VRAM.

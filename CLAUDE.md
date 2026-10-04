@@ -29,7 +29,7 @@ for family photos and RL training data collection from chat interactions.
 | Server | IP | Role | Hardware |
 |--------|------|------|----------|
 | Server 1 | 192.168.1.93 | Orchestrator, front-end, Redis cache, RAG, MCP server | 32GB RAM, AMD iGPU Radeon 680M |
-| Server 2 | 192.168.1.95 | LLM inference engine | 16GB RAM, Nvidia RTX 5070 12GB, llama-swap (Qwen3.5-9B + reranker; or Qwen3-ASR + reranker, mutually exclusive) |
+| Server 2 | 192.168.1.95 | LLM inference engine | 16GB RAM, Nvidia RTX 5070 12GB, llama-swap (Qwen3.5-9B + reranker; or Qwen3-ASR + Nemotron-3-Diarization + reranker, mutually exclusive) |
 | NAS | NFS-mounted | Persistent storage for everything | 27TB |
 
 ### Storage paths
@@ -72,6 +72,7 @@ Server 1 (192.168.1.93)                     Server 2 (192.168.1.95)
 │  + summary_text +        │                │  └───────────────────────────┘ │
 │    covers_through_msg_id │                │  ┌ OR asr (evicts the 9B) ───┐ │
 │                          │                │  │ qwen3-asr-1.7b-q8  :8013  │ │
+│                          │                │  │ nemotron-3-diar.   :8014  │ │
 │                          │                │  └───────────────────────────┘ │
 │ MCP server :3001 (HTTP)  │                │                                │
 │ Qdrant server :6333      │                │ Ollama bge-m3 :11434 (embed)   │
@@ -227,8 +228,8 @@ Managed via `pyproject.toml` (uv). Key packages:
 source ~/Gin-AI/.Gin-AI-python-3.12/bin/activate
 
 # Server 2 — llama-swap (owns every GPU model; runs in a tmux window named "llama-swap")
-# Do NOT start llama-server by hand — llama-swap launches all three backends from
-# llama-swap--config.yaml (all three, incl. qwen3-asr-1.7b-q8). It listens on :8000 and proxies /v1/chat/completions and
+# Do NOT start llama-server by hand — llama-swap launches every backend from
+# llama-swap--config.yaml (incl. qwen3-asr-1.7b-q8 and nemotron-3-diarization). It listens on :8000 and proxies /v1/chat/completions and
 # /v1/rerank, routing by the request's "model" field.
 bash ./llama-swap--start.sh          # or: tmux send-keys -t llama-swap:0.0 'source ./llama-swap--start.sh' Enter
 #
@@ -236,6 +237,17 @@ bash ./llama-swap--start.sh          # or: tmux send-keys -t llama-swap:0.0 'sou
 #   qwen3.5-9b-q4        8011            8,382 MiB @131072 ctx       resident (exclusive), ttl 0
 #   bge-reranker-v2-m3   8012              518-612 MiB               reranker (persistent), ttl 0
 #   qwen3-asr-1.7b-q8    8013            4,810 MiB @16384 ctx        asr (exclusive), ttl 0
+#   nemotron-3-diarization 8014            638-640 MiB               asr (exclusive), ttl 0
+#
+# 2026-10-04: Nemotron-3-Diarization added to the asr group (AYA central speaker diarization, AYA
+# v1.1-PhaseD2). Backend: NVIDIA NeMo-Speech.cpp v0.2.0 prebuilt linux-x86_64-cuda under
+# /usr/src/nemo-speech/v0.2.0 (`nemo-speech serve`, not llama-server), weights
+# LLMs-cache/llama-server/Nemotron-3-Diarization.q8_0.gguf. swap: false, so Qwen3-ASR and the
+# diarizer run TOGETHER: {Qwen3-ASR + diarizer + reranker} = 6,086 MiB peak, 0 errors in a 10-min
+# concurrent soak. Usage (llama-swap has no diarization route, so use the passthrough):
+#   POST :8000/upstream/nemotron-3-diarization/v1/audio/diarizations  (multipart "file")
+#   -> {"segments":[{"start","end","speaker"}]}  (seconds, speakers 1-based, up to 8)
+# NOTE: saving llama-swap--config.yaml restarts ALL models (--watch-config); the 9B cold-reloads.
 #
 # 2026-10-03: Qwen3-ASR added (AYA central ASR; measured in AYA's v1.1-PhaseC1 bake-off, see
 # AYA docs/ASR-engine-benchmarks--PhaseC1.md). Three groups, because llama-swap v214 allows a model
