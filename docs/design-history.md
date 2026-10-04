@@ -3,7 +3,7 @@ title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Opus 5.5)
-updated_at: 2026-10-04--16-45
+updated_at: 2026-10-04--17-05
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -31,7 +31,8 @@ the `asr` group:
 
 The backend is not llama-server but NVIDIA's **NeMo-Speech.cpp** v0.2.0 (Apache-2.0, ggml), the
 prebuilt `linux-x86_64-cuda` release. It is unpacked under `/usr/src/nemo-speech/v0.2.0`, with the
-release tarball and its `.sha256` beside it, and launched by llama-swap as `nemo-speech serve
+release tarball and its `.sha256` beside it, and is on the PATH as `/usr/local/bin/nemo-speech`
+(see Installation below). llama-swap launches it as `/usr/local/bin/nemo-speech serve
 --diar-model … --device cuda --port 8014`. The weights are NVIDIA's official, ungated
 `Nemotron-3-Diarization.q8_0.gguf` (107 MB, OpenMDW-1.1), placed in the LLM model cache. Their sha256
 `08456d9e…` equals the Hugging Face LFS oid. The model is a streaming Sortformer that handles up to
@@ -67,6 +68,52 @@ through llama-swap, with a 30 s warm-up excluded:
 | Errors | 0 (35 ASR, 99 diarization, 8,601 rerank) |
 | Diarization | p50 6.11 s for 374 s of audio (RTF 0.016); identical segments on all 99 requests |
 | ASR / rerank latency | p50 17.1 s per 300 s chunk / p50 74 ms |
+
+### Installation (prebuilt, no build) — and why the libraries stay out of `/usr/local/lib`
+
+NeMo-Speech.cpp is installed from NVIDIA's prebuilt release, not built from source. By the operator's
+convention it lives under `/usr/src`, and the binary is reached from a normal path:
+
+```bash
+# 1. Download and verify (as florian; /usr/src is florian-writable)
+mkdir -p /usr/src/nemo-speech && cd /usr/src/nemo-speech
+U=https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v0.2.0
+A=nemo-speech-0.2.0-linux-x86_64-cuda.tar.gz
+curl -fLO $U/$A && curl -fLO $U/$A.sha256
+sha256sum $A; cat $A.sha256          # must match: aef573fc…2d4515
+mkdir -p v0.2.0 && tar -xzf $A -C v0.2.0
+
+# 2. A version-independent link, then the binary on the PATH (the only privileged step)
+ln -sfn v0.2.0/nemo-speech-0.2.0-linux-x86_64-cuda /usr/src/nemo-speech/current
+sudo ln -sfn /usr/src/nemo-speech/current/bin/nemo-speech /usr/local/bin/nemo-speech
+
+# 3. Weights, into the shared model cache
+curl -fL -o /mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/Nemotron-3-Diarization.q8_0.gguf \
+  https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/main/Nemotron-3-Diarization.q8_0.gguf
+sha256sum …/Nemotron-3-Diarization.q8_0.gguf   # 08456d9e…c7a3a1 (= the HF LFS oid)
+
+# 4. Check
+nemo-speech --version; nemo-speech doctor      # must list "[0] gpu NVIDIA GeForce RTX 5070"
+```
+
+**Only the binary is linked into `/usr/local`; the libraries are deliberately NOT copied there.**
+The release bundles its own `libggml.so.0` (0.25.1) and `libllama.so.0` (0.5.0). The system
+llama.cpp (`a868c3e`) installed **the same SONAMEs at 0.25.3** into `/usr/local/lib`, and
+`llama-server` uses those. Copying the bundled libraries over them could break every llama-server
+backend. The binary carries `RPATH $ORIGIN/../lib`, and Linux resolves `$ORIGIN` through the symlink to
+the real binary. So `/usr/local/bin/nemo-speech` loads its own copies. Verified with
+`LD_DEBUG=libs nemo-speech --version` (it tries `/usr/src/nemo-speech/v0.2.0/…/bin/../lib/libggml.so.0`),
+while `ldd /usr/local/bin/llama-server` still resolves `/usr/local/lib/libggml.so.0`.
+
+**Upgrade:** download and verify the new release into `/usr/src/nemo-speech/vX.Y.Z`, repoint `current`
+(`ln -sfn`), and restart its llama-swap member. Saving `llama-swap--config.yaml` with any change
+restarts all models. **Rollback:** repoint `current` at the previous version directory; the
+`/usr/local/bin` link never changes.
+
+**Source build** (not used; for reference, from the project's `docs/build.md`): CMake ≥ 3.26, Ninja,
+a C++17 compiler, SentencePiece and Abseil development packages, and the CUDA toolkit for the CUDA
+backend. Build under `/usr/src/NeMo-Speech.cpp`. If built, install with a prefix of its own (e.g.
+`/usr/local/nemo-speech`), never plain `/usr/local`, for the libggml reason above.
 
 ### Accepted limitations
 
