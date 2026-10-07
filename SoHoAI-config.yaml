@@ -254,6 +254,26 @@ model_list:
       context_window: 1000000
 
 
+# -- Audio Models (ASR + Diarization) -----------------------------------------
+# Transparent forwarder to llama-swap's /upstream/* endpoints.
+# These models are NOT exposed via SmartRouter, health checks, or proxy listings.
+# URL form: /upstream/{short_name}/{path} → llama-swap /upstream/{upstream_key}/{path}
+audio_models:
+  upstream_base: "http://${server2_ip}:8000"
+  timeout_seconds: 300
+  models:
+    qwen3-asr:
+      public_name: "local/qwen3-asr"
+      upstream_key: "qwen3-asr-1.7b-q8"
+      kind: "asr"
+      description: "Qwen3-ASR 1.7B Q8 — automatic speech recognition via llama-swap"
+    nemotron-3-diarization:
+      public_name: "local/nemotron-3-diarization"
+      upstream_key: "nemotron-3-diarization"
+      kind: "diarization"
+      description: "Nemotron-3-Diarization — speaker diarization via llama-swap"
+
+
 # -- Routing Policy ------------------------------------------------------------
 routing:
   default_model: "local/qwen3.5-9b-q4"

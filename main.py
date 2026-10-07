@@ -34,6 +34,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
+from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect
 
 from schemas import (
@@ -893,6 +894,74 @@ def _build_proxy_aliases(cfg: dict) -> dict[str, str]:
 _PROXY_ALIASES = _build_proxy_aliases(config)
 
 
+def _build_audio_table(cfg: dict) -> tuple[str, int, dict[str, str], set[str]]:
+    """Build audio model mapping from audio_models section in SoHoAI-config.yaml.
+
+    Returns (upstream_base_url, timeout_seconds, short_name_to_upstream_key_map, accepted_public_names).
+
+    Raises RuntimeError at import time if the audio_models section is malformed.
+    The accepted_public_names set includes both short names (e.g. "qwen3-asr") and
+    local/-prefixed names (e.g. "local/qwen3-asr") for convenience.
+    """
+    audio_cfg = cfg.get("audio_models", {})
+    if not audio_cfg:
+        # No audio_models section — return empty defaults
+        return "", 300, {}, set()
+
+    # Extract and validate base URL
+    upstream_base = audio_cfg.get("upstream_base", "").strip()
+    if not upstream_base:
+        raise RuntimeError("SoHoAI-config.yaml: audio_models.upstream_base is required and must not be empty")
+    # Replace ${server2_ip} placeholder
+    if "${server2_ip}" in upstream_base:
+        upstream_base = upstream_base.replace("${server2_ip}", cfg.get("server2_ip", "192.168.1.95"))
+
+    # Extract timeout
+    timeout_seconds = audio_cfg.get("timeout_seconds", 300)
+    if not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
+        raise RuntimeError("SoHoAI-config.yaml: audio_models.timeout_seconds must be a positive integer")
+
+    # Build short_name → upstream_key map and collect accepted public names
+    short_to_key: dict[str, str] = {}
+    accepted_names: set[str] = set()
+
+    models = audio_cfg.get("models", {})
+    if not isinstance(models, dict):
+        raise RuntimeError("SoHoAI-config.yaml: audio_models.models must be a dict")
+
+    for short_name, model_info in models.items():
+        if not isinstance(model_info, dict):
+            raise RuntimeError(
+                f"SoHoAI-config.yaml: audio_models.models.{short_name} must be a dict, got {type(model_info).__name__}"
+            )
+
+        upstream_key = model_info.get("upstream_key", "").strip()
+        if not upstream_key:
+            raise RuntimeError(
+                f"SoHoAI-config.yaml: audio_models.models.{short_name}.upstream_key is required"
+            )
+
+        public_name = model_info.get("public_name", "").strip()
+        if not public_name:
+            raise RuntimeError(
+                f"SoHoAI-config.yaml: audio_models.models.{short_name}.public_name is required"
+            )
+
+        short_to_key[short_name] = upstream_key
+        # Register both short form and local/-prefixed form as accepted names
+        accepted_names.add(short_name)
+        if public_name.startswith("local/"):
+            accepted_names.add(public_name)
+            # Also accept the bare name without "local/" prefix
+            bare_name = public_name[len("local/"):]
+            accepted_names.add(bare_name)
+
+    return upstream_base, timeout_seconds, short_to_key, accepted_names
+
+
+_AUDIO_BASE_URL, _AUDIO_TIMEOUT, _AUDIO_MODELS, _AUDIO_ACCEPTED_NAMES = _build_audio_table(config)
+
+
 def _build_proxy_model_entry(config: dict, public_name: str, internal_name: str) -> dict | None:
     """Build one entry for /proxy/v1/model/info from the SoHoAI-config.yaml model_list."""
     internal = next(
@@ -1139,6 +1208,147 @@ def _anthropic_stop_reason(openai_finish_reason: str | None) -> str | None:
         "tool_calls": "tool_use",
         "content_filter": "end_turn",
     }.get(openai_finish_reason, "end_turn")
+
+
+@app.api_route("/upstream/{model}/{path:path}", methods=["GET", "POST"])
+async def upstream_audio_forwarder(req: Request, model: str, path: str):
+    """Transparent forwarder for audio models (ASR + diarization) to llama-swap.
+
+    URL mapping:
+      /upstream/{short_name}/{path} → llama-swap /upstream/{upstream_key}/{path}?{query}
+      /upstream/local/{short_name}/{path} → same (if routed via /upstream/local/...)
+
+    Models: qwen3-asr, nemotron-3-diarization (and their local/ prefixed forms).
+    Streams bytes unchanged; forwards all headers except host and hop-by-hop.
+    Request timeout: 300 seconds (to accommodate model swap-in + inference).
+    No retry, no LiteLLM, no usage tracking (not token-billed).
+    """
+    _start = time.time()
+
+    # Handle /upstream/local/{model_name}/{path} parsing:
+    # FastAPI parses /upstream/local/qwen3-asr/v1/chat/completions as model="local", path="qwen3-asr/v1/chat/completions"
+    # Extract the model name from the path if model == "local"
+    model_name = model
+    if model_name == "local":
+        # Split path to get the actual model name (first segment)
+        model_name, _, path = path.partition("/")
+
+    # Resolve model name to upstream key
+    if model_name not in _AUDIO_MODELS:
+        accepted = sorted(_AUDIO_ACCEPTED_NAMES)
+        logger.warning(
+            "upstream_audio_forwarder: unknown model %r; accepted: %s",
+            model_name, accepted
+        )
+        return JSONResponse(
+            {
+                "error": f"unknown audio model {model_name!r}",
+                "accepted_models": accepted,
+            },
+            status_code=404,
+        )
+
+    upstream_key = _AUDIO_MODELS[model_name]
+    upstream_url = f"{_AUDIO_BASE_URL}/upstream/{upstream_key}/{path}"
+
+    # Preserve query string
+    if req.url.query:
+        upstream_url = f"{upstream_url}?{req.url.query}"
+
+    # Read request body
+    try:
+        body_bytes = await req.body()
+    except ClientDisconnect:
+        logger.warning("upstream_audio_forwarder: client disconnected before body read (model=%s)", model_name)
+        return Response(status_code=499)
+
+    # Prepare headers to forward: skip host, content-length, and hop-by-hop.
+    # httpx sets content-length itself when forwarding the request.
+    forward_headers: dict[str, str] = {}
+    hop_by_hop = {
+        "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+        "te", "trailers", "transfer-encoding", "upgrade"
+    }
+    for key, value in req.headers.items():
+        key_lower = key.lower()
+        if key_lower in ("host", "content-length"):
+            continue
+        if key_lower in hop_by_hop:
+            continue
+        forward_headers[key_lower] = value
+
+    # Forward request to llama-swap with extended timeout.
+    # Use build_request + send with stream=True so the async generator owns the client lifetime.
+    client: httpx.AsyncClient | None = None
+    upstream_response: httpx.Response | None = None
+
+    try:
+        client = httpx.AsyncClient(timeout=_AUDIO_TIMEOUT)
+        req_up = client.build_request(
+            req.method.upper(),
+            upstream_url,
+            content=body_bytes if body_bytes else None,
+            headers=forward_headers,
+        )
+        upstream_response = await client.send(req_up, stream=True)
+
+        # Collect response headers, removing hop-by-hop
+        response_headers = dict(upstream_response.headers)
+        for h in hop_by_hop:
+            response_headers.pop(h, None)
+
+        async def _stream_response():
+            """Stream upstream response body; close client+response in finally."""
+            try:
+                async for chunk in upstream_response.aiter_raw():
+                    yield chunk
+            finally:
+                if upstream_response:
+                    await upstream_response.aclose()
+                if client:
+                    await client.aclose()
+
+        _elapsed = time.time() - _start
+        logger.info(
+            "upstream_audio_forwarder: model=%s path=%s status=%d elapsed=%.2fs",
+            model_name, path, upstream_response.status_code, _elapsed
+        )
+
+        return StreamingResponse(
+            _stream_response(),
+            status_code=upstream_response.status_code,
+            headers=response_headers,
+        )
+
+    except httpx.ConnectError as e:
+        if client:
+            await client.aclose()
+        _elapsed = time.time() - _start
+        logger.error(
+            "upstream_audio_forwarder: connect error for model=%s: %s (elapsed=%.2fs)",
+            model_name, e, _elapsed
+        )
+        return JSONResponse({"error": "upstream service unavailable"}, status_code=502)
+
+    except httpx.ReadTimeout as e:
+        if client:
+            await client.aclose()
+        _elapsed = time.time() - _start
+        logger.error(
+            "upstream_audio_forwarder: read timeout for model=%s: %s (elapsed=%.2fs)",
+            model_name, e, _elapsed
+        )
+        return JSONResponse({"error": "upstream service timeout"}, status_code=504)
+
+    except Exception as e:
+        if client:
+            await client.aclose()
+        _elapsed = time.time() - _start
+        logger.error(
+            "upstream_audio_forwarder: unexpected error for model=%s: %s (elapsed=%.2fs)",
+            model_name, e, _elapsed, exc_info=True
+        )
+        return JSONResponse({"error": "internal gateway error"}, status_code=500)
 
 
 @app.post("/v1/messages/beta")
