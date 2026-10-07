@@ -807,6 +807,10 @@ form, so a client moves from llama-swap to SoHoAI by changing only host:port (`1
   tolerate a silent wait (timeout ≥ ~200 s) or warm the engine first.
 - **GPU side effect (llama-swap, not SoHoAI).** Both engines live in the exclusive `asr` group: a request
   evicts the resident 9B, and the next chat request evicts them again (9B cold-load ~48–64 s).
+  **`GET /v1/models/health` counts as a chat request**: `SmartRouter.health_check()` pings every `model_list`
+  entry with a 1-token chat completion, including the 9B aliases, so calling it unloads Qwen3-ASR and the diarizer
+  (observed 2026-10-07). Do not poll it during meetings; use `curl http://192.168.1.95:8000/v1/models` for a
+  non-evicting liveness check.
 
 ### Configuration
 
@@ -822,6 +826,11 @@ form, so a client moves from llama-swap to SoHoAI by changing only host:port (`1
 ### Verification status
 
 Route behaviour (multipart and 3 MB bodies, name/`local/` mapping, 404 allowlist, 502 pass-through, gzip,
-connection refused) was tested against a local stub upstream on 2026-10-07. The live end-to-end test
-against llama-swap, including a forced swap-out/swap-in, was run in a separate session and is
-not recorded here.
+connection refused) was tested against a local stub upstream on 2026-10-07.
+
+Live smoke against llama-swap (separate session, 2026-10-07, reported only as a summary with no timings or
+payloads): the diarizer and ASR both responded correctly and quickly through SoHoAI, and an unsupported model
+failed fast with a 404. **Not yet tested:** cold swap-in latency through the forwarder, and a full ~100 MB
+diarization upload (the request body is buffered fully in memory, then re-sent upstream, so expect roughly twice
+the body size in RAM for that request). Also not reported: the `/v1/models/health` / `/proxy/v1/models`
+regression and the post-swap chat completion.

@@ -57,14 +57,22 @@ model segment); handled by taking the next path segment.
 
 Local stub upstream, 11 checks, all pass: multipart upload and a 3 MB body intact, path/query mapping, short-name →
 llama-swap key, `local/` prefix, 404 for `qwen3.5-9b-q4` and `bge-reranker-v2-m3`, upstream 502 passed through, gzip,
-connection refused → 502. The live end-to-end run against llama-swap (including a forced swap) happened in a separate session and
-is not recorded here.
+connection refused → 502.
+
+Live smoke against llama-swap (separate session; reported as a summary only, no timings or payloads): diarizer and ASR
+responded correctly and fast through SoHoAI; an unsupported model returned 404 fast. **Still untested:** cold swap-in
+latency through the forwarder, a full ~100 MB diarization upload, the `/v1/models/health` + `/proxy/v1/models` listing
+regression, and the post-swap chat completion. The first two are being exercised in the tool's live run.
 
 ### Accepted limitations
 
 - No early reply during a cold swap (llama-swap sends nothing); the client waits silently, so its timeout must be ≥ ~200 s.
-- Request bodies are read fully into memory (a few MB per 300 s audio chunk).
+- Request bodies are read fully into memory (a few MB per 300 s audio chunk; a ~100 MB diarization upload is
+  buffered whole and re-sent, roughly 2x the body in RAM for that request).
 - Any ASR/diarization request evicts the 9B (existing llama-swap group behaviour); no usage telemetry for audio.
+- The reverse also holds: any chat request evicts ASR + diarizer, including `GET /v1/models/health`, whose
+  `health_check()` pings the 9B aliases (observed 2026-10-07 in the live smoke). Not polling that endpoint during
+  meetings is the mitigation; changing `health_check()` was out of scope.
 
 ---
 
