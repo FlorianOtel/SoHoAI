@@ -179,6 +179,7 @@ SoHoAI/
 | GET | `/proxy/v1/models` | OpenAI model list for proxy clients (Cline, Claude Code) |
 | POST | `/proxy/v1/chat/completions` | Stateless OpenAI-compatible pass-through for proxy clients (Cline, Claude Code) — no Redis/RAG/summarization |
 | POST | `/v1/messages` | Anthropic Messages API passthrough — enables `ANTHROPIC_BASE_URL` for Claude Code |
+| ANY | `/upstream/{model}/{path}` | Transparent byte forwarder to llama-swap for the audio engines only (`qwen3-asr`, `nemotron-3-diarization`); cold swap is held by llama-swap — see `docs/Model-routing.md` §10 |
 | POST | `/v1/rag/ingest/sync` | Scan NFS roots → populate ingestion queue |
 | POST | `/v1/rag/ingest/start` | Start background ingestion worker |
 | POST | `/v1/rag/ingest/stop` | Stop ingestion worker gracefully |

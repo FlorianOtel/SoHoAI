@@ -2,8 +2,8 @@
 title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 5)
-updated_at: 2026-09-24--11-31
+updated_by: Claude Code (Claude Sonnet 5.5)
+updated_at: 2026-10-07--21-20
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -762,3 +762,66 @@ See `docs/TODO.md` for full detail on each deferred item.
 - **`SoHoAI-config.yaml`**: `model_list` entries; `proxy.blocked_models`;
   `router_settings.enable_pre_call_checks: true`; `litellm_settings.context_window_fallbacks`
 - **`docs/TODO.md`**: deferred work — local-model tool-use implementation plan
+- **Audio forwarder (§10 below)**: `main.py` `_build_audio_table()`, `_AUDIO_MODELS`,
+  `upstream_audio_forwarder()`; `SoHoAI-config.yaml` `audio_models:` section
+
+---
+
+## 10. Audio engines (ASR + diarization) — transparent forwarder
+
+Added 2026-10-07. Qwen3-ASR and Nemotron-3-Diarization run under llama-swap on Server 2 (see
+`docs/design-history.md` 2026-10-03 and 2026-10-04). They are **not inference/chat models**, so they
+are deliberately kept out of `model_list` and out of every chat path in this document.
+
+### Endpoint
+
+`ANY /upstream/{model}/{path}` on the orchestrator mirrors llama-swap's own `/upstream/<model>/<path>`
+form, so a client moves from llama-swap to SoHoAI by changing only host:port (`192.168.1.95:8000` →
+`192.168.1.93:8000`):
+
+| Engine | SoHoAI URL | Forwarded to (llama-swap) |
+|---|---|---|
+| Diarization | `POST /upstream/nemotron-3-diarization/v1/audio/diarizations` (multipart `file`) | `/upstream/nemotron-3-diarization/v1/audio/diarizations` |
+| ASR | `POST /upstream/qwen3-asr/v1/chat/completions` (`input_audio` content part) | `/upstream/qwen3-asr-1.7b-q8/v1/chat/completions` |
+
+- **Names.** SoHoAI's name for the ASR engine is the shortened `qwen3-asr`; llama-swap's key is
+  `qwen3-asr-1.7b-q8`. The mapping is applied to the **URL path only** — the request body (including any
+  `model` field) is never read or rewritten. `local/qwen3-asr` and `local/nemotron-3-diarization`
+  are accepted too (`/upstream/local/qwen3-asr/...`).
+- **ASR cannot keep `/v1/chat/completions`.** That path is SoHoAI's own stateful chat endpoint, so the ASR
+  client must use the `/upstream/qwen3-asr/...` form. The diarizer path is unchanged apart from host.
+- **Allowlist.** Only the two engines are forwarded; any other name (including `qwen3.5-9b-q4` and
+  `bge-reranker-v2-m3`) returns 404 listing the accepted names.
+
+### Behaviour
+
+- **Pure byte forward.** No LiteLLM, no `SmartRouter`, no Redis/RAG, no retries, no fallback to cloud
+  models, no usage-tracker row (not token-billed). Request headers pass through except `host`,
+  `content-length` and hop-by-hop; the response is streamed back with the upstream status and
+  headers (`aiter_raw()`, so `content-encoding` stays consistent).
+- **Cold swap is transparent.** llama-swap holds the request until the model is healthy
+  (`healthCheckTimeout: 180`, a 30–60 s swap in practice) and answers 502 if it fails to start; SoHoAI passes
+  that 502 through. SoHoAI's own upstream timeout is `audio_models.timeout_seconds: 300`, longer than
+  llama-swap's load window. Mapped errors: connect failure → 502, read timeout → 504.
+- **No early reply.** llama-swap sends nothing while loading, so SoHoAI cannot either; the client must
+  tolerate a silent wait (timeout ≥ ~200 s) or warm the engine first.
+- **GPU side effect (llama-swap, not SoHoAI).** Both engines live in the exclusive `asr` group: a request
+  evicts the resident 9B, and the next chat request evicts them again (9B cold-load ~48–64 s).
+
+### Configuration
+
+`SoHoAI-config.yaml`, top-level `audio_models:` — `upstream_base` (`http://${server2_ip}:8000`),
+`timeout_seconds`, and `models:` keyed by SoHoAI short name (`public_name`, `upstream_key`, `kind`,
+`description`). A malformed section raises at import time.
+
+**Why not `model_list`?** Every `model_list` entry is loaded by `SmartRouter`, pinged by
+`/v1/models/health` (`SmartRouter.health_check()` sends a chat completion to *each* entry — for
+`qwen3-asr` that would load the asr group and evict the 9B), and exposed to Cline/OpenCode by
+`_build_proxy_tables()` / `/proxy/v1/models`. A separate section avoids all four.
+
+### Verification status
+
+Route behaviour (multipart and 3 MB bodies, name/`local/` mapping, 404 allowlist, 502 pass-through, gzip,
+connection refused) was tested against a local stub upstream on 2026-10-07. The live end-to-end test
+against llama-swap, including a forced swap-out/swap-in, was run in a separate session and is
+not recorded here.

@@ -2,8 +2,8 @@
 title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Opus 5.5)
-updated_at: 2026-10-04--17-05
+updated_by: Claude Code (Claude Sonnet 5.5)
+updated_at: 2026-10-07--21-20
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -12,6 +12,59 @@ context: >
 ---
 
 # SoHoAI Design History
+
+---
+
+
+## 2026-10-07 — Qwen3-ASR and Nemotron-3-Diarization exposed through SoHoAI (transparent `/upstream` forwarder)
+
+### What changed
+
+Commit `0fcba0e`. `SoHoAI-config.yaml` gained a top-level `audio_models:` section and `main.py` gained
+`_build_audio_table()` plus one route, `ANY /upstream/{model}/{path}`, which forwards to llama-swap's identical
+`/upstream/<key>/<path>` on Server 2. An automated meeting tool that took llama-swap URLs for its ASR and diarizer now
+only changes host:port. The ASR engine's SoHoAI name is the shortened `qwen3-asr` (llama-swap key
+`qwen3-asr-1.7b-q8`), mapped in the URL path only; the body is never touched. Usage and URLs: `docs/Model-routing.md` §10.
+
+### Why — two decisions
+
+- **Transparent forwarder, not a re-implemented API.** The goal was for SoHoAI to be "as transparent as possible" and
+  let llama-swap do the swap-in/routing. llama-swap holds a request until the model is healthy (up to
+  `healthCheckTimeout: 180`) and answers 502 on failure, so the forwarder needs no warm-up logic: no LiteLLM
+  (its `timeout=60`, `num_retries=2` and cloud fallbacks would cut a 30–60 s cold swap short or reroute a failed ASR call to a
+  chat model), no retries, a 300 s upstream timeout.
+- **Own `audio_models:` section instead of `model_list` entries.** The request was to expose the engines "like
+  `local/qwen3.5-9b-q4`". A `model_list` entry is pinged with a chat completion by `SmartRouter.health_check()`
+  (`GET /v1/models/health`) — for `qwen3-asr` that loads the exclusive `asr` group and **evicts the resident 9B**; it
+  would also be listed to Cline/OpenCode as a chat model by `_build_proxy_tables()` and `/proxy/v1/models`. The names
+  `local/qwen3-asr` / `local/nemotron-3-diarization` are kept, but the registry is separate, so `router.py` and
+  `health_check()` are untouched.
+
+### The ASR path moves
+
+ASR was reached at llama-swap's `/v1/chat/completions`, which on SoHoAI is the stateful chat endpoint. The ASR
+client must use `/upstream/qwen3-asr/v1/chat/completions`; the diarizer path is unchanged apart from host.
+
+### Defect caught in review
+
+The first implementation returned a `StreamingResponse` from inside `async with httpx.AsyncClient` / `client.stream(...)`.
+Returning exits both blocks, so the upstream response is closed before any body byte is streamed. Fixed by opening
+the request with `client.send(..., stream=True)` and closing response and client in the response generator's `finally`
+(`aiter_raw()` for byte transparency). The `/upstream/local/qwen3-asr/...` form had also not routed (FastAPI parses `local` as the
+model segment); handled by taking the next path segment.
+
+### Verified (2026-10-07)
+
+Local stub upstream, 11 checks, all pass: multipart upload and a 3 MB body intact, path/query mapping, short-name →
+llama-swap key, `local/` prefix, 404 for `qwen3.5-9b-q4` and `bge-reranker-v2-m3`, upstream 502 passed through, gzip,
+connection refused → 502. The live end-to-end run against llama-swap (including a forced swap) happened in a separate session and
+is not recorded here.
+
+### Accepted limitations
+
+- No early reply during a cold swap (llama-swap sends nothing); the client waits silently, so its timeout must be ≥ ~200 s.
+- Request bodies are read fully into memory (a few MB per 300 s audio chunk).
+- Any ASR/diarization request evicts the 9B (existing llama-swap group behaviour); no usage telemetry for audio.
 
 ---
 
