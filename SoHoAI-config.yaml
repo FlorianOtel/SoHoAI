@@ -32,6 +32,7 @@ proxy:
   # which would incur unexpected Anthropic cost.
   blocked_models:
     - claude-haiku-4-5-20251001
+    - claude-haiku-5-5
   # Meta-aliases for direct testing. Not derivable from model_list generically, because they
   # do not name one specific model. Each target MUST be a real model_list model_name —
   # _build_proxy_aliases() in main.py raises at import time if it drifts, rather than silently
@@ -84,15 +85,15 @@ model_list:
   #### model_info IS needed: proxy consumers (Cline, OpenCode) read it via /proxy/v1/model/info.
   ####
 
-  - model_name: "anthropic/claude-haiku-4-5"
+  - model_name: "anthropic/claude-haiku-5-5"
     litellm_params:
-      model: anthropic/claude-haiku-4-5
+      model: anthropic/claude-haiku-5-5
     model_info:
-      id: "anthropic/claude-haiku-4-5"
-      description: "Claude Haiku 4.5 — CC transparent forward. No API key configured."
-      max_tokens: 200000
-      max_input_tokens: 200000
-      context_window: 200000
+      id: "anthropic/claude-haiku-5-5"
+      description: "Claude Haiku 5.5 — CC transparent forward. No API key configured."
+      max_tokens: 128000
+      max_input_tokens: 999000
+      context_window: 1000000
 
   - model_name: "anthropic/claude-sonnet-5"
     litellm_params:
@@ -139,9 +140,9 @@ model_list:
   #### Bare names (no provider prefix) so _PROXY_EXPOSED_MODELS can route anthropic/ → these.
   ####
 
-  - model_name: claude-haiku-4-5
+  - model_name: claude-haiku-5-5
     litellm_params:
-      model: anthropic/claude-haiku-4-5
+      model: anthropic/claude-haiku-5-5
       api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: claude-sonnet-5

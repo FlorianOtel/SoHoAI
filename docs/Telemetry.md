@@ -2,8 +2,8 @@
 title: "SoHoAI Usage and Billing Telemetry Pipeline"
 created_at: 2026-05-06--00-00
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 5)
-updated_at: 2026-09-24--11-31
+updated_by: Claude Code (Claude Sonnet 5.5)
+updated_at: 2026-10-09--21-31
 context: >
   Cross-project design document for SoHoAI Stage 1 telemetry implementation.
   Goal: Add a complete usage and billing telemetry pipeline to SoHoAI so that
@@ -450,7 +450,8 @@ urgent pricing.yaml update is needed.
 | claude-opus-5-5 | $4.00 | $20.00 | $5.00 | $0.20 | LiteLLM (native; pricing.yaml not yet verified) |
 | claude-sonnet-5 | $2.00 | $10.00 | $2.50 | $0.20 | LiteLLM |
 | claude-sonnet-4-5 | $3.00 | $15.00 | $3.75 | $0.30 | pricing.yaml (legacy alias) |
-| claude-haiku-4-5 | $1.00 | $5.00 | $1.25 | $0.10 | pricing.yaml + LiteLLM |
+| claude-haiku-5-5 | $0.10 | $0.50 | $0.125 | $0.01 | LiteLLM + Anthropic pricing page (≤100K-token prompts; >100K tier $0.50/$2.50/$0.625/$0.05 not modelled) |
+| claude-haiku-4-5 | $1.00 | $5.00 | $1.25 | $0.10 | pricing.yaml (legacy; superseded by haiku-5-5) |
 
 ### Local models
 
@@ -462,7 +463,7 @@ urgent pricing.yaml update is needed.
 ### Notes
 
 - **Cache creation** rates in pricing.yaml assume 5-minute TTL (1.25× base input rate per Anthropic docs). Long-cache (1h TTL, 2× input) is not yet tracked separately in SoHoAI.
-- **Last verified**: 2026-04-30 against https://docs.anthropic.com/en/docs/about-claude/models/all-models
+- **Last verified**: 2026-10-09 against https://platform.claude.com/docs/en/about-claude/pricing
 - **Frequency**: Update pricing.yaml and this table on every Anthropic price change; automate if possible via CI
 - **LiteLLM rate discrepancy (2026-05-11)**: LiteLLM's registry carries ~1/3 of correct rates for `claude-opus-4-7` (cache_creation 6.25e-6 vs. correct 18.75e-6). Corrected in `main.py` via `litellm.register_model()` and in `telemetry-summarize.py` via pricing.yaml override in `query_litellm_cost()`. Check other new models when added — LiteLLM's database may lag.
 

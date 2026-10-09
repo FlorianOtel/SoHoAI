@@ -3,7 +3,7 @@ title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 5.5)
-updated_at: 2026-10-07--21-20
+updated_at: 2026-10-09--21-31
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -1211,3 +1211,49 @@ via the `/proxy/v1` path, not the CC model picker.
 all telemetry. CC continues to use native Anthropic models via `ANTHROPIC_BASE_URL`.
 
 **Operator action**: delete `~/.claude/cache/gateway-models.json` once to clear stale picker entries.
+
+---
+
+## 2026-10-09 — Claude Haiku 4.5 → 5.5 model upgrade
+
+### What changed
+
+`SoHoAI-config.yaml` model_list gained two new entries (`anthropic/claude-haiku-5-5` and `claude-haiku-5-5` bare proxy) and removed the Haiku 4.5 equivalents. Context window increased 200,000 → 1,000,000. `proxy.blocked_models` gained `claude-haiku-5-5` to align with the 4.5 blocklist entry. Commit not yet finalized (config hot-reload verified, doc updates in progress).
+
+### Verified pricing
+
+Haiku 5.5 rates per https://platform.claude.com/docs/en/about-claude/pricing (verified 2026-10-09):
+- Input (≤100K): $0.10/MTok (Haiku 4.5: $1/MTok)
+- Cache read: $0.01/MTok (Haiku 4.5: $0.10/MTok)
+- Output: $0.50/MTok (Haiku 4.5: $5/MTok)
+- Note: the earlier `docs/Model-routing.md` cost table listed Haiku 4.5 at $0.80/$0.08/$4 — stale (Haiku 3.5 rates); corrected figures are above.
+
+**Tiered pricing caveat**: Prompts exceeding 100K tokens are billed at $0.50 input / $2.50 output / $0.625 cache write / $0.05 cache read. SoHoAI's LiteLLM-based usage accounting currently uses only the ≤100K tier, so requests >100K tokens are under-costed by ~5×.
+
+### LiteLLM integration
+
+LiteLLM 1.82.6 (already deployed) includes native pricing data for `claude-haiku-5-5`. No `register_model()` override needed; rates are auto-discovered.
+
+### Reload behaviour and initial blocker
+
+Initial attempt: config replaced 21:18:52 UTC, polling began immediately, timeout after 70 seconds without reload. Root cause: uvicorn was not started with `--reload` flag (running as `python ./main.py` instead of via `start-sohoai.sh`). Rolled back. **Note**: This was a mis-diagnosis; operator clarified that uvicorn WAS running with `--reload` (confirmed PID 1589571 at 21:23), and NFS polling watcher can take **well over 70 seconds**. Polling should tolerate 300 seconds (5 minutes) of backoff + latency.
+
+Second attempt (corrected): config replaced 21:24:15 UTC. Reload detected at attempt 2 (~20 seconds). Gateway healthy with `claude-haiku-5-5` available.
+
+### Verification results (all passed)
+
+1. **GET /health**: `claude-haiku-5-5` present, `claude-haiku-4-5` absent
+2. **GET /proxy/v1/models**: `anthropic/claude-haiku-5-5` entry present
+3. **POST /proxy/v1/chat/completions (haiku-5-5)**: HTTP 200, response includes model name
+4. **POST /proxy/v1/chat/completions (haiku-4-5 — no longer exposed)**: HTTP 400 clean rejection (not 500)
+5. **POST /v1/messages (haiku-5-5 passthrough)**: HTTP 200, transparent forward works; log shows "anthropic_messages: 'claude-haiku-5-5' → transparent forward"
+6. **Telemetry tracking**: Found usage_events entries with correct cost calculation; example row: 9 input tokens + 24 output tokens = $0.0000129 USD (matches $0.10/MTok and $0.50/MTok rates)
+7. **LiteLLM pricing**: `litellm.get_model_info('claude-haiku-5-5')` returns correct rates: $1e-7 / $5e-7 / $1.25e-7 / $1e-8 (input/output/cache-write/cache-read). Previously appeared missing due to misinterpretation of test output.
+
+### Known limitation: `proxy.blocked_models` not enforced
+
+`proxy.blocked_models` is present in `SoHoAI-config.yaml` but **NOT enforced by any code in `main.py` as of 2026-10-09**. The enforcement added in commit b9a47f5 (`anthropic_messages()` returning HTTP 400 for blocked models) is no longer present in the current codebase. The blocklist remains as a placeholder for future re-implementation.
+
+### Out-of-scope items
+
+Two agent frontmatter files still pin `claude-haiku-4-5-20251001`: `~/.claude/agents/actor.md` and `~/.claude/agents/researcher.md`. These are outside SoHoAI's config tree and user-controlled; no action taken.

@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 5.5)
-updated_at: 2026-10-07--21-20
+updated_at: 2026-10-09--21-31
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -86,7 +86,7 @@ picks the bare-name YAML entry that carries `ANTHROPIC_API_KEY` for authenticati
 |---|---|---|---|---|
 | `local/qwen3.5-9b-q4` | `local/qwen3.5-9b-q4` | LiteLLM | dummy key | 131,072 |
 | `local/qwen3.5-9b-agentic` | `local/qwen3.5-9b-agentic` | LiteLLM | dummy key | 131,072 |
-| `anthropic/claude-haiku-4-5` | `claude-haiku-4-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 200,000 |
+| `anthropic/claude-haiku-5-5` | `claude-haiku-5-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `anthropic/claude-sonnet-5` | `claude-sonnet-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `anthropic/claude-opus-5-5` | `claude-opus-5-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
 | `anthropic/claude-fable-5` | `claude-fable-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
@@ -390,9 +390,12 @@ and falls back to the main model.
 proxy:
   blocked_models:
     - claude-haiku-4-5-20251001
+    - claude-haiku-5-5
 ```
 
 Add future versioned Haiku model names here as needed.
+
+⚠️ **Status (2026-10-09):** `proxy.blocked_models` is present in `SoHoAI-config.yaml` but **NOT enforced by any code in `main.py`**. The enforcement added in commit b9a47f5 is no longer present. The blocklist remains as a placeholder for future re-implementation.
 
 ### §2.5 Tool_use ID sanitization
 
@@ -418,7 +421,7 @@ Claude Code dispatches sub-agents via its built-in `Agent` tool (used by `/duo`,
 `~/.claude/agents/` or the project's `.claude/agents/`. The relevant frontmatter fields:
 
 ```yaml
-model: claude-haiku-4-5          # which model to use for this agent
+model: claude-haiku-5-5          # which model to use for this agent
 description: "Actor — implementation"
 tools: [Read, Write, Bash, Glob, Grep]
 ```
@@ -426,9 +429,9 @@ tools: [Read, Write, Bash, Glob, Grep]
 When a sub-agent runs:
 1. Claude Code spawns a new Claude Code process (headless, non-interactive)
 2. That process reads the `model` field from the agent's frontmatter
-3. It calls `POST /v1/messages` with `"model": "claude-haiku-4-5"` to whatever
+3. It calls `POST /v1/messages` with `"model": "claude-haiku-5-5"` to whatever
    `ANTHROPIC_BASE_URL` is configured (inherited from `~/.claude/settings.json`)
-4. SoHoAI proxy receives the request, sees `claude-haiku-4-5` → transparent forward → Anthropic Haiku
+4. SoHoAI proxy receives the request, sees `claude-haiku-5-5` → transparent forward → Anthropic Haiku
 
 **Note**: `api_base_url` is NOT a documented Claude Code agent frontmatter field.
 All agents share the same `ANTHROPIC_BASE_URL`. The `model` field is the only
@@ -445,10 +448,10 @@ Parent session (Brain + Planner) — Sonnet 4.6
   tools: ✅ full (Read, Write, Bash, Agent, Glob, Grep, ...)
   caching: ✅ full (system prompt + rolling prefix cached after turn 1)
 
-Actor subagent — Haiku 4.5
-  source: agent frontmatter "model: claude-haiku-4-5"
-  request: POST /v1/messages {"model": "claude-haiku-4-5", ...}
-  routing: transparent forward → Anthropic Haiku 4.5
+Actor subagent — Haiku 5.5
+  source: agent frontmatter "model: claude-haiku-5-5"
+  request: POST /v1/messages {"model": "claude-haiku-5-5", ...}
+  routing: transparent forward → Anthropic Haiku 5.5
   tools: ✅ full (same tool loop as parent)
   caching: ✅ full (independent cache slot from parent)
 ```
@@ -460,7 +463,7 @@ Both are independent Anthropic API calls with independent prompt-cache slots.
 ```
 Brain    — claude-opus-5     → transparent forward → Anthropic Opus 5     (tools ✅, cache ✅)
 Planner  — claude-sonnet-4-6 → transparent forward → Anthropic Sonnet 4.6 (tools ✅, cache ✅)
-Actor    — claude-haiku-4-5  → transparent forward → Anthropic Haiku 4.5  (tools ✅, cache ✅)
+Actor    — claude-haiku-5-5  → transparent forward → Anthropic Haiku 5.5  (tools ✅, cache ✅)
 Reviewer — claude-sonnet-4-6 → transparent forward → Anthropic Sonnet 4.6 (tools ✅, cache ✅)
 ```
 
@@ -659,8 +662,10 @@ becomes available (account upgrade, region change), no proxy changes are needed.
 |---|---|---|---|
 | Opus 5.5 | $4/MTok | $0.20/MTok | $20/MTok |
 | Sonnet 5 | $2/MTok | $0.20/MTok | $10/MTok |
-| Haiku 4.5 | $0.80/MTok | $0.08/MTok | $4/MTok |
+| Haiku 5.5 | $0.10/MTok | $0.01/MTok | $0.50/MTok |
 | Qwen3.5 (local) | $0 | $0 | $0 |
+
+**Note:** Anthropic's pricing page lists tiered rates for prompts over 100,000 tokens: $0.50 input / $2.50 output / $0.625 cache write / $0.05 cache read. SoHoAI's LiteLLM-based usage tracking uses only the ≤100K-token rates, so requests exceeding 100K tokens are under-costed by approximately 5×.
 
 ### /duo session cost breakdown (typical task, 5 parent turns + 1 actor execution)
 
@@ -674,14 +679,14 @@ becomes available (account upgrade, region change), no proxy changes are needed.
 | Output | ~500 tok/turn × 5 | — | 2.5K × $10/MTok = $0.025 |
 | **Parent total** | | | **~$0.13** |
 
-**Actor (Haiku 4.5) — transparent forward, narrower context**
+**Actor (Haiku 5.5) — transparent forward, narrower context**
 
 | Turn | Input | Cache hit? | Cost |
 |---|---|---|---|
-| 1 (cold) | ~5K tokens | ❌ | 5K × $0.80/MTok = $0.004 |
-| 2–3 | cached | ✅ | ~$0.001/turn |
-| Output | ~1K tok × 2 | — | 2K × $4/MTok = $0.008 |
-| **Actor total** | | | **~$0.015** |
+| 1 (cold) | ~5K tokens | ❌ | 5K × $0.10/MTok = $0.0005 |
+| 2–3 | cached | ✅ | ~$0.00005/turn |
+| Output | ~1K tok × 2 | — | 2K × $0.50/MTok = $0.001 |
+| **Actor total** | | | **~$0.0015** |
 
 **Session total (approx)**: **~$0.14**
 
@@ -696,9 +701,9 @@ becomes available (account upgrade, region change), no proxy changes are needed.
 |---|---|---|---|
 | Brain | Opus 5 | 3–5 research turns | $0.15–$0.40 |
 | Planner | Sonnet 4.6 | 1–2 planning turns | $0.05–$0.10 |
-| Actor | Haiku 4.5 | implementation | $0.01–$0.03 |
+| Actor | Haiku 5.5 | implementation | $0.0005–$0.003 |
 | Reviewer | Sonnet 4.6 | 1 review turn | $0.03–$0.05 |
-| **Total** | | | **$0.24–$0.58** |
+| **Total** | | | **$0.23–$0.55** |
 
 Prompt caching cuts the Opus Brain cost by ~70% after the first turn (large research
 context is re-read cached). Without caching (broken path), costs would be 3–4× higher.
