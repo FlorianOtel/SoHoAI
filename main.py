@@ -117,6 +117,22 @@ def _read_active_orchestra_session_id() -> str | None:
 # ($4/$20), so the prior claude-opus-5 override below was removed rather than
 # renamed — same reasoning as Sonnet 5's $2/$10 pricing, which needed no override).
 litellm.register_model({
+    # Haiku 5.5 is priced by prompt length: <=100K tokens $0.10/$0.50, >100K tokens
+    # $0.50/$2.50 (cache write 5m $0.625, cache read $0.05) -- cache reads/writes count
+    # toward prompt length. LiteLLM's cost calculator ignores its *_above_100k_tokens
+    # keys, so only ONE price level can be configured. We register the HIGHER (>100K)
+    # level, so cost is never under-reported; prompts <=100K are over-costed 5x.
+    # Verified 2026-10-09 against https://platform.claude.com/docs/en/about-claude/pricing
+    "claude-haiku-5-5": {
+        "input_cost_per_token": 0.0000005,
+        "output_cost_per_token": 0.0000025,
+        "cache_creation_input_token_cost": 0.000000625,
+        "cache_read_input_token_cost": 0.00000005,
+        "litellm_provider": "anthropic",
+        "mode": "chat",
+        "max_tokens": 128000,
+        "max_input_tokens": 1000000,
+    },
     "claude-fable-5": {
         "input_cost_per_token": 0.000010,
         "output_cost_per_token": 0.000050,

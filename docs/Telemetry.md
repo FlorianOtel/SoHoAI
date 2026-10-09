@@ -3,7 +3,7 @@ title: "SoHoAI Usage and Billing Telemetry Pipeline"
 created_at: 2026-05-06--00-00
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 5.5)
-updated_at: 2026-10-09--21-31
+updated_at: 2026-10-09--21-40
 context: >
   Cross-project design document for SoHoAI Stage 1 telemetry implementation.
   Goal: Add a complete usage and billing telemetry pipeline to SoHoAI so that
@@ -450,7 +450,7 @@ urgent pricing.yaml update is needed.
 | claude-opus-5-5 | $4.00 | $20.00 | $5.00 | $0.20 | LiteLLM (native; pricing.yaml not yet verified) |
 | claude-sonnet-5 | $2.00 | $10.00 | $2.50 | $0.20 | LiteLLM |
 | claude-sonnet-4-5 | $3.00 | $15.00 | $3.75 | $0.30 | pricing.yaml (legacy alias) |
-| claude-haiku-5-5 | $0.10 | $0.50 | $0.125 | $0.01 | LiteLLM + Anthropic pricing page (≤100K-token prompts; >100K tier $0.50/$2.50/$0.625/$0.05 not modelled) |
+| claude-haiku-5-5 | $0.50 | $2.50 | $0.625 | $0.05 | `main.py` `register_model` override = Anthropic's >100K-token tier (tiered pricing: ≤100K is $0.10/$0.50/$0.125/$0.01; LiteLLM can hold only one level, so the higher one is used and ≤100K prompts are over-costed 5×) |
 | claude-haiku-4-5 | $1.00 | $5.00 | $1.25 | $0.10 | pricing.yaml (legacy; superseded by haiku-5-5) |
 
 ### Local models

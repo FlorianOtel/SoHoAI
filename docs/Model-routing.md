@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 5.5)
-updated_at: 2026-10-09--21-31
+updated_at: 2026-10-09--21-40
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -665,7 +665,7 @@ becomes available (account upgrade, region change), no proxy changes are needed.
 | Haiku 5.5 | $0.10/MTok | $0.01/MTok | $0.50/MTok |
 | Qwen3.5 (local) | $0 | $0 | $0 |
 
-**Note:** Anthropic's pricing page lists tiered rates for prompts over 100,000 tokens: $0.50 input / $2.50 output / $0.625 cache write / $0.05 cache read. SoHoAI's LiteLLM-based usage tracking uses only the ≤100K-token rates, so requests exceeding 100K tokens are under-costed by approximately 5×.
+**Note:** Haiku 5.5 is priced by prompt length (cache reads/writes count). The row above is the ≤100K-token tier; prompts over 100,000 tokens pay $0.50 input / $2.50 output / $0.625 cache write / $0.05 cache read. LiteLLM's cost calculator cannot apply a length tier, so SoHoAI registers ONE level in `main.py` — the higher >100K rates — and recorded cost (`usage_events`) is therefore 5× too high for prompts ≤100K and exact above. Chosen so cost is never under-reported.
 
 ### /duo session cost breakdown (typical task, 5 parent turns + 1 actor execution)
 

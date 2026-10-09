@@ -3,7 +3,7 @@ title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 5.5)
-updated_at: 2026-10-09--21-31
+updated_at: 2026-10-09--21-40
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -1228,11 +1228,11 @@ Haiku 5.5 rates per https://platform.claude.com/docs/en/about-claude/pricing (ve
 - Output: $0.50/MTok (Haiku 4.5: $5/MTok)
 - Note: the earlier `docs/Model-routing.md` cost table listed Haiku 4.5 at $0.80/$0.08/$4 — stale (Haiku 3.5 rates); corrected figures are above.
 
-**Tiered pricing caveat**: Prompts exceeding 100K tokens are billed at $0.50 input / $2.50 output / $0.625 cache write / $0.05 cache read. SoHoAI's LiteLLM-based usage accounting currently uses only the ≤100K tier, so requests >100K tokens are under-costed by ~5×.
+**Tiered pricing — resolved 2026-10-09 (follow-up):** prompts over 100K tokens are billed $0.50 input / $2.50 output / $0.625 cache write / $0.05 cache read. LiteLLM 1.82.6 carries `*_above_100k_tokens` keys in its registry but its cost calculator ignores them (tested: 50K and 150K prompts cost the same per token), so only one level can be configured. `main.py` now `register_model()`s `claude-haiku-5-5` at the **>100K** level, so cost is never under-reported; prompts ≤100K are over-costed 5×. Verified live: a 12-in/4-out call went from $3.2e-6 to $1.6e-5 (= 12×$0.50 + 4×$2.50 per MTok). A proper per-request tier would need a cost hook in the forward path and `usage_tracker.py` — not done.
 
 ### LiteLLM integration
 
-LiteLLM 1.82.6 (already deployed) includes native pricing data for `claude-haiku-5-5`. No `register_model()` override needed; rates are auto-discovered.
+LiteLLM 1.82.6 includes native pricing for `claude-haiku-5-5` (≤100K tier only); a `register_model()` override for the >100K tier was added in the follow-up above.
 
 ### Reload behaviour and initial blocker
 
