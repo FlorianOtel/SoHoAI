@@ -844,7 +844,8 @@ async def usage_stats(
 #  `model_info.max_input_tokens` correctly (v3.79.0 bug: defaults to 8K/128K
 #  if the endpoint returns nothing or an empty API-key is set in the client).
 #
-#  Proxy base URL (Cline, Claude Code, etc.): http://192.168.1.93:8000/proxy
+#  Proxy base URL (Cline, Claude Code, etc.): http://192.168.1.93:8000/proxy/v1
+#  (Cline appends /chat/completions to its Base URL, so it must include /v1.)
 #  See CLAUDE.md §Design decisions and memory/project_shared_llama_server.md.
 # =============================================================================
 

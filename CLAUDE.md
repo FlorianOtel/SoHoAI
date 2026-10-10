@@ -326,7 +326,7 @@ bash NFS-files--MCP-server/nfs_files_mcp_server.sh
 
 # Cline VSCode plugin and Claude Code proxy — see docs/Model-routing.md
 # Quick reference:
-#   Cline (LiteLLM provider):  Base URL http://192.168.1.93:8000/proxy  API key sohoai-local
+#   Cline (LiteLLM provider):  Base URL http://192.168.1.93:8000/proxy/v1  API key sohoai-local
 #   Claude Code (ANTHROPIC_BASE_URL): http://192.168.1.93:8000
 #   Claude Code (sub-agent frontmatter): api_base_url http://192.168.1.93:8000/proxy
 

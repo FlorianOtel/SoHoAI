@@ -3,7 +3,7 @@ title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 5.5)
-updated_at: 2026-10-09--21-40
+updated_at: 2026-10-10--12-30
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -15,6 +15,73 @@ context: >
 
 ---
 
+
+## 2026-10-10 — `reasoning_effort` support (Cline) and LiteLLM upgrade 1.82.6 → 1.104.2
+
+### What changed
+
+- **LiteLLM upgraded from 1.82.6 to 1.104.2** in the shared venv (`~/Gin-AI/.Gin-AI-python-3.12`).
+  Only SoHoAI uses LiteLLM there. The upgrade also moved aiohttp 3.13.3 → 3.14.4, boto3/botocore
+  1.42.91 → 1.43.111, pydantic-settings 2.13.1 → 2.15.0, s3transfer 0.16.0 → 0.19.2 and yarl
+  1.23.0 → 1.25.1. `pyproject.toml` pinned `litellm==1.81.13` (already stale versus the installed
+  1.82.6) and now pins `litellm==1.104.2`, with aiohttp, pydantic-settings and yarl updated to match.
+- **`allowed_openai_params: ["reasoning_effort"]`** added to the seven `ollama-cloud/*` deployments and to
+  both local Qwen aliases in `SoHoAI-config.yaml`.
+- **Cline Base URL corrected** to `http://192.168.1.93:8000/proxy/v1` (`docs/Model-routing.md` §1,
+  `CLAUDE.md` quick reference, `main.py` comment). Cline appends `/chat/completions`, and only
+  `/proxy/v1/chat/completions` exists, so the old `.../proxy` gave a 404.
+
+### Why — two independent failures behind one Cline setting
+
+Setting a reasoning level in Cline crashed the request with `UnsupportedParamsError: openai does not
+support parameters: ['reasoning_effort'], for model=minimax-m3:cloud`, and then the fallback failed too.
+
+1. **LiteLLM gate, not Ollama.** Ollama Cloud *does* accept `reasoning_effort` (probed directly:
+   `none` → no reasoning, `low`/`high` → reasoning returned). But the models are routed as
+   `openai/<name>` with a custom `api_base`, and LiteLLM allows `reasoning_effort` for the `openai`
+   provider only on OpenAI reasoning models (offline check: allowed for `gpt-5`/`o3`, not for
+   `minimax-m3:cloud`). The per-deployment `allowed_openai_params` override lets it through.
+   Tested through the LiteLLM Router with a dead `api_base`: baseline → `UnsupportedParamsError`,
+   with the override → passes validation. Global `drop_params: true` was rejected because it would
+   silently discard the reasoning level.
+2. **Anthropic fallback, fixed by the upgrade.** The `ollama-cloud/minimax-m3 → anthropic/claude-opus-5-5`
+   fallback re-sent `reasoning_effort`, which LiteLLM 1.82.6 translated to the legacy
+   `thinking: {type: enabled, budget_tokens}` (it only recognises 4.6-family names for the adaptive
+   form). Anthropic rejects that for Opus 5.5 / Sonnet 5 ("Use thinking.type.adaptive and
+   output_config.effort"). LiteLLM 1.104.2 marks `claude-opus-5-5`, `claude-sonnet-5` and
+   `claude-haiku-5-5` as `supports_adaptive_thinking` and emits
+   `thinking: {type: adaptive}` + `output_config: {effort}`. Fixing (1) alone would only have moved
+   the failure to the fallback.
+
+### Local Qwen3.5-9B does NOT honour it
+
+Probed llama-swap on Server 2 directly. With the server default (`--reasoning off`), `reasoning_effort`
+`none`/`low`/`high` all return an identical 4-token answer with no reasoning. With thinking forced on
+(`chat_template_kwargs.enable_thinking=true`), completion tokens varied run to run with no relation to the
+level (e.g. `high` = 618 and 274, `none` = 329). So llama-server accepts and ignores the field; thinking is
+binary (the `local/qwen3.5-9b-agentic` alias). The local aliases carry `allowed_openai_params` only so a client
+sending the field does not crash. Mapping levels onto the binary switch was considered and not done: it would
+silently turn thinking on from a Cline setting and change latency, and the two aliases already expose that choice.
+
+### Verified (2026-10-10)
+
+- All seven `ollama-cloud/*` models answer with `reasoning_effort=low` through `/proxy/v1/chat/completions`;
+  `minimax-m3` also with `none` (no reasoning) and `high`; streaming `minimax-m3` + `low` completes.
+- `claude-opus-5-5` + `low` and `claude-sonnet-5` + `high` succeed (previously rejected by Anthropic).
+- Local `qwen3.5-9b-q4` and `local/qwen3.5-9b-agentic` + `low` succeed (ignored).
+- Plain and streaming local chat unaffected; `usage_events` rows still recorded after the upgrade.
+- Haiku 5.5 cost unchanged after the upgrade (12 in / 4 out = $1.6e-5), so the >100K `register_model()` override
+  from the 2026-10-09 entry still applies on 1.104.2. The note there that "LiteLLM 1.82.6 ignores the
+  `*_above_100k_tokens` keys" was **not re-tested** on 1.104.2.
+
+### Accepted limitations / not tested
+
+- The minimax → Opus fallback was never forced end to end; its two halves were tested separately.
+- RAG, MCP and the Claude Code `/v1/messages` paths were not regression-tested against LiteLLM 1.104.2.
+- Rollback: `pip install litellm==1.82.6` plus the five dependency versions above. The pre-upgrade
+  `pip freeze` was kept only in the session scratchpad.
+- The shared venv carries unrelated pre-existing `pip check` conflicts (vllm/transformers, protobuf, others);
+  none involve the six upgraded packages.
 
 ## 2026-10-07 — Qwen3-ASR and Nemotron-3-Diarization exposed through SoHoAI (transparent `/upstream` forwarder)
 

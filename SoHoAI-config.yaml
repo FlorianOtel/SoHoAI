@@ -50,6 +50,10 @@ model_list:
       model: openai/qwen3.5-9b-q4
       api_base: "http://${server2_ip}:8000/v1"
       api_key: "dummy-key"
+      # Accepted but IGNORED by llama-server (verified 2026-10-10: no effect at any level);
+      # allowed only so a client sending it does not crash with UnsupportedParamsError.
+      # Thinking is on/off only, via extra_body chat_template_kwargs.enable_thinking.
+      allowed_openai_params: ["reasoning_effort"]
     model_info:
       id: "local/qwen3.5-9b-q4"
       description: "Qwen3.5-9B-UD-Q4_K_XL -- local chat model "
@@ -69,6 +73,10 @@ model_list:
       model: openai/qwen3.5-9b-q4
       api_base: "http://${server2_ip}:8000/v1"
       api_key: "dummy-key"
+      # Accepted but IGNORED by llama-server (verified 2026-10-10: no effect at any level);
+      # allowed only so a client sending it does not crash with UnsupportedParamsError.
+      # Thinking is on/off only, via extra_body chat_template_kwargs.enable_thinking.
+      allowed_openai_params: ["reasoning_effort"]
       extra_body:
         chat_template_kwargs:
           enable_thinking: true
@@ -173,6 +181,9 @@ model_list:
       model: openai/deepseek-v4.1-flash:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+      # LiteLLM only allows reasoning_effort for OpenAI reasoning models; Ollama Cloud accepts it
+      # (verified 2026-10-10), so allow it through instead of raising UnsupportedParamsError.
+      allowed_openai_params: ["reasoning_effort"]
     model_info:
       id: "ollama-cloud/deepseek-v4.1-flash"
       description: "DeepSeek V4.1 Flash — Ollama Cloud"
@@ -185,6 +196,9 @@ model_list:
       model: openai/deepseek-v4-pro:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+      # LiteLLM only allows reasoning_effort for OpenAI reasoning models; Ollama Cloud accepts it
+      # (verified 2026-10-10), so allow it through instead of raising UnsupportedParamsError.
+      allowed_openai_params: ["reasoning_effort"]
     model_info:
       id: "ollama-cloud/deepseek-v4-pro"
       description: "DeepSeek V4 Pro — Ollama Cloud"
@@ -197,6 +211,9 @@ model_list:
       model: openai/minimax-m3:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+      # LiteLLM only allows reasoning_effort for OpenAI reasoning models; Ollama Cloud accepts it
+      # (verified 2026-10-10), so allow it through instead of raising UnsupportedParamsError.
+      allowed_openai_params: ["reasoning_effort"]
     model_info:
       id: "ollama-cloud/minimax-m3"
       description: "Minimax M3 — Ollama Cloud"
@@ -209,6 +226,9 @@ model_list:
       model: openai/kimi-k2.7-code:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+      # LiteLLM only allows reasoning_effort for OpenAI reasoning models; Ollama Cloud accepts it
+      # (verified 2026-10-10), so allow it through instead of raising UnsupportedParamsError.
+      allowed_openai_params: ["reasoning_effort"]
     model_info:
       id: "ollama-cloud/kimi-k2.7-code"
       description: "Kimi K2.7 Code — Ollama Cloud"
@@ -221,6 +241,9 @@ model_list:
       model: openai/kimi-k3:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+      # LiteLLM only allows reasoning_effort for OpenAI reasoning models; Ollama Cloud accepts it
+      # (verified 2026-10-10), so allow it through instead of raising UnsupportedParamsError.
+      allowed_openai_params: ["reasoning_effort"]
     model_info:
       id: "ollama-cloud/kimi-k3"
       description: "Kimi K3 — Ollama Cloud"
@@ -233,6 +256,9 @@ model_list:
       model: openai/glm-5.3:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+      # LiteLLM only allows reasoning_effort for OpenAI reasoning models; Ollama Cloud accepts it
+      # (verified 2026-10-10), so allow it through instead of raising UnsupportedParamsError.
+      allowed_openai_params: ["reasoning_effort"]
     model_info:
       id: "ollama-cloud/glm-5.3"
       description: "GLM 5.3 — Ollama Cloud"
@@ -247,6 +273,9 @@ model_list:
       model: openai/glm-5.3-flash:cloud
       api_base: https://ollama.com/v1
       api_key: os.environ/OLLAMA_API_KEY
+      # LiteLLM only allows reasoning_effort for OpenAI reasoning models; Ollama Cloud accepts it
+      # (verified 2026-10-10), so allow it through instead of raising UnsupportedParamsError.
+      allowed_openai_params: ["reasoning_effort"]
     model_info:
       id: "ollama-cloud/glm-5.3-flash"
       description: "GLM 5.3 Flash — Ollama Cloud (multimodal, 1M ctx, tools)"

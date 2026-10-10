@@ -3,7 +3,7 @@ title: "SoHoAI Model routing — Cline and Claude Code integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
 updated_by: Claude Code (Claude Sonnet 5.5)
-updated_at: 2026-10-09--21-40
+updated_at: 2026-10-10--12-30
 context: >
   SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
   One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
@@ -156,13 +156,39 @@ return empty `content[0].text` with `stop_reason: max_tokens`.
 In Cline VSCode settings, choose **LiteLLM** as the provider (not "OpenAI Compatible"):
 
 ```
-Base URL : http://192.168.1.93:8000/proxy
+Base URL : http://192.168.1.93:8000/proxy/v1
 API Key  : sohoai-local  (any non-empty string)
 Model    : qwen3.5-9b-q4  (local, 131K ctx)  OR  claude-sonnet-5  (cloud, 1M ctx)
 ```
 
+The Base URL **must end in `/v1`**: Cline appends `/chat/completions` to it, and SoHoAI only
+serves `/proxy/v1/chat/completions` — `http://192.168.1.93:8000/proxy` alone yields a 404
+(verified 2026-10-10; Cline's model-info fetch tolerates either form, chat does not).
+
 API key must be non-empty — Cline's client-side gate rejects an empty string regardless
 of server-side validation.
+
+### Reasoning effort (`reasoning_effort`)
+
+Cline's reasoning-level setting is sent as the OpenAI `reasoning_effort` field and flows
+unchanged through `POST /proxy/v1/chat/completions` into LiteLLM. Who honours it
+(all verified by direct probe, 2026-10-10):
+
+| Model family | Honours `reasoning_effort`? | Notes |
+|---|---|---|
+| `ollama-cloud/*` | Yes | Ollama's `/v1/chat/completions` maps it to its native think level (`none` disables thinking; `low`/`medium`/`high` set depth). Reasoning comes back in `reasoning`. Probed in detail on `minimax-m3`; the other six models accepted `low` and answered, but their per-level behaviour was not compared (`glm-5.3*` returned no reasoning text at `low`). |
+| `anthropic/*` (Opus 5.5, Sonnet 5, Haiku 5.5) | Yes | LiteLLM >= 1.104 translates it to `thinking: {type: adaptive}` + `output_config: {effort}`; `none` sends nothing. Older LiteLLM (1.82.6) sent the legacy `thinking.type=enabled`, which Anthropic rejects for these models. |
+| `local/qwen3.5-9b-q4`, `local/qwen3.5-9b-agentic` | **No — accepted and ignored** | llama-server takes the field without error but any level (`none`/`low`/`high`) behaves identically, with thinking on or off. Thinking is binary: off by default (`--reasoning off`), on via the `agentic` alias (`extra_body.chat_template_kwargs.enable_thinking`). |
+
+**Why `allowed_openai_params` is needed.** Every non-Anthropic model is routed as
+`openai/<name>` with a custom `api_base`. LiteLLM decides supported parameters from the
+provider and model name, and only allows `reasoning_effort` for OpenAI's own reasoning
+models, so any other `openai/*` deployment raised `UnsupportedParamsError` and (for
+Ollama Cloud) fell through to the Anthropic fallback. Each `ollama-cloud/*` and `local/*`
+deployment in `SoHoAI-config.yaml` therefore carries
+`allowed_openai_params: ["reasoning_effort"]`. A global `drop_params: true` was rejected:
+it would silently discard every unsupported parameter, including the reasoning level the
+user wants honoured. **A new `openai/*` model added to `model_list` needs the same line.**
 
 ### Verify proxy model info
 
