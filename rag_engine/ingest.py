@@ -48,6 +48,7 @@ from qdrant_client.models import (
 
 from .collection import DOCUMENTS_COLLECTION, ensure_collection, collection_has_sparse
 from .embeddings import embed_batch, embed_sparse
+from .opencode_client import get_json, load_password
 from .schema import (
     FIELD_CHUNK_INDEX,
     FIELD_FILE_NAME,
@@ -370,19 +371,30 @@ def _parse_claude_chat(path: Path) -> tuple[str, dict]:
     return text, metadata
 
 
-def _parse_opencode_session(path: str, oc_api_url: str) -> tuple[str, dict]:
+def _parse_opencode_session(
+    path: str, oc_api_url: str, password_env_file: str | None = None
+) -> tuple[str, dict]:
     """
-    Fetch an opencode session via HTTP and extract user/assistant text turns.
+    Fetch an OpenCode 2.x session via its HTTP API and extract user/assistant text turns.
 
     path is the synthetic key "opencode://{session_id}".
-    oc_api_url is the opencode API base URL (e.g. "http://localhost:4096").
+    oc_api_url is the opencode API base URL (e.g. "http://192.168.1.95:4096").
+    password_env_file names the file holding OPENCODE_SERVER_PASSWORD
+    (opencode.password_env_file; see rag_engine/opencode_client.py).
+
+    Routes (OpenCode 2.x, Basic auth):
+      GET /api/session/{id}          -> {"data": {title, time, location.directory, ...}}
+      GET /api/session/{id}/message  -> {"data": [...], "cursor": {"next", ...}}
+        newest-first by default, so we ask for order=asc; cursor.next is set while
+        a page is non-empty, so the walk stops at the first empty page.
 
     Returns (text, metadata) with session_id and session_title. No `project`
-    field — opencode sessions have no path-derived project (session.directory
-    is just cwd-at-launch metadata, not topic classification). The directory
-    is preserved inside the searchable header body as forensic context.
+    field — opencode sessions have no path-derived project (the launch
+    directory is cwd-at-launch metadata, not topic classification). The
+    directory is preserved inside the searchable header body as forensic context.
 
-    On any HTTP failure, returns ("", {}) to signal parse failure.
+    HTTP, auth and non-JSON errors are RAISED, so the item is marked failed and
+    retried; only a session with no user/assistant text returns ("", {}).
     """
     # Parse session_id from synthetic path
     if not path.startswith("opencode://"):
@@ -391,59 +403,60 @@ def _parse_opencode_session(path: str, oc_api_url: str) -> tuple[str, dict]:
     if not session_id:
         return "", {}
 
+    password = load_password(password_env_file)
+
+    # Session metadata (title, created timestamp, launch directory)
+    session = get_json(oc_api_url, f"/api/session/{session_id}", password).get("data", {})
+    session_title = (session.get("title") or "").strip()
+    launched_from = (session.get("location") or {}).get("directory", "") or ""
+    created_ms = (session.get("time") or {}).get("created", 0)
+    created_timestamp = (
+        datetime.fromtimestamp(created_ms / 1000.0).isoformat() if created_ms else ""
+    )
+
+    # All messages, oldest first, walked page by page. The page cap only guards
+    # against a self-referential cursor (200 x 200 = 40,000 messages).
+    messages: list[dict] = []
+    params: dict[str, str] = {"order": "asc", "limit": "200"}
+    for _page_index in range(200):
+        page = get_json(oc_api_url, f"/api/session/{session_id}/message", password, params)
+        items = page.get("data", [])
+        if not items:
+            break
+        messages.extend(items)
+        next_cursor = (page.get("cursor") or {}).get("next")
+        if not next_cursor:
+            break
+        # The cursor carries the order; the server rejects cursor + order together.
+        params = {"cursor": next_cursor, "limit": "200"}
+
     turns: list[str] = []
-    session_title = ""
-    launched_from = ""
-    created_timestamp = ""
 
-    try:
-        # Fetch session metadata (for title and created timestamp)
-        session_url = f"{oc_api_url}/session/{session_id}"
-        with urllib.request.urlopen(session_url, timeout=5) as response:
-            session = json.load(response)
-        session_title = session.get("title", "").strip()
-        launched_from = session.get("directory", "") or ""
-        time_info = session.get("time", {})
-        created_ms = time_info.get("created", 0)
-        if created_ms:
-            created_timestamp = datetime.fromtimestamp(created_ms / 1000.0).isoformat()
-
-        # Fetch messages
-        messages_url = f"{oc_api_url}/session/{session_id}/message"
-        with urllib.request.urlopen(messages_url, timeout=5) as response:
-            messages = json.load(response)
-    except Exception:
-        return "", {}
-
-    # Extract text turns from messages
+    # Extract text turns. 2.x messages are typed by a top-level "type":
+    #   user      -> "text" (the prompt as typed)
+    #   assistant -> "content": [{type: text|reasoning|tool, ...}]; keep only "text"
+    # Everything else (synthetic, system, skill, shell, compaction, idle,
+    # agent/model/location switches) is harness bookkeeping, not conversation.
     first_user_text = ""
     for message in messages:
-        info = message.get("info", {})
-        role = info.get("role", "")
-        parts = message.get("parts", [])
+        message_type = message.get("type", "")
 
-        # Extract text from parts; skip non-text types
-        text_parts = []
-        for part in parts:
-            part_type = part.get("type", "")
-            if part_type == "text":
-                part_text = part.get("text", "").strip()
-                if part_text:
-                    text_parts.append(part_text)
-
-        if not text_parts:
-            continue
-
-        combined_text = "\n".join(text_parts)
-
-        # Format as user/assistant turn
-        if role == "user":
-            if not combined_text.startswith("/"):  # Skip slash commands
+        if message_type == "user":
+            combined_text = (message.get("text") or "").strip()
+            if combined_text and not combined_text.startswith("/"):  # Skip slash commands
                 turns.append(f"**User**: {combined_text}")
                 if not first_user_text:
                     first_user_text = combined_text
-        elif role == "assistant":
-            turns.append(f"**Assistant**: {combined_text}")
+
+        elif message_type == "assistant":
+            text_parts = [
+                (part.get("text") or "").strip()
+                for part in message.get("content") or []
+                if part.get("type") == "text"
+            ]
+            combined_text = "\n".join(t for t in text_parts if t)
+            if combined_text:
+                turns.append(f"**Assistant**: {combined_text}")
 
     if not turns:
         return "", {}
@@ -737,7 +750,10 @@ async def ingest_file(
         state_db.set_progress(file_path, "parsing")
         if file_path.startswith("opencode://"):
             oc_api_url = rag_cfg.get("opencode_api_url", "http://localhost:4096")
-            text, chat_meta = await asyncio.to_thread(_parse_opencode_session, file_path, oc_api_url)
+            oc_password_env_file = rag_cfg.get("opencode_password_env_file")
+            text, chat_meta = await asyncio.to_thread(
+                _parse_opencode_session, file_path, oc_api_url, oc_password_env_file
+            )
             file_type = "opencode"
         elif raw_file_type == "jsonl":
             text, chat_meta = await asyncio.to_thread(_parse_claude_chat, Path(file_path))

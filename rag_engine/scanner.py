@@ -1,9 +1,10 @@
 """
 NFS filesystem scanner — discovers files and populates the ingestion queue.
 
-Shared by:
-  - utils/rag_sync_nfs.py  (CLI invocation)
-  - POST /v1/rag/ingest/sync  (FastAPI endpoint)
+Used by:
+  - utils/rag_sync_nfs.py  (CLI invocation; run on Server 2 by scripts/rag-ingest-run.sh)
+  (The orchestrator's POST /v1/rag/ingest/sync was removed 2026-11-04: the RAG
+  state DB must only be opened from one host. See main.py's RAG SEARCH ENDPOINT note.)
 
 Exclusion rules are read from config["rag"]["scanner"] in SoHoAI-config.yaml.
 All four keys (include_extensions, exclude_dir_names, exclude_dir_suffixes,
@@ -19,13 +20,12 @@ Matching is done against the full child path, so "Library/" will NOT match
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import urllib.parse
-import urllib.request
+import urllib.error
 from pathlib import Path
 
+from .opencode_client import get_json, load_password
 from .state import StateDB
 
 logger = logging.getLogger(__name__)
@@ -295,6 +295,15 @@ def scan_opencode_sessions(
         )
         return {"scanned": 0, "existing_paths": set()}
 
+    # OpenCode 2.x requires Basic auth. A missing password is a configuration
+    # error: log it loudly and treat the source as unreachable, so existing
+    # opencode points are preserved (see utils/rag_sync_nfs.py).
+    try:
+        password = load_password(opencode_cfg.get("password_env_file"))
+    except RuntimeError as exc:
+        logger.error("OpenCode scan skipped: %s", exc)
+        return {"scanned": 0, "existing_paths": None}
+
     scanned = 0
     existing_paths: set[str] = set()
     cursor: str | None = None
@@ -306,15 +315,25 @@ def scan_opencode_sessions(
         params: dict[str, str] = {"limit": str(page_limit)}
         if cursor:
             params["cursor"] = cursor
-        url = f"{api_url}/api/session?{urllib.parse.urlencode(params)}"
 
         try:
-            with urllib.request.urlopen(url, timeout=10) as response:
-                payload = json.load(response)
+            payload = get_json(api_url, "/api/session", password, params, timeout=10)
+        except urllib.error.HTTPError as exc:
+            # 401/403 means the password is wrong — a configuration error, not
+            # a transient outage, so it is logged as ERROR.
+            level = logging.ERROR if exc.code in (401, 403) else logging.WARNING
+            logger.log(
+                level,
+                "opencode /api/session at %s answered HTTP %d (%s) — check "
+                "opencode.password_env_file; skipping opencode scan, existing "
+                "opencode Qdrant points are preserved",
+                api_url, exc.code, exc.reason,
+            )
+            return {"scanned": scanned, "existing_paths": None}
         except Exception as exc:
             logger.warning(
                 "opencode /api/session unreachable at %s: %s — skipping opencode scan, "
-                "will NOT delete stale opencode Qdrant points",
+                "existing opencode Qdrant points are preserved",
                 api_url, exc,
             )
             return {"scanned": scanned, "existing_paths": None}

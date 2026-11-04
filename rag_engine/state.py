@@ -177,6 +177,20 @@ class StateDB:
         completed_gone = [p for p, s in gone if s == "completed"]
         return completed_gone, all_gone
 
+    def paths_with_prefix(self, prefix: str) -> set[str]:
+        """
+        Return every queued file_path that starts with prefix (any status).
+
+        Used by rag_sync_nfs.py to keep a source's rows out of find_deleted()
+        when that source could not be scanned (e.g. opencode:// when the
+        OpenCode API is unreachable), so its Qdrant points are preserved.
+        """
+        cur = self._conn.execute(
+            "SELECT file_path FROM ingestion_queue WHERE substr(file_path, 1, ?) = ?",
+            (len(prefix), prefix),
+        )
+        return {row["file_path"] for row in cur.fetchall()}
+
     def purge_deleted(self, paths: list[str]) -> None:
         """
         Remove the given paths from SQLite. Call only after Qdrant cleanup is complete.

@@ -183,6 +183,9 @@ def main() -> None:
 
     rag_cfg = config.get("rag", {})
     rag_cfg["opencode_api_url"] = config.get("opencode", {}).get("api_url", "http://localhost:4096")
+    # File holding OPENCODE_SERVER_PASSWORD (OpenCode 2.x Basic auth); read only when
+    # an opencode:// item is parsed. None -> opencode_client.DEFAULT_PASSWORD_ENV_FILE.
+    rag_cfg["opencode_password_env_file"] = config.get("opencode", {}).get("password_env_file")
     db_base = config.get("db_base_path", "/mnt/nfs/__Backups/SoHoAI--databases")
     db_path = f"{db_base}/sqlite/rag_state.db"
     state_db = StateDB(db_path)

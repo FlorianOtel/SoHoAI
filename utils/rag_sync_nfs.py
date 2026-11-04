@@ -87,9 +87,15 @@ def main() -> None:
     if result_opencode["existing_paths"] is not None:
         all_existing |= result_opencode["existing_paths"]
     else:
+        # The OpenCode API could not be scanned. Count every already-queued
+        # opencode:// row as still existing, so find_deleted() does not treat
+        # them as gone (before 2026-11-04 it did, and a 401 deleted them all).
+        preserved = state_db.paths_with_prefix("opencode://")
+        all_existing |= preserved
         logger.warning(
-            "Opencode API unreachable — skipping opencode paths in deletion check "
-            "(existing opencode Qdrant points are preserved)"
+            "Opencode API unreachable — preserving %d existing opencode session(s) "
+            "in the deletion check",
+            len(preserved),
         )
     deleted_paths, stale_paths = state_db.find_deleted(all_existing)
     if all_existing and deleted_paths:

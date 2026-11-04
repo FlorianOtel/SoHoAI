@@ -15,7 +15,6 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import json
 import logging
@@ -47,14 +46,9 @@ from schemas import (
 )
 from chat_store import ChatStore
 from conversation import ConversationCache
-from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
 
 from rag_engine import search_rag, multi_query_search
-from rag_engine.collection import DOCUMENTS_COLLECTION, ensure_collection, get_client
-from rag_engine.ingest import ingest_file
-from rag_engine.scanner import scan_nfs_roots, scan_claude_chats, scan_opencode_sessions
-from rag_engine.schema import FIELD_SOURCE_PATH
-from rag_engine.state import StateDB
+from rag_engine.collection import ensure_collection, get_client
 from router import SmartRouter
 from kv_cache import KVCacheManager, apply_qwen3_template
 
@@ -238,6 +232,9 @@ async def lifespan(app: FastAPI):
     app.state.rag_cfg = config.get("rag", {})
     _oc_cfg = config.get("opencode", {})
     app.state.rag_cfg["opencode_api_url"] = _oc_cfg.get("api_url", "http://localhost:4096")
+    # Read only when an opencode:// item is parsed, so a host without the file
+    # (e.g. Server 1) starts normally and fails only that item, loudly.
+    app.state.rag_cfg["opencode_password_env_file"] = _oc_cfg.get("password_env_file")
 
     try:
         qdrant_url = app.state.rag_cfg.get("qdrant_url", "http://192.168.1.93:6333")
@@ -269,11 +266,6 @@ async def lifespan(app: FastAPI):
 
     app.state.variant_llm_fn = variant_llm_fn
 
-    rag_state_db_path = f"{_db_base}/sqlite/rag_state.db"
-    app.state.state_db = StateDB(rag_state_db_path)
-    app.state.ingest_task: asyncio.Task | None = None
-    app.state.ingest_stop = asyncio.Event()
-    logger.info("RAG state DB ✓")
 
     yield
 
@@ -501,175 +493,17 @@ async def submit_feedback(chat_id: str, message_index: int, signal: str, detail:
 
 
 # =============================================================================
-#  RAG INGESTION ENDPOINTS  (Phase 2)
+#  RAG SEARCH ENDPOINT
 # =============================================================================
-
-async def _ingest_worker(
-    state_db: StateDB,
-    qdrant_client,
-    rag_cfg: dict,
-    stop_event: asyncio.Event,
-) -> None:
-    """Background ingestion worker — runs as an asyncio Task."""
-    state_db.crash_recovery()
-    processed = failed = 0
-    while not stop_event.is_set():
-        rows = state_db.fetch_pending_full(limit=5)
-        if not rows:
-            break
-        for row in rows:
-            if stop_event.is_set():
-                break
-            try:
-                await ingest_file(
-                    file_path=row["file_path"],
-                    owner=row["owner"],
-                    rag_cfg=rag_cfg,
-                    state_db=state_db,
-                    qdrant_client=qdrant_client,
-                )
-                processed += 1
-            except Exception:
-                failed += 1
-    logger.info("Ingest worker finished: %d processed, %d failed", processed, failed)
-
-
-@app.post("/v1/rag/ingest/sync")
-async def rag_ingest_sync(user: str | None = Query(None)):
-    """Scan configured NFS roots and claude chat directories; populate the ingestion queue."""
-    result_nfs = await asyncio.to_thread(
-        scan_nfs_roots,
-        app.state.state_db,
-        config,
-        user,
-    )
-    result_chats = await asyncio.to_thread(
-        scan_claude_chats,
-        app.state.state_db,
-        config,
-        user,
-    )
-    result_opencode = await asyncio.to_thread(
-        scan_opencode_sessions,
-        app.state.state_db,
-        config,
-        user,
-    )
-
-    all_existing = result_nfs["existing_paths"] | result_chats["existing_paths"]
-    if result_opencode["existing_paths"] is not None:
-        all_existing |= result_opencode["existing_paths"]
-    deleted_paths, stale_paths = app.state.state_db.find_deleted(all_existing)
-
-    # Qdrant cleanup BEFORE SQLite deletion — if killed mid-loop, the SQLite rows
-    # survive intact and the next sync retries automatically (no orphaned Qdrant points).
-    if deleted_paths and app.state.qdrant_client is not None:
-        for path in deleted_paths:
-            app.state.qdrant_client.delete(
-                collection_name=DOCUMENTS_COLLECTION,
-                points_selector=FilterSelector(
-                    filter=Filter(
-                        must=[
-                            FieldCondition(
-                                key=FIELD_SOURCE_PATH,
-                                match=MatchValue(value=path),
-                            )
-                        ]
-                    )
-                ),
-            )
-        logger.info("Deleted Qdrant points for %d removed file(s)", len(deleted_paths))
-    if stale_paths:
-        app.state.state_db.purge_deleted(stale_paths)
-
-    counts = app.state.state_db.get_counts()
-    return {
-        "nfs_scanned": result_nfs["scanned"],
-        "chats_scanned": result_chats["scanned"],
-        "opencode_scanned": result_opencode["scanned"],
-        "opencode_reachable": result_opencode["existing_paths"] is not None,
-        "deleted": len(stale_paths),
-        "queue": counts,
-    }
-
-
-@app.post("/v1/rag/ingest/start")
-async def rag_ingest_start():
-    """Start the ingestion daemon as an asyncio background task."""
-    if app.state.qdrant_client is None:
-        raise HTTPException(503, "Qdrant unavailable — RAG is disabled")
-
-    task: asyncio.Task | None = app.state.ingest_task
-    if task is not None and not task.done():
-        return {"status": "already_running"}
-
-    app.state.ingest_stop.clear()
-    app.state.ingest_task = asyncio.create_task(
-        _ingest_worker(
-            app.state.state_db,
-            app.state.qdrant_client,
-            app.state.rag_cfg,
-            app.state.ingest_stop,
-        )
-    )
-    return {"status": "started"}
-
-
-@app.post("/v1/rag/ingest/stop")
-async def rag_ingest_stop():
-    """Signal the background ingestion worker to stop after the current file."""
-    app.state.ingest_stop.set()
-    task: asyncio.Task | None = app.state.ingest_task
-    running = task is not None and not task.done()
-    return {"status": "stop_requested", "was_running": running}
-
-
-@app.get("/v1/rag/ingest/status")
-async def rag_ingest_status(user: str | None = Query(None)):
-    """Return ingestion queue metrics and Qdrant point count."""
-    state_db: StateDB = app.state.state_db
-    counts = state_db.get_counts()
-
-    if user:
-        cur = state_db._conn.execute(
-            "SELECT status, COUNT(*) AS n FROM ingestion_queue "
-            "WHERE owner = ? GROUP BY status",
-            (user,),
-        )
-        raw = {row["status"]: row["n"] for row in cur.fetchall()}
-        counts = {
-            "pending":    raw.get("pending", 0),
-            "processing": raw.get("processing", 0),
-            "completed":  raw.get("completed", 0),
-            "failed":     raw.get("failed", 0),
-            "total":      sum(raw.values()),
-        }
-
-    qdrant_points: int | None = None
-    if app.state.qdrant_client is not None:
-        try:
-            qdrant_points = app.state.qdrant_client.count(
-                DOCUMENTS_COLLECTION, exact=True
-            ).count
-        except Exception:
-            pass
-
-    task: asyncio.Task | None = app.state.ingest_task
-    worker_running = task is not None and not task.done()
-
-    progress_pct = (
-        round(counts["completed"] / counts["total"] * 100, 1)
-        if counts["total"] > 0 else 0.0
-    )
-
-    return {
-        "queue":          counts,
-        "progress_pct":   progress_pct,
-        "qdrant_points":  qdrant_points,
-        "worker_running": worker_running,
-        "scope":          f"owner={user}" if user else "all",
-    }
-
+# RAG ingestion is NOT served here. The /v1/rag/ingest/{sync,start,stop,status}
+# endpoints were removed 2026-11-04: ingestion runs on Server 2
+# (rag-ingest.timer -> scripts/rag-ingest-run.sh), and the RAG state DB
+# (SQLite, WAL mode, on NFS) must only be opened from ONE host. A connection
+# from this orchestrator on Server 1, opened by a uvicorn reload during an
+# ingest run, corrupted that run's view of the DB ("database disk image is
+# malformed"). Equivalents, run on Server 2: utils/rag_sync_nfs.py,
+# scripts/rag-ingest-run.sh (or utils/rag_ingest_daemon.py), utils/rag_status.py.
+# Search below reads Qdrant only.
 
 @app.get("/v1/rag/search")
 async def rag_search(

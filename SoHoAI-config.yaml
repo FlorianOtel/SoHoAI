@@ -405,6 +405,11 @@ rag:
     # Matching uses endswith("/" + pattern) so "Library/" won't match "PublicLibrary/".
     exclude_dir_names:
       - ".Gin-AI-python-3.12/"  # Python virtualenv
+      - ".Gin-AI-python-3.12.old/"  # pre-2026-11-01 venv (machine-local interpreter); ingested by
+                                    # mistake 2026-11-01 because the entry above does not match it
+      - ".uv-python/"           # uv-managed Python interpreters on NFS (the venv's base, since 2026-11-01)
+      - "site-packages/"        # any virtualenv's installed packages, whatever the venv is called
+      - ".cache/"               # tool caches (uv archives, etc.)
       - "__pycache__/"
       - ".git/"
       - "node_modules/"
@@ -463,6 +468,10 @@ claude_chats:
 opencode:
   api_url: "http://192.168.1.95:4096"
   owner: florian
+  # OpenCode 2.x requires HTTP Basic auth (user "opencode"). The password is read
+  # from OPENCODE_SERVER_PASSWORD in the server's own env file, on the ingest host
+  # (Server 2, where rag-ingest.timer runs and the OpenCode server lives).
+  password_env_file: "~/.config/opencode/opencode-server.env"
 
 # -- llama-server native API (KV cache slot management) -----------------------
 llama_server:
