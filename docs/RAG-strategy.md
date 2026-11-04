@@ -2,8 +2,8 @@
 title: "SoHoAI — RAG Strategy"
 created_at: 2026-03-30--00-00
 created_by: Florian Otel
-updated_by: Claude Code (Claude Opus 5)
-updated_at: 2026-09-18--12-56
+updated_by: Claude Code (Claude Opus 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion, scan-failure deletion bug, venv exclusions, orchestrator ingest endpoints removed, state DB single-host rule)
+updated_at: 2026-11-04--17-15
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   RAG pipeline design: embedding model, vector DB, chunking strategy,
@@ -44,6 +44,13 @@ context: >
   Updated 2026-05-27 (later): §1.2 expanded with explicit "fake path problem" +
   "multi-tenant blind spot" callouts, and §3.6 multi-tenancy section now states
   upfront that opencode is excluded from per-user isolation today.
+  Updated 2026-11-04: §1.2 OpenCode subsection rewritten for OpenCode 2.x (Basic auth,
+  /api/session/{id} + /api/session/{id}/message routes, 2.x message shape) and the
+  unreachability guard corrected (it used to delete every opencode point); §1.2 exclusions
+  gain the old venv, .uv-python/, site-packages/, .cache/. The orchestrator's
+  /v1/rag/ingest/* endpoints are removed (§2.4, §4.6, §5.8, §7); §10.4 adds the
+  cross-host SQLite WAL hazard and §10.6 the rule that rag_state.db is opened from
+  Server 2 only. Incident detail: RAG-troubleshoot.md, 2026-11-04 entry.
 ---
 ---
 
@@ -132,6 +139,10 @@ rag:
     # Matching uses endswith("/" + pattern) so "Library/" won't match "PublicLibrary/".
     exclude_dir_names:
       - ".Gin-AI-python-3.12/"  # Python virtualenv
+      - ".Gin-AI-python-3.12.old/"  # pre-2026-11-01 venv (see note below the block)
+      - ".uv-python/"           # uv-managed Python interpreters on NFS (the venv's base)
+      - "site-packages/"        # any virtualenv's installed packages, whatever the venv is called
+      - ".cache/"               # tool caches (uv archives, etc.)
       - "__pycache__/"
       - ".git/"
       - "node_modules/"
@@ -167,6 +178,14 @@ naturally with the same logic.
 `exclude_dir_suffixes` continues to match against the bare `dirname` only (not the full
 path) using `dirname.endswith(suffix)` — kept separate because `.dist-info` is a name
 suffix, not a path pattern.
+
+**Excluding a directory by name does not exclude a sibling with a longer name (2026-11-04).**
+`".Gin-AI-python-3.12/"` matches `.../.Gin-AI-python-3.12` but NOT
+`.../.Gin-AI-python-3.12.old`. When the venv was rebuilt on the NFS interpreter (2026-11-01),
+the old one was moved to `.Gin-AI-python-3.12.old/` and the next run ingested 767 of its files
+(25,691 points). The fix excludes what makes a directory unwanted (`site-packages/`,
+`.uv-python/`, `.cache/`) rather than only a venv's name. Details: RAG-troubleshoot.md,
+2026-11-04 entry.
 
 To add or remove an exclusion, edit `SoHoAI-config.yaml` and re-run `rag_sync_nfs.py`.
 No code change is required. When a directory is newly excluded, `rag_sync_nfs.py`
@@ -258,25 +277,46 @@ registered projects, missing any session opened from outside a project
 worktree (the same trap oc-history falls into; see
 `~/Gin-AI/tmp/oc-history-fix.md` for the parallel fix).
 
-**Parsing.** `_parse_opencode_session()` (in `rag_engine/ingest.py`) fetches
-`GET /session/{id}` for title/timestamp and `GET /session/{id}/message` for
-turns, builds a header block (`Session:`, `Launched from:`, `Date:`, `Title:`)
-followed by `**User**:` / `**Assistant**:` turns, and returns
-`{session_id, session_title}` metadata. The cwd is preserved inside the
-searchable header body as `Launched from: <directory>` purely as forensic
-context — NOT as a project classification.
+**Authentication — OpenCode 2.x (since 2026-10-14).** The server at
+`192.168.1.95:4096` (`opencode-v2-server.service`) requires HTTP Basic auth: user
+`opencode`, password `OPENCODE_SERVER_PASSWORD`. `rag_engine/opencode_client.py` reads the
+password from the server's own environment file (`opencode.password_env_file`, default
+`~/.config/opencode/opencode-server.env`), so a password change on the server is followed
+without touching SoHoAI. The file exists on Server 2, where the ingestion service runs.
+`get_json()` sends the credentials and **refuses any answer that is not JSON**: on 2.x,
+unknown or legacy routes are served by the web app's catch-all with HTTP 200 and HTML,
+which would otherwise parse as "no content". A 401/403 is logged at ERROR.
 
-**Unreachability guard.** If the API is unreachable mid-walk,
-`scan_opencode_sessions()` returns `existing_paths=None`. Callers must skip
-merging that source into `find_deleted()` to avoid mass-purging existing
-opencode Qdrant points the next time opencode happens to be off. See
-`utils/rag_sync_nfs.py` and `main.py`'s `/v1/rag/ingest/sync` for the
-canonical caller pattern.
+**Parsing (OpenCode 2.x).** `_parse_opencode_session()` (in `rag_engine/ingest.py`) reads
+`GET /api/session/{id}` (`{"data": {title, time.created, location.directory, ...}}`) and walks
+`GET /api/session/{id}/message?order=asc&limit=200` by `cursor.next` until an empty page
+(the route is newest-first by default; `cursor.next` is set on every non-empty page). 2.x
+messages are typed by a top-level `type`: `user` carries `text`; `assistant` carries
+`content[]`, of which only `type: "text"` parts are kept (not `reasoning` or `tool`). All
+other types (`synthetic`, `system`, `skill`, `shell`, `compaction`, `idle`, agent/model/
+location switches) are harness bookkeeping and skipped; slash commands are skipped as before.
+It builds a header block (`Session:`, `Launched from:`, `Date:`, `Title:`) followed by
+`**User**:` / `**Assistant**:` turns, and returns `{session_id, session_title}` metadata.
+The launch directory is kept in the header as forensic context, NOT as a project
+classification. HTTP, auth and non-JSON errors are **raised**, so the item is marked
+`failed` and retried; only a session with no user/assistant text returns empty (logged
+"Empty document, skipping"). The legacy 1.x routes `/session/{id}` and
+`/session/{id}/message` must not be used against 2.x: they answer 200 with HTML.
+
+**Unreachability guard (corrected 2026-11-04).** If the API cannot be scanned (unreachable,
+401, missing password file), `scan_opencode_sessions()` returns `existing_paths=None`, and the
+caller adds every already-queued `opencode://` row (`StateDB.paths_with_prefix("opencode://")`)
+to the existing set before `find_deleted()`, so their Qdrant points are preserved. **Before
+2026-11-04 the caller only skipped the merge, which is the opposite:** `find_deleted()`
+compares against every queue row, so all opencode rows counted as gone. The first run after
+the 2.x upgrade (2026-10-14 13:01, HTTP 401) deleted all 445 sessions from Qdrant under a
+log line saying they were preserved. Canonical caller: `utils/rag_sync_nfs.py`.
 
 **Configuration** — keys in `SoHoAI-config.yaml`:
-- `opencode.api_url` — base URL of the opencode HTTP API (used by the scanner).
+- `opencode.api_url` — base URL of the opencode HTTP API (scanner and parser).
 - `opencode.owner` — single constant owner stamped onto every opencode point.
   Single-user-per-host assumption (see "multi-tenant blind spot" above).
+- `opencode.password_env_file` — file holding `OPENCODE_SERVER_PASSWORD` (2.x Basic auth).
 - `rag.opencode_api_url` — the same base URL, threaded into `rag_cfg` for the
   parser. Must match `opencode.api_url`.
 
@@ -332,7 +372,8 @@ indexed twice regardless of how many symlink aliases exist:
 
 ### 2.4 Standalone RAG DB updates
 - Ability to ingest documents independently of any ongoing LLM conversation
-- API endpoint: `POST /v1/rag/ingest`
+- Met by the ingestion service on Server 2 (§10) and its CLI tools. The orchestrator's
+  `POST /v1/rag/ingest/*` endpoints were removed 2026-11-04 (§4.6, §10.6).
 
 ---
 
@@ -887,7 +928,7 @@ Google OAuth requires internet. For a home lab this means:
 | Implement `rag_engine/search.py` + `__init__.py` (`search_rag()` export) | ✅ done (2026-04-16) |
 | Wire RAG into main.py — delete `rag.py`, import `rag_engine` | ✅ done (2026-04-16) |
 | Implement standalone CLI utils (`utils/rag_*.py`) | ✅ done (2026-04-16) |
-| Add `POST /v1/rag/ingest/*` endpoints with user scoping | ✅ done (2026-04-16) |
+| Add `POST /v1/rag/ingest/*` endpoints with user scoping | ✅ done (2026-04-16); ⛔ removed 2026-11-04 (§4.6) |
 | Add `db_base_path` global config variable | ✅ done (2026-04-16) |
 | Configure `users:` section in `SoHoAI-config.yaml` with real Google emails | ✅ done (2026-04-17) — `florian.otel@gmail.com` active; others commented out |
 | Move exclusion filters to SoHoAI-config.yaml (`rag.scanner` subsection) | ✅ done (2026-04-19) |
@@ -976,7 +1017,7 @@ This prevents files from being permanently stuck in `processing` after a crash, 
 
 #### Discovery function — incremental sync handles additions AND deletions
 
-`scan_nfs_roots()` (called by `rag_sync_nfs.py` and `POST /v1/rag/ingest/sync`) performs a
+`scan_nfs_roots()` (called by `rag_sync_nfs.py`) performs a
 full incremental reconciliation on every run:
 
 - **New files:** inserted as `pending`
@@ -1053,16 +1094,27 @@ Standalone CLI scripts enable independent progress monitoring and RAG pipeline m
 * `utils/rag_search_cli.py`: Query tester returning `parent_text` and cosine similarity scores. Requires `--user` flag to apply the ownership filter (simulates authenticated search).
 * `utils/rag_reset.py`: Drops the Qdrant collection and resets SQLite to `pending` for clean re-ingestion. Accepts `--user` to reset a single user's documents only.
 
-### 4.6 APIs for Control & Monitoring
+### 4.6 APIs for Control & Monitoring — ingestion endpoints removed (2026-11-04)
 
-The FastAPI orchestrator exposes the SQLite tracker state for client interfaces.
-All endpoints require an authenticated user (Google OAuth2 JWT). Ingestion endpoints
-are admin-only (Florian); search is scoped to the authenticated user's `owner` + `"la-familia"`.
+The orchestrator (Server 1) serves **search only** (`GET /v1/rag/search`, which reads Qdrant
+and never the SQLite tracker). Search is scoped to the user's `owner` + `"la-familia"`.
 
-* `POST /v1/rag/ingest/sync`: Triggers the NFS scanner across all configured roots. As with `rag_sync_nfs.py`, removes SQLite rows and deletes Qdrant points for any previously ingested files that are no longer present or are now excluded by config.
-* `POST /v1/rag/ingest/start`: Spawns the ingestion daemon as an asyncio background task.
-* `POST /v1/rag/ingest/stop`: Gracefully halts the ingestion worker.
-* `GET /v1/rag/ingest/status`: Returns metrics (`total_files`, `progress_percentage`, etc.) based on SQLite rows. Accepts optional `?user=florian` filter.
+The four ingestion endpoints added 2026-04-16 — `POST /v1/rag/ingest/sync`, `/start`, `/stop`
+and `GET /v1/rag/ingest/status` — were **removed on 2026-11-04**, together with the
+orchestrator's startup `StateDB`. Reason: `rag_state.db` is SQLite in WAL mode on NFS, and WAL
+requires every connection to be on one host (§10.4, §10.6). The orchestrator held it open on
+Server 1 while the ingestion service wrote it from Server 2, and a uvicorn reload on Server 1
+in the middle of an ingest run made that run fail with "database disk image is malformed".
+Nothing called the endpoints (checked across all projects, `~/.claude`, OpenCode config).
+
+Equivalents, run on **Server 2**:
+
+| Removed endpoint | Use instead (on Server 2) |
+|---|---|
+| `POST /v1/rag/ingest/sync[?user=]` | `python utils/rag_sync_nfs.py --user florian` |
+| `POST /v1/rag/ingest/start` | `bash scripts/rag-ingest-run.sh` (or `utils/rag_ingest_daemon.py`) |
+| `POST /v1/rag/ingest/stop` | `sudo systemctl stop rag-ingest.service` |
+| `GET /v1/rag/ingest/status[?user=]` | `python utils/rag_status.py [--user florian]` |
 
 ---
 
@@ -1337,24 +1389,11 @@ curl "http://192.168.1.93:8000/v1/rag/search?q=AWS+certifications&user=florian"
 Note: server-managed RAG (`rag_mode`) was removed on 2026-05-27. Clients manage
 their own retrieval loops.
 
-### 5.8 API control (via the orchestrator)
+### 5.8 API control (via the orchestrator) — removed 2026-11-04
 
-```bash
-# Trigger NFS scan (also cleans up Qdrant for deleted/excluded files)
-curl -X POST http://192.168.1.93:8000/v1/rag/ingest/sync
-
-# Scan only one user's roots
-curl -X POST "http://192.168.1.93:8000/v1/rag/ingest/sync?user=florian"
-
-# Start background ingestion worker
-curl -X POST http://192.168.1.93:8000/v1/rag/ingest/start
-
-# Stop ingestion worker (after current file completes)
-curl -X POST http://192.168.1.93:8000/v1/rag/ingest/stop
-
-# Status
-curl http://192.168.1.93:8000/v1/rag/ingest/status
-```
+The orchestrator no longer exposes ingestion control; see the table in §4.6 for the CLI
+equivalents, all run on **Server 2**. Do not run the state-DB tools on Server 1 while an
+ingest is running there (§10.6).
 
 ### 5.9 Troubleshooting
 
@@ -1519,7 +1558,7 @@ Exclusion filters (directories and file patterns) are configured in `SoHoAI-conf
 |----------|-------|-------|
 | Search course/training/certification material | 2 | PDF, PPTX, DOCX → full NFS path reference returned; scoped to authenticated user |
 | Search project docs and notebooks | 2 | Markdown, `.ipynb`; user sees own + La-Familia |
-| Standalone RAG DB ingestion (no active chat) | 2 | `POST /v1/rag/ingest` endpoints; admin-only |
+| Standalone RAG DB ingestion (no active chat) | 2 | Ingestion service + CLI on Server 2 (§10); the HTTP endpoints were removed 2026-11-04 |
 | Multi-user document isolation | 2 | `owner` field in Qdrant + search filter; Google OAuth2 identity |
 | Shared family content search | 2 | La-Familia docs visible to all authenticated users |
 | Find family photos by text description | 4 | CLIP embeddings, Qdrant `images`; same `owner` filter |
@@ -2242,7 +2281,8 @@ Other concurrency scenarios:
 
 | Scenario | Risk | Outcome |
 |----------|------|---------|
-| Two `rag_sync_nfs.py` in parallel | Low | SQLite WAL + PRIMARY KEY serialize writes; idempotent |
+| Two `rag_sync_nfs.py` in parallel, same host | Low | SQLite WAL + PRIMARY KEY serialize writes; idempotent |
+| Any `rag_state.db` connection on a **second host** while one host writes | **Critical** | WAL's `-shm` index is shared memory; over NFS each host sees its own stale copy, so a write or even a read on one host can corrupt the other's view ("database disk image is malformed"). See §10.6. |
 | Sync while daemon processes a file | Low | If file mtime changed mid-processing: sync resets to `pending`; daemon calls `mark_completed()` overwriting; next sync re-queues | 
 | Two daemons in parallel | **Critical** | Duplicate Qdrant vectors — prevented by NFS lockf |
 | Manual daemon invocation while service active | Medium | Daemon sees lock held, prints "already running", exits |
@@ -2296,6 +2336,39 @@ RAG_WORKERS=1 RAG_BATCH=5 bash scripts/rag-ingest-run.sh
 ```
 Or set `Environment=RAG_WORKERS=1` / `Environment=RAG_BATCH=5` in the service unit and
 `sudo systemctl daemon-reload`.
+
+---
+
+### 10.6 `rag_state.db` is opened from Server 2 only (2026-11-04)
+
+`rag_state.db` is SQLite in **WAL mode** on NFS. In WAL mode every writer appends to
+`rag_state.db-wal` and records where each page's latest version is in `rag_state.db-shm`,
+which SQLite memory-maps as shared memory. That only works when **every connection is on the
+same host**: two hosts map `-shm` through their own page caches over NFS, nothing keeps the
+copies coherent, and NFS file locking (which does cross hosts here, §10.3) does not help with
+the index contents. `StateDB()`'s constructor is itself a write (`PRAGMA journal_mode=WAL`,
+`CREATE TABLE IF NOT EXISTS`, migrations, `commit`).
+
+**Rule:** only Server 2 opens `rag_state.db`. That is where `rag-ingest.timer` runs
+`rag_sync_nfs.py`, the daemon and the snapshot. Run `rag_status.py`, `rag_reset.py`,
+`rag_purge_corrupt.py` and ad-hoc `sqlite3` sessions on Server 2 too. A read-only
+`sqlite3 "file:...?mode=ro"` from another host can still return a wrong answer or
+"malformed" while Server 2 is writing (the old orchestrator worker did exactly that on a plain
+`SELECT`, 2026-11-04 17:06).
+
+**What happened (2026-11-04).** The orchestrator on Server 1 opened `StateDB` at startup and
+kept it. A `uvicorn --reload` at 16:52:28 (triggered by an edit to `main.py`) opened it again
+while a manual ingest on Server 2 was writing; that ingest's next write failed at 16:53:05
+with `sqlite3.DatabaseError: database disk image is malformed`. A fresh `integrity_check`
+afterwards was `ok` — the damage was to Server 2's in-process view, not the file — and a
+re-run succeeded. Fix: the orchestrator's ingest endpoints and its `StateDB` were removed
+(§4.6). The 2026-05-12 corruption (§12.4) was most likely the same class of event — a second
+`StateDB()` constructor writing while the DB was in use — not the Qdrant optimizer its write-up
+names (Qdrant never touches the SQLite file). Not proven: which host ran it then is not recorded.
+
+**Would close it completely:** switching `rag_state.db` to the rollback journal
+(`journal_mode=DELETE`), which relies only on file locks. Not done: with the single-host rule
+it is not needed, and it changes every writer's performance.
 
 ---
 
@@ -2624,6 +2697,10 @@ corruption: B-tree page 1324 malformed, wrong index entry count on
 
 **Fix:** Replaced `StateDB` with a direct `sqlite3.connect(uri, mode=ro)` connection —
 zero writes to SQLite from this utility.
+
+**Reassessed 2026-11-04:** the Qdrant optimizer cannot affect an SQLite file; the likelier
+cause is the `StateDB()` constructor's writes while another connection — possibly on the other
+host — had the WAL-mode DB in use. See §10.6.
 
 **Recovery:** Restored `rag_state.db` from NFS snapshot (mtime 20:38, before corruption
 at ~21:04). Post-restore: 7,934 completed, 9 pending. Followed by `rag_sync_nfs.py`

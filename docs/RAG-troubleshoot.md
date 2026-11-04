@@ -2,8 +2,8 @@
 title: "SoHoAI RAG Pipeline — Troubleshooting"
 created_at: 20260422-000000
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: OpenCode (Claude Sonnet 5)
-updated_at: 2026-09-13--21-55
+updated_by: OpenCode (Claude Sonnet 5); Claude Code (Claude Opus 5.5, 2026-11-04 -- OpenCode 2.x ingestion loss, old-venv pollution, cross-host WAL "malformed")
+updated_at: 2026-11-04--17-20
 context: >
   Consolidated RAG pipeline troubleshooting reference for SoHoAI.
   Originally two files: TROUBLESHOOTING.md (Qdrant timeout + project rename migration,
@@ -32,9 +32,131 @@ context: >
   breakdown showing the ~2.46M-point growth since Phase 2 is overwhelmingly legitimate corpus
   growth, not duplication. Classified as a one-off; noted what would need to recur for it to
   become a pattern worth dedicated tooling.
+  Updated 2026-11-04: three faults found together — OpenCode content gone from RAG since
+  2026-10-14 (2.x auth + routes, and a guard that deleted instead of preserving); the old venv
+  ingested after the 2026-11-01 venv rebuild; and "database disk image is malformed" caused by
+  the orchestrator on Server 1 opening the WAL-mode state DB during an ingest on Server 2. The
+  orchestrator's ingest endpoints were removed. The 2026-05-12 SQLite incident is reassessed.
 ---
 
 # SoHoAI RAG Pipeline — Troubleshooting
+
+---
+
+## 2026-11-04 — OpenCode Content Lost, Old Venv Ingested, State DB "malformed" Across Hosts
+
+Code: `e3e0a06`. Design detail: RAG-strategy.md §1.2 (OpenCode, exclusions), §4.6, §10.6.
+
+### Symptom
+
+A RAG search for an AYA decision committed that afternoon found nothing, which led to a
+look at `rag-ingest.log`. Every run since 2026-10-14 13:01 had logged:
+
+```
+WARNING: opencode /api/session unreachable at http://192.168.1.95:4096: HTTP Error 401: Unauthorized
+  — skipping opencode scan, will NOT delete stale opencode Qdrant points
+```
+
+and on 2026-11-01 13:15 the only ERROR lines of the month: two `torchgen` YAML files from
+`/mnt/nfs/Florian/Gin-AI/.Gin-AI-python-3.12.old/.../site-packages/` "Ignored after 5 retries"
+(Ollama 500). Each run still ended "=== RAG ingestion complete ===".
+
+### Fault 1 — OpenCode 2.x: three defects, and every opencode point deleted
+
+The OpenCode server on Server 2 became 2.x on 2026-10-14 (`opencode-v2-server.service`).
+
+1. **Auth.** 2.x requires HTTP Basic auth; the scanner sent none → 401 on every run.
+2. **Parser routes.** `_parse_opencode_session()` called `/session/{id}` and
+   `/session/{id}/message`. On 2.x these are the web app's catch-all: **HTTP 200, text/html**.
+   `json.load` failed, a bare `except` returned empty, and the item would have been recorded
+   as an "Empty document" — silently, even with the right password.
+3. **The guard deleted instead of preserving.** On a failed scan, `rag_sync_nfs.py` left
+   `opencode://` paths out of the existing set; `find_deleted()` compares against every queue
+   row, so all of them counted as gone. Log, 2026-10-14 13:01:51: 559 Qdrant deletions, 571 rows
+   purged, **445 of them opencode sessions** — under a log line saying they were preserved.
+   Measured 2026-11-04: 0 `opencode://` rows in the queue, 0 opencode points in Qdrant.
+
+Fix (RAG-strategy.md §1.2): `rag_engine/opencode_client.py` (Basic auth from the server's own
+env file `opencode.password_env_file`; non-JSON answers raise); the parser reads
+`/api/session/{id}` and walks `/api/session/{id}/message?order=asc` by cursor with the 2.x
+message shape, raising on errors; `StateDB.paths_with_prefix("opencode://")` keeps the rows when
+a scan fails; 401/403 is logged at ERROR.
+
+Verified 2026-11-04: one session parsed with title and both turn types; pagination with
+`limit=7` and `limit=200` gave identical message ids for sessions of 619, 416 and 413 messages;
+a wrong password and a missing password file both logged ERROR and left no `opencode://` path in
+the deletion set (on a scratch copy of the DB). Re-ingest: **441 sessions discovered, 441
+completed (6 with no text skipped), 435 sessions / 15,660 points in Qdrant.**
+
+### Fault 2 — the old venv ingested after the venv rebuild
+
+On 2026-11-01 11:54 the venv `~/Gin-AI/.Gin-AI-python-3.12` was rebuilt on the NFS interpreter
+(`/mnt/nfs/Florian/Gin-AI/.uv-python/...`) and the old one moved to `.Gin-AI-python-3.12.old/`.
+`exclude_dir_names: ".Gin-AI-python-3.12/"` matches by path suffix, so it does not match
+`.Gin-AI-python-3.12.old`. The 13:00 run ingested **767 files (747 with points, 25,691 points)**,
+plus 52 ignored. The new `.uv-python/` (20 files, 312 points) and uv `.cache/` dirs (24 paths,
+78 points) were being ingested too. The current venv was correctly excluded: 0 rows, 0 points.
+
+Fix: exclude `.Gin-AI-python-3.12.old/`, `.uv-python/`, `site-packages/`, `.cache/`.
+Cleanup: the `.old` points were deleted by `source_path` (MatchAny, batches of 100,
+`wait=true`; Qdrant total 2,989,567 → 2,963,876, exactly 25,691), then its 819 queue rows purged;
+the directory was removed after re-checking for references (none: SoHoAI tree, shell rc,
+systemd units and crontab on both servers, symlinks, running processes; the Server 1
+orchestrator had started after the rebuild and mapped only the new venv). `.uv-python/` and
+`.cache/` were removed by the next sync through the normal excluded-path cleanup.
+
+Checking Qdrant without scanning: `source_path` has a keyword index, so the facet query lists
+every distinct path with its point count in well under a second —
+
+```bash
+curl -s -X POST http://192.168.1.93:6333/collections/documents/facet \
+  -H 'Content-Type: application/json' -d '{"key":"source_path","limit":200000}'
+```
+
+— whereas `points/count` with a `match.text` filter (no full-text index) times out after 60 s.
+
+### Fault 3 — "database disk image is malformed" (cross-host WAL)
+
+The first manual re-run failed in `rag_sync_nfs.py`:
+
+```
+File ".../rag_engine/state.py", line 128, in discover_or_update
+sqlite3.DatabaseError: database disk image is malformed
+```
+
+| Time | Server 2 (ingest) | Server 1 (orchestrator) |
+|---|---|---|
+| 16:51:15 | Run starts; sync opens `rag_state.db` and writes | idle |
+| 16:51:30 | — | `main.py` edited |
+| 16:52:28 | still writing | `uvicorn --reload` → new worker → `StateDB()` (a write transaction) |
+| 16:53:05 | next write: **malformed** | — |
+
+`rag_state.db` is in WAL mode, whose `-shm` index is shared memory and requires all
+connections on one host (RAG-strategy.md §10.6). Afterwards a fresh `PRAGMA integrity_check`
+was **ok**: the damage was to Server 2's in-process view, not the file. A backup was taken
+(`sqlite/rag_state-pre-rerun-2026-11-04.db`) and the re-run succeeded (480 processed, 0 failed).
+It was the first "malformed" in the log's history. Later the same afternoon the old
+orchestrator worker returned "malformed" on a plain `SELECT` after Server 2 had checkpointed
+the WAL — the same mechanism seen from the other side.
+
+Fix: the orchestrator's `/v1/rag/ingest/*` endpoints and its startup `StateDB` were removed
+(nothing called them); `rag_state.db` is opened from Server 2 only (RAG-strategy.md §4.6 has
+the CLI equivalents).
+
+**Deployment gotcha:** `uvicorn --reload` on Server 1 uses WatchFiles, which does not reliably
+see a file changed from Server 2 over NFS (one reload came 58 s late, another not at all).
+After editing orchestrator code from Server 2, trigger the reload on Server 1
+(`touch ~/Gin-AI/projects/SoHoAI/main.py` there) and confirm a new "Started server process"
+before testing. Testing the removed endpoints before the reload had happened hit the old code:
+`POST /v1/rag/ingest/start` started a worker on Server 1. The WAL was still empty and the queue
+unchanged afterwards (nothing was pending), so no harm followed.
+
+### Is this a pattern?
+
+Yes, for one class: **an upgrade or move that changes a source's shape, followed by a failure
+that is logged as a WARNING and lets the run finish "complete".** Faults 1 and 2 both went
+unnoticed for days to weeks. A run summary that counts sources would have caught both: 0
+opencode sessions after 449, or 767 new files under one directory.
 
 ---
 
@@ -818,6 +940,12 @@ failed, `.dump` terminated with `ROLLBACK`.
 **Root cause:** The `StateDB` constructor is not safe to call from utilities that
 only need to read SQLite — it always writes, and NFS WAL writes during concurrent
 activity are fragile on this Synology setup.
+
+**Reassessed 2026-11-04:** the Qdrant optimizer cannot affect an SQLite file. The likelier
+mechanism is the one confirmed on 2026-11-04 (entry at the top): WAL mode needs every
+connection on one host, and a `StateDB()` constructor write while another connection —
+possibly on the other server — had the DB in use corrupts that connection's view. Which host
+ran `rag_purge_corrupt.py` that night is not recorded, so this is not proven.
 
 **Fix applied:** `rag_purge_corrupt.py` now uses a direct read-only connection:
 ```python

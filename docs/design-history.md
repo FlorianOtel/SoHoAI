@@ -2,8 +2,8 @@
 title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 5.5)
-updated_at: 2026-10-10--12-30
+updated_by: Claude Code (Claude Sonnet 5.5); Claude Code (Claude Opus 5.5, 2026-11-04 -- RAG: OpenCode 2.x ingestion, venv exclusions, orchestrator ingest endpoints removed)
+updated_at: 2026-11-04--17-25
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -15,6 +15,59 @@ context: >
 
 ---
 
+
+## 2026-11-04 — RAG: OpenCode 2.x ingestion, venv exclusions, orchestrator ingest endpoints removed
+
+Code: `e3e0a06`. Incident detail: `docs/RAG-troubleshoot.md` (2026-11-04 entry). Design:
+`docs/RAG-strategy.md` §1.2, §4.6, §10.4, §10.6.
+
+### What changed
+
+- **OpenCode 2.x support.** New `rag_engine/opencode_client.py`: HTTP Basic auth, password
+  from the OpenCode server's own env file (`opencode.password_env_file`), and a JSON
+  content-type check. `scan_opencode_sessions()` authenticates and logs 401/403 at ERROR.
+  `_parse_opencode_session()` rewritten for `/api/session/{id}` and a cursor walk of
+  `/api/session/{id}/message?order=asc` with the 2.x message shape; errors now raise (item
+  `failed`, retried) instead of returning empty.
+- **Scan-failure guard fixed.** `utils/rag_sync_nfs.py` adds the queued `opencode://` rows
+  (`StateDB.paths_with_prefix`) to the existing set when OpenCode cannot be scanned.
+- **Scanner exclusions.** `.Gin-AI-python-3.12.old/`, `.uv-python/`, `site-packages/`, `.cache/`.
+- **Orchestrator.** `/v1/rag/ingest/{sync,start,stop,status}` and the startup `StateDB`
+  removed from `main.py`; search is unchanged.
+
+### Why
+
+- The OpenCode server became 2.x on 2026-10-14. The scanner got 401s, the parser's 1.x routes
+  return HTML with status 200 on 2.x, and the "unreachable" guard deleted every opencode point
+  on the first 401 run (445 sessions) while logging that they were preserved.
+- The venv rebuild on the NFS interpreter (2026-11-01) left `.Gin-AI-python-3.12.old/`, which
+  the name-based exclude did not match: 25,691 points of library code in the index.
+- `rag_state.db` is SQLite in WAL mode on NFS; WAL needs every connection on one host. The
+  orchestrator on Server 1 held it while Server 2 ingested, and a reload on Server 1 during an
+  ingest produced "database disk image is malformed". No caller of the endpoints was found.
+  Decision: remove the endpoints (option C) rather than open the DB per request (option A,
+  which leaves the hazard reachable) or move to the rollback journal (option B, changes every
+  writer; not needed under the single-host rule).
+
+### Verified (2026-11-04)
+
+- Re-ingest: 441 OpenCode sessions discovered, 441 completed (6 empty), 15,660 points; 480
+  files processed, 0 failed. RAG search finds the "v2.1.2 acceptance" session and the AYA
+  v2-D47 decision.
+- `.old` venv: 25,691 points and 819 queue rows removed; directory removed after a reference
+  check on both servers. Qdrant facet: 0 `.old`, `.uv-python`, `.cache`, `site-packages` paths.
+- Orchestrator: single worker after reload, 0 file handles on `rag_state.db`, `/health` ok,
+  `/v1/rag/search` 200, the four ingest endpoints 404.
+
+### Accepted limitations / not tested
+
+- The single-host rule is a convention, not enforced: a state-DB tool run on Server 1 during
+  an ingest can still hit the WAL hazard.
+- The OpenCode password file exists on Server 2 only; the scanner on any other host logs an
+  ERROR and preserves existing points.
+- `uvicorn --reload` on Server 1 does not reliably notice edits made from Server 2 over NFS;
+  touch the file on Server 1 to force it.
+- A run that logs WARNING/ERROR still ends "complete"; nothing yet counts sources per run.
 
 ## 2026-10-10 — `reasoning_effort` support (Cline) and LiteLLM upgrade 1.82.6 → 1.104.2
 

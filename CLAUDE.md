@@ -2,8 +2,8 @@
 title: "SoHoAI — Project Context & Design Reference"
 created_at: 20260407-000000
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Opus 5.5)
-updated_at: 2026-10-03--11-21
+updated_by: Claude Code (Claude Opus 5.5); Claude Code (Claude Opus 5.5, 2026-11-04 -- RAG: OpenCode 2.x client, ingest endpoints removed, state DB on Server 2 only)
+updated_at: 2026-11-04--17-30
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   Project instructions and design decisions for Claude Code;
@@ -119,13 +119,14 @@ SoHoAI/
 │   ├── schema.py               # Qdrant payload field constants + derive_owner(); FIELD_SESSION_ID + FIELD_PROJECT + FIELD_SESSION_TITLE shared by claude_chat and opencode points
 │   ├── collection.py           # Collection name, vector size, get_client(), ensure_collection()
 │   ├── embeddings.py           # embed_text(), embed_batch(progress_cb) via Ollama on Server 2 (rag.ollama_url)
-│   ├── state.py                # StateDB — ingestion queue CRUD + crash recovery; find_deleted()/purge_deleted() are the crash-safe split of the old handle_deleted() — callers must Qdrant-clean before calling purge_deleted() so a kill leaves SQLite intact for retry
-│   ├── scanner.py              # NFS + claude chat + opencode scanner → populates StateDB; scan_nfs_roots() walks configured NFS roots (filters from SoHoAI-config.yaml rag.scanner) and returns {scanned, existing_paths}; scan_claude_chats() walks SoHoAI-config.yaml claude_chats.roots for .jsonl sessions and returns {scanned, existing_paths}; scan_opencode_sessions() walks GET /api/session (v2, cursor-paginated) — returns every opencode session globally regardless of cwd-at-launch; owner is config constant (opencode.owner); returns {scanned, existing_paths: set|None} where None signals API unreachable (skip in find_deleted() to preserve existing opencode Qdrant points); callers merge existing_paths sets and call state_db.find_deleted() once before Qdrant cleanup + purge_deleted(); followlinks=True with visited_real_dirs + visited_real_files global dedup sets; exclude_dir_names uses trailing-slash path-suffix matching
-│   ├── ingest.py               # docling parse + parent-child chunking + Qdrant upsert; _parse_claude_chat() extracts user/assistant text turns from .jsonl session files returning {session_id, project, session_title}; _parse_opencode_session() fetches session metadata + messages via opencode HTTP API (rag.opencode_api_url) using synthetic opencode://{session_id} keys, returns {session_id, session_title} only (no project — opencode session.directory is cwd-at-launch metadata, not topic classification); the cwd is preserved inside the searchable header body as "Launched from:"; after parsing, file_name is overridden with session_title so renderers get a friendly label without per-type special-casing
+│   ├── state.py                # StateDB — ingestion queue CRUD + crash recovery; find_deleted()/purge_deleted() are the crash-safe split of the old handle_deleted() — callers must Qdrant-clean before calling purge_deleted() so a kill leaves SQLite intact for retry; paths_with_prefix() lets a caller keep a source's rows when that source could not be scanned. rag_state.db is WAL-mode SQLite on NFS: open it from Server 2 ONLY (docs/RAG-strategy.md §10.6)
+│   ├── scanner.py              # NFS + claude chat + opencode scanner → populates StateDB; scan_nfs_roots() walks configured NFS roots (filters from SoHoAI-config.yaml rag.scanner) and returns {scanned, existing_paths}; scan_claude_chats() walks SoHoAI-config.yaml claude_chats.roots for .jsonl sessions and returns {scanned, existing_paths}; scan_opencode_sessions() walks GET /api/session (OpenCode 2.x, Basic auth, cursor-paginated) — returns every opencode session globally regardless of cwd-at-launch; owner is config constant (opencode.owner); returns {scanned, existing_paths: set|None} where None signals the API could not be scanned — the caller then adds the queued opencode:// rows (StateDB.paths_with_prefix) before find_deleted() so their points are preserved; callers merge existing_paths sets and call state_db.find_deleted() once before Qdrant cleanup + purge_deleted(); followlinks=True with visited_real_dirs + visited_real_files global dedup sets; exclude_dir_names uses trailing-slash path-suffix matching
+│   ├── ingest.py               # docling parse + parent-child chunking + Qdrant upsert; _parse_claude_chat() extracts user/assistant text turns from .jsonl session files returning {session_id, project, session_title}; _parse_opencode_session() fetches session metadata + messages via the OpenCode 2.x API (/api/session/{id}, /api/session/{id}/message walked by cursor; rag.opencode_api_url) using synthetic opencode://{session_id} keys; errors raise (item failed, retried), returns {session_id, session_title} only (no project — opencode session.directory is cwd-at-launch metadata, not topic classification); the cwd is preserved inside the searchable header body as "Launched from:"; after parsing, file_name is overridden with session_title so renderers get a friendly label without per-type special-casing
+│   ├── opencode_client.py      # OpenCode 2.x HTTP client: load_password() reads OPENCODE_SERVER_PASSWORD from opencode.password_env_file; get_json() sends Basic auth and refuses non-JSON (2.x serves HTML with 200 on legacy routes)
 │   ├── search.py               # query → embed → Qdrant query_points → parent_text + provenance
 │   └── multi_query.py          # §8.3: expand_query() + parallel search + MMR reranking (permanently disabled — no-go 2026-04-22)
 ├── utils/
-│   ├── rag_sync_nfs.py         # CLI: scan NFS roots + claude chat dirs + opencode sessions → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files; calls scan_nfs_roots() + scan_claude_chats() + scan_opencode_sessions(), merges existing_paths (skipping opencode source if its API was unreachable), calls find_deleted() once
+│   ├── rag_sync_nfs.py         # CLI: scan NFS roots + claude chat dirs + opencode sessions → queue new/modified files; re-queue failed; skip ignored; purge Qdrant for removed files; calls scan_nfs_roots() + scan_claude_chats() + scan_opencode_sessions(), merges existing_paths (if OpenCode could not be scanned, adds the queued opencode:// rows instead, so their points are preserved), calls find_deleted() once
 │   ├── rag_ingest_daemon.py    # CLI: process pending files (parse → chunk → embed → upsert)
 │   ├── rag_status.py           # CLI: queue counts + Qdrant point stats; --ignored for detail; --watch LOG_FILE for live ETA monitor; --list-pending [N] to print pending paths (pipeable)
 │   ├── rag_search_cli.py       # CLI: retrieval-only — embed query + Qdrant search; prints top-k hits + parent_text preview
@@ -180,10 +181,11 @@ SoHoAI/
 | POST | `/proxy/v1/chat/completions` | Stateless OpenAI-compatible pass-through for proxy clients (Cline, Claude Code) — no Redis/RAG/summarization |
 | POST | `/v1/messages` | Anthropic Messages API passthrough — enables `ANTHROPIC_BASE_URL` for Claude Code |
 | ANY | `/upstream/{model}/{path}` | Transparent byte forwarder to llama-swap for the audio engines only (`qwen3-asr`, `nemotron-3-diarization`); cold swap is held by llama-swap — see `docs/Model-routing.md` §10 |
-| POST | `/v1/rag/ingest/sync` | Scan NFS roots → populate ingestion queue |
-| POST | `/v1/rag/ingest/start` | Start background ingestion worker |
-| POST | `/v1/rag/ingest/stop` | Stop ingestion worker gracefully |
-| GET | `/v1/rag/ingest/status` | Queue metrics + Qdrant point count |
+| GET | `/v1/rag/search` | RAG retrieval (Qdrant only) |
+
+The `/v1/rag/ingest/{sync,start,stop,status}` endpoints were removed 2026-11-04: ingestion runs
+on Server 2 only, because the WAL-mode state DB must not be opened from two hosts. CLI
+equivalents (on Server 2): `docs/RAG-strategy.md` §4.6.
 
 Responses use a custom `ChatResponse` model (`chat_id`, `model_used`, `message`).
 **Not** OpenAI-compatible format — the CLI reads `data["message"]["content"]`.
@@ -330,7 +332,10 @@ bash NFS-files--MCP-server/nfs_files_mcp_server.sh
 #   Claude Code (ANTHROPIC_BASE_URL): http://192.168.1.93:8000
 #   Claude Code (sub-agent frontmatter): api_base_url http://192.168.1.93:8000/proxy
 
-# RAG ingestion — automated service (live since 2026-05-05; see RAG-strategy.md §10)
+# RAG ingestion — automated service on SERVER 2 (live since 2026-05-05; see RAG-strategy.md §10)
+# rag_state.db (WAL-mode SQLite on NFS) is opened from Server 2 ONLY: run every command below
+# that touches it (rag_sync_nfs, daemon, rag_status, rag_reset, rag_purge_corrupt) on Server 2.
+# OpenCode sessions need opencode.password_env_file (Server 2: ~/.config/opencode/opencode-server.env).
 # Fires at 01:00, 07:00, 13:00, 19:00 CEST via systemd timer; log: /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log
 systemctl status rag-ingest.timer              # check timer status and next trigger
 python utils/rag_status.py --watch /mnt/nfs/__Backups/SoHoAI--databases/logs/rag-ingest.log  # live monitor for service runs
