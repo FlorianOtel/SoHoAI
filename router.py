@@ -21,16 +21,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, AsyncIterator, Optional
+from typing import AsyncIterator, Optional
 
 import litellm
 import yaml
 from litellm import Router
-
-if TYPE_CHECKING:
-    from chat_store import ChatStore
-
-from usage_tracker import UsageTracker
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +70,7 @@ async def _with_idle_timeout(stream: AsyncIterator, timeout_s: float = IDLE_CHUN
 class SmartRouter:
     """Wraps LiteLLM Router with SoHoAI-specific routing logic."""
 
-    def __init__(self, config_path: str = "SoHoAI-config.yaml", store: ChatStore | None = None):
+    def __init__(self, config_path: str = "SoHoAI-config.yaml"):
         with open(config_path) as f:
             self.config = yaml.safe_load(f)
 
@@ -92,10 +87,6 @@ class SmartRouter:
         litellm_settings = self.config.get("litellm_settings", {})
         context_window_fallbacks = litellm_settings.get("context_window_fallbacks")
 
-        # Instantiate usage tracker if store is provided
-        self._usage_tracker = UsageTracker(store) if store is not None else None
-
-
         self.litellm_router = Router(
             model_list=self.config["model_list"],
             routing_strategy=router_settings.get("routing_strategy", "simple-shuffle"),
@@ -105,17 +96,8 @@ class SmartRouter:
             timeout=60,
             # From SoHoAI-config.yaml router_settings / litellm_settings
             enable_pre_call_checks=router_settings.get("enable_pre_call_checks", False),
-            # Usage tracking via custom logger
             **({"context_window_fallbacks": context_window_fallbacks} if context_window_fallbacks else {}),
         )
-
-
-        # Register tracker with global litellm callbacks list
-        # Guard prevents double-registration on hot-reload cycles
-        if self._usage_tracker is not None:
-            import litellm as _litellm
-            if self._usage_tracker not in _litellm.callbacks:
-                _litellm.callbacks.append(self._usage_tracker)
 
         self.routing_config = self.config.get("routing", {})
         self.default_model = self.routing_config.get("default_model")

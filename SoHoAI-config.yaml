@@ -9,30 +9,11 @@ server2_ip: &server2_ip "192.168.1.95"
 # -- Storage (NAS mount point) ------------------------------------------------
 nas_mount: "/mnt/nfs/Florian/Gin-AI/projects/SoHoAI"
 # Change db_base_path to relocate all databases in one place.
-# Python derives: {db_base_path}/sqlite/telemetry.db, {db_base_path}/sqlite/rag_state.db, {db_base_path}/qdrant/, {db_base_path}/redis/
-# Note: redis.dir below must be updated manually if db_base_path changes (not auto-derived in Python).
+# Python derives: {db_base_path}/sqlite/rag_state.db.
 db_base_path: "/mnt/nfs/__Backups/SoHoAI--databases"
-rl_export_dir: "/mnt/nfs/Florian/Gin-AI/projects/SoHoAI/rl-data"
-
-# -- Redis (conversation short-term memory) ------------------------------------
-redis:
-  host: "127.0.0.1"  # Localhost - orchestrator and Redis on same server. (!!!) Neeed to specify localhost since redis is in protected mode. 
-  port: 6379
-  db: 0
-  # Persist to NAS for reboot survival
-  appendonly: true
-  dir: "/mnt/nfs/__Backups/SoHoAI--databases/redis"
-  default_ttl_seconds: 86400  # 24 hours
-
 
 # -- Proxy access control -------------------------------------------------------
 proxy:
-  # Models listed here are refused at /v1/messages with HTTP 400.
-  # Prevents CC from auto-spawning Haiku subagents for Ollama Cloud sessions,
-  # which would incur unexpected Anthropic cost.
-  blocked_models:
-    - claude-haiku-4-5-20251001
-    - claude-haiku-5-5
   # Meta-aliases for direct testing. Not derivable from model_list generically, because they
   # do not name one specific model. Each target MUST be a real model_list model_name —
   # _build_proxy_aliases() in main.py raises at import time if it drifts, rather than silently
@@ -315,7 +296,6 @@ routing:
   # route to cloud, leaving ~31K headroom for output and prompt growth.
   complexity_threshold_tokens: 100000
   cloud_model: "ollama-cloud/minimax-m3"
-  summarization_model: "local/qwen3.5-9b-q4"
 
 
 #### --- LiteLLM  configuration --- 
@@ -472,33 +452,3 @@ opencode:
   # from OPENCODE_SERVER_PASSWORD in the server's own env file, on the ingest host
   # (Server 2, where rag-ingest.timer runs and the OpenCode server lives).
   password_env_file: "~/.config/opencode/opencode-server.env"
-
-# -- llama-server native API (KV cache slot management) -----------------------
-llama_server:
-  base_url: "http://${server2_ip}:8011"
-  # Must match --slot-save-path passed to llama-server on Server 2
-  slot_save_path: "/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v-caches/"
-  # Number of parallel slots (must match --parallel N on llama-server).
-  # Qwen3.5-9B Q4_K_XL + q8_0 KV + --jinja; 1 slot x 131072 ctx (single-slot stopgap).
-  num_slots: 1
-  timeout_seconds: 120
-
-# -- Chat Persistence ----------------------------------------------------------
-chat:
-  max_turns_in_context: 50
-  export_format: "markdown"  # markdown | jsonl
-  # Rolling summarization: when total Redis context size exceeds threshold,
-  # summarize older turns and keep only the most recent N turns verbatim.
-  # ~400K chars ≈ 100K tokens (4 chars/token). Hard limit is 131072 tokens (9B, 1 slot);
-  # 100K input + 1024 output = ~101K, leaving ~9K safety margin.
-  summarize_threshold_chars: 400000
-  summarize_keep_turns: 20
-
-# -- Local model shadow pricing (informational only; NOT read by any code) ------
-# litellm.completion_cost() returns 0.0 for local models (correct — no API cost).
-# This block is a placeholder for future electricity-cost estimates if needed.
-local_model_pricing:
-  qwen3.5-9b-q4:
-    cost_per_million_input_tokens: 0.0    # no API cost
-    cost_per_million_output_tokens: 0.0
-    notes: "Qwen3.5-9B Q4_K_XL on RTX 5070; electricity cost not tracked"
