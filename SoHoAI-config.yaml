@@ -103,12 +103,12 @@ model_list:
       max_input_tokens: 999000
       context_window: 1000000
 
-  - model_name: "anthropic/claude-sonnet-5"
+  - model_name: "anthropic/claude-sonnet-5-5"
     litellm_params:
-      model: anthropic/claude-sonnet-5
+      model: anthropic/claude-sonnet-5-5
     model_info:
-      id: "anthropic/claude-sonnet-5"
-      description: "Claude Sonnet 5 — CC transparent forward. No API key configured."
+      id: "anthropic/claude-sonnet-5-5"
+      description: "Claude Sonnet 5.5 — CC transparent forward. No API key configured."
       max_tokens: 1000000
       max_input_tokens: 999000
       context_window: 1000000
@@ -153,9 +153,9 @@ model_list:
       model: anthropic/claude-haiku-5-5
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  - model_name: claude-sonnet-5
+  - model_name: claude-sonnet-5-5
     litellm_params:
-      model: anthropic/claude-sonnet-5
+      model: anthropic/claude-sonnet-5-5
       api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: claude-opus-5-5
@@ -309,7 +309,7 @@ routing:
   default_model: "local/qwen3.5-9b-q4"
   #### Fallback chains are now implemented via "router_settings" above. Leaving this commented anyway.
   # Fallback for Ollama-cloud when throttled
-  # fallback_chain: ["anthropic/claude-sonnet-5", "ollama-cloud/kimi-k3"]
+  # fallback_chain: ["anthropic/claude-sonnet-5-5", "ollama-cloud/kimi-k3"]
   # Route to cloud when context exceeds threshold.
   # Hard limit: the 9B runs --ctx-size 131072 on a single slot (2026-09-17). At 100K we
   # route to cloud, leaving ~31K headroom for output and prompt growth.
@@ -325,10 +325,10 @@ router_settings:
   # Each item in this list is an independent fallback rule
   fallbacks:
     - "ollama-cloud/minimax-m3": ["anthropic/claude-opus-5-5"]
-    - "ollama-cloud/kimi-k3": ["anthropic/claude-sonnet-5"]
-    - "ollama-cloud/kimi-k2.7-code": ["anthropic/claude-sonnet-5"]
-    - "ollama-cloud/glm-5.3": ["anthropic/claude-sonnet-5"]
-    - "ollama-cloud/glm-5.3-flash": ["anthropic/claude-sonnet-5"]
+    - "ollama-cloud/kimi-k3": ["anthropic/claude-sonnet-5-5"]
+    - "ollama-cloud/kimi-k2.7-code": ["anthropic/claude-sonnet-5-5"]
+    - "ollama-cloud/glm-5.3": ["anthropic/claude-sonnet-5-5"]
+    - "ollama-cloud/glm-5.3-flash": ["anthropic/claude-sonnet-5-5"]
 
 #### -- RAG Settings (Phase 2 + §8 advanced features) ----------------------------
 rag:
