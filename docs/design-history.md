@@ -2,8 +2,8 @@
 title: "SoHoAI Design History"
 created_at: 2026-05-01--13-40
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 5.5); Claude Code (Claude Opus 5.5, 2026-11-04 -- RAG: OpenCode 2.x ingestion, venv exclusions, orchestrator ingest endpoints removed)
-updated_at: 2026-11-04--17-25
+updated_by: Claude Code (Claude Haiku 5.5)
+updated_at: 2026-11-12--17-16
 context: >
   Running log of significant design decisions, feature additions, and architectural
   changes to the SoHoAI project. Each entry is timestamped and includes rationale.
@@ -1377,3 +1377,68 @@ Second attempt (corrected): config replaced 21:24:15 UTC. Reload detected at att
 ### Out-of-scope items
 
 Two agent frontmatter files still pin `claude-haiku-4-5-20251001`: `~/.claude/agents/actor.md` and `~/.claude/agents/researcher.md`. These are outside SoHoAI's config tree and user-controlled; no action taken.
+
+---
+
+## 2026-11-12 — Cleanup: SoHoAI is now gateway + RAG only
+
+### Why
+
+- The project had drifted from "stateful chat orchestrator + RAG + MCP + NotebookLM" to "model gateway + RAG".
+- The chat interface is deprecated in favour of OpenCode, which uses `/proxy/v1`.
+- Claude Code has talked to Anthropic directly since 2026-11-05 (needed for remote-control), so the native `/v1/messages` passthrough has no client.
+- Telemetry has been unread since 2026-10-09.
+- The nfs-files MCP server and the NotebookLM integration are deprecated. A self-hosted, NotebookLM-style evolution of RAG is planned (out of scope here).
+
+### Commits
+
+- `a672d44`: operator's Sonnet 5 → 5.5 rename (separate commit).
+- `32b5f7e`: code cleanup (this entry).
+- The docs commit follows this entry.
+
+### Removed
+
+- Endpoints: stateful `/v1/chat/completions`, `/v1/chats/*`, `/v1/usage/stats`, `/v1/messages`, `/v1/messages/beta`, `/v1/messages/count_tokens`.
+- Modules: `chat_store.py`, `conversation.py`, `kv_cache.py`, `usage_tracker.py`, `mcp_gateway.py`.
+- `litellm.register_model` overrides in `main.py`.
+- nfs-files MCP server (`NFS-files--MCP-server/`), `.mcp.json`, and `mcp` dependency.
+- NotebookLM utils and `~/.claude/skills/notebooklm`.
+- `db_cache/`, `.amazonq/rules/SoHoAI.md`.
+- `utils/tool_use_smoke_test.py`, `utils/test_telemetry_fix.py`.
+- Config keys: `redis`, `llama_server`, `chat`, `proxy.blocked_models`, `rl_export_dir`, `local_model_pricing`, `routing.summarization_model`.
+- Docs: `Memory-tiers`, `Telemetry`, `MCP-functionality`, `NotebookLM-notes`, `NotebookLM-upload-issues`, `SoHoAI--native-anthropic--vs--ollama-cloud--agents` (git history keeps them).
+- `utils/rag_smoke_test.py` Phase 2 (plain chat). Phase 1 (RAG retrieval) untouched.
+
+### Kept
+
+- `/proxy/v1/*`, `/upstream/*`, `/health` (no `redis` key), `/v1/models/health`, `/v1/rag/search`.
+- RAG untouched.
+
+### Server roles after cleanup
+
+- `.93`: gateway (uvicorn) + Qdrant. Redis and Ollama on `.93` are to be disabled (operator step).
+- `.95`: llama-swap, Ollama bge-m3, rag-ingest, 03:00 snapshot cron.
+
+### Data
+
+- `telemetry.db` (chats 79 / messages 231, last 2026-10-10; usage_events 194,608, last 2026-11-11) moved to `/mnt/nfs/__Backups/SoHoAI--databases/archive/telemetry-2026-11-12.db` at 17:16; the empty legacy `sqlite/chats.db` (0 bytes, 2026-05-14) moved to `archive/chats-empty-2026-05-14.db`. The empty `redis/` and `llama-server/k-v-caches/` directories were removed.
+
+### Observation
+
+- The `.93` `uvicorn --reload` picked up NFS edits made on `.95` only after several minutes (polling watcher), consistent with the 2026-10-09 note. Verified live at 17:14: `/health` without `redis`, removed routes return 404.
+
+### Cross-project
+
+- claude-orchestra commit `2f52cd1` removed its SoHoAI cost reader.
+
+### Follow-ups
+
+- RAG code defaults `ollama_url` to `.93` (`rag_engine/embeddings.py:22`, `search.py:88`, `ingest.py:710`, `multi_query.py:210`). Fix in RAG session.
+- `main.py` `variant_llm_fn` `force_cloud` compares `"anthropic/claude-sonnet-5"` (stale after the 5.5 rename). RAG session.
+- `schemas.py` `IngestRequest` / `SearchRequest` / `SearchResult` unused. RAG session.
+- `utils/rag_mmr_bench.py` calls the removed `/v1/chat/completions`.
+- Inert orchestra-session middleware and metadata in `main.py`.
+- `router_settings.fallbacks` silently bill Anthropic and mask the model name.
+- `anthropic/*` "CC transparent forward" model_list entries; missing `model_info` on bare Anthropic entries.
+- `routing.cloud_model` / `complexity_threshold_tokens` inert for current traffic.
+- Image ingestion: none today (no image extensions in scanner whitelist, 0 image points). Phase 4.

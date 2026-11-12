@@ -1,867 +1,472 @@
 ---
-title: "SoHoAI Model routing — Cline and Claude Code integration"
+title: "SoHoAI Model routing — Cline and OpenCode integration"
 created_at: 2026-05-04--14-50
 created_by: Claude Code (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Sonnet 5.5)
-updated_at: 2026-10-10--12-30
+updated_by: Claude Code (Claude Haiku 5.5)
+updated_at: 2026-11-12--17-03
 context: >
-  SoHoAI exposes two stateless pass-through paths built on the same LiteLLM Router.
-  One is OpenAI-compatible for Cline VSCode plugin. The other is Anthropic-compatible
-  for Claude Code (ANTHROPIC_BASE_URL), with model-aware routing: Anthropic models use
-  a transparent HTTP forward (full fidelity including tools and caching); local models
-  (local/qwen3-4b-q6, local/qwen3-9b-q4 via llama-swap) and Ollama cloud models use the LiteLLM conversion path with tool-use
-  support (implementation complete 2026-05-10). Synthetic smoke harness
-  (utils/tool_use_smoke_test.py) passed end-to-end for all target models including
-  local/qwen3-4b-q6 on both streaming and non-streaming.
-  Update 2026-05-11: ollama-cloud/* 503/timeout guard — deepseek-v4-pro has a documented
-  ~70% failure rate on Ollama shared inference. Silent LiteLLM fallback to another model
-  was rejected (causes per-request model oscillation mid-agent-task). Instead: 30s
-  request_timeout for ollama-cloud/* and HTTP 529 overloaded_error on failure so Claude
-  Code surfaces a clean error. --parallel smoke test extended to 5 simultaneous tools.
-  Update 2026-05-15: local model swap from Gemma 4 E4B to Qwen3.5-4B Q6_K_XL.
-  Update 2026-05-16: provider prefix renamed internal→local; two local models
-  (qwen3-4b-q6 default resident, qwen3-9b-q4 hot-swap via llama-swap); geometric
-  backoff now covers all non-Anthropic models (was ollama-cloud only).
-  Update 2026-07-15: interactive default renamed claude-sonnet-4-6 →
-  claude-sonnet-5 (SoHoAI-config.yaml); routing/pricing tables refreshed.
-  Update 2026-09-24: Opus renamed claude-opus-5 → claude-opus-5-5
-  (SoHoAI-config.yaml; the register_model() rate override for Opus was also
-  dropped — installed LiteLLM 1.82.6 already carries correct native rates for
-  both). §1 and §6 pricing/model tables refreshed. §3-5's /brain pipeline
-  diagram and cost table are unchanged — those describe oconona's own tier
-  config, per the existing staleness notice below.
+  Describes the stateless model-routing surface of the SoHoAI gateway on Server 1
+  (192.168.1.93) as it stands after the 2026-11-12 cleanup: the OpenAI-compatible
+  /proxy/v1 endpoints used by Cline and OpenCode, and the /upstream transparent
+  forwarder used for the audio engines on Server 2. Claude Code no longer goes
+  through SoHoAI (it calls Anthropic directly since 2026-11-05). Earlier versions
+  of this document covered the Anthropic Messages passthrough (/v1/messages),
+  KV-cache slots and usage telemetry; those are removed and recorded in
+  docs/design-history.md. Claims were re-checked against main.py, router.py and
+  SoHoAI-config.yaml on 2026-11-12; the config was read from the working tree,
+  which had uncommitted edits at that time.
 ---
 
-**⚠️ Staleness notice (2026-09-19):** only §0's model-tier summary and §1 (model mapping, alias resolution, Cline setup) were verified and corrected in the 2026-09-18 model cleanup. **§2–§9 still contain stale model identifiers** — references to `local/qwen3-4b-q6`, `local/qwen3-9b-q4`, `ollama-cloud/glm-5.1`, `glm-5.2`, `deepseek-v4-flash` and `minimax-m2.5` in those sections describe models that no longer exist. Treat them as historical until a dedicated staleness pass lands. The frontmatter `context:` block is likewise historical narrative and is not maintained.
+# SoHoAI model routing — /proxy/v1 and /upstream
 
-# SoHoAI model routing — Cline and Claude Code integration
+## Scope and removals
 
-Both proxy paths are **stateless**: no Redis, no SQLite, no RAG, no KV cache, no rolling
-summarization. The caller manages its own conversation history.
+This document covers the gateway's model-routing surface only:
+
+- `/proxy/v1/*` — stateless OpenAI-compatible endpoints for Cline and OpenCode (§1–§9).
+- `/upstream/{model}/{path}` — byte forwarder to llama-swap for the audio engines (§10).
+
+The gateway also serves `/health`, `/`, `/v1/models/health` and `/v1/rag/search`. Those are
+covered in `CLAUDE.md` (RAG) and in §1 below (health).
+
+**Removed 2026-11-12** (history in `docs/design-history.md`):
+
+- `POST /v1/messages`, `/v1/messages/beta`, `/v1/messages/count_tokens` — the Claude Code `ANTHROPIC_BASE_URL` passthrough, both the transparent Anthropic forward and the LiteLLM Anthropic↔OpenAI conversion path.
+- Claude Code configuration (`ANTHROPIC_BASE_URL`, `api_base_url` in sub-agent frontmatter) and the `/duo` and `/brain` tier cost tables that depended on the passthrough.
+- LiteLLM tool-use conversion notes (`_convert_tools`, `_convert_tool_choice`, `_convert_assistant_message`, `_convert_user_message`, `_sanitize_tool_use_id`) and the XML tool-use sentinel.
+- Stateful `POST /v1/chat/completions` and `GET/DELETE /v1/chats*` — Redis, SQLite, rolling summarization.
+- KV-cache slot targeting and the native llama-server `/completion` local path.
+- `proxy.blocked_models` (already unenforced since 2026-10-09).
+- `GET /v1/usage/stats`, `UsageTracker` and `usage_events` cost recording.
+- `litellm.register_model()` pricing overrides (the Fable 5.1 cache rate and the Haiku 5.5 >100K tier). Prices now come from LiteLLM's own cost map (§8).
+- The `/v1/messages` validation harness `utils/tool_use_smoke_test.py`, and the historical per-model smoke results that it produced.
+
+## Contents
+
+1. Endpoints
+2. Model list, aliases and name resolution
+3. Routing, fallbacks and failure behaviour
+4. Client setup (Cline, OpenCode) and request parameters
+5. Reasoning effort
+6. Ollama Cloud reliability and timeouts
+7. Anthropic prompt caching on /proxy/v1
+8. Prices
+9. Implementation reference and `model_info` semantics
+10. Audio engines — transparent forwarder
 
 ---
 
-## 0. LLM routing overview
+## 1. Endpoints
 
-SoHoAI routes conversation inference across two model tiers: **external** (Claude Sonnet 5 via Anthropic API, primary cloud default) and **local** (Qwen3.5-9B Q4_K_XL on Server 2 via llama-swap, fallback/summarization). Routing logic is implemented in `router.py`. The default is external (Sonnet 5); if Anthropic becomes unreachable, the router automatically falls back to local Qwen. Rolling summarization at ~100K tokens uses local/qwen3.5-9b-q4 to keep per-token costs predictable and persists summaries to SQLite for cold-resume recovery.
+| Method | Path | Purpose | Handler (`main.py`) |
+|---|---|---|---|
+| GET | `/proxy/v1/models` | OpenAI-style model list: every key of `_PROXY_EXPOSED_MODELS` | `proxy_models()` |
+| GET | `/proxy/v1/model/info` | LiteLLM-style entries (`model_name`, `litellm_params`, `model_info`) | `proxy_model_info()` |
+| POST | `/proxy/v1/chat/completions` | Stateless OpenAI chat completions; SSE when `stream: true` | `proxy_chat_completions()` |
+| GET, POST | `/upstream/{model}/{path}` | Byte forwarder to llama-swap, audio engines only | `upstream_audio_forwarder()` |
+| GET | `/v1/models/health` | Sends a 1-token completion to **every** `model_list` entry (see warning below) | `SmartRouter.health_check()` |
+| GET | `/health` | `{"status": "ok", "models": [...]}` — the router's `available_models` (no Redis key) | `health()` |
 
-**External (Sonnet 5) path** goes through LiteLLM with prompt caching enabled — cache_control markers are injected on the system message (long-lived anchor) and on `messages[-2]` (rolling prefix anchor), reducing input cost by ~90% on cache hits. Prompt caching is active only on the Anthropic-compatible path; the local path uses Anthropic prompt caching instead.
-
-**Local (Qwen3.5-9B) path** bypasses LiteLLM and calls llama-server's native `/completion` endpoint directly, which is mandatory to pass `slot_id` for KV cache targeting. This path is used only on fallback (Anthropic down), for rolling summarization operations, and for background/offline tasks. Rolling summarization erases the KV slot before calling Qwen, and both summarization and the subsequent main inference start cold sequentially on the same slot. Prompt caching is irrelevant for local inference (no API cost).
-
-**Design rationale**: Sonnet 5 is now the interactive default (2026-04-22 flip). At ~50–100 turns/day for a 4-user family, Sonnet with prompt caching costs ~$30–60/mo — tolerable — while delivering substantially better reasoning and tool-use fidelity than a 4B local model. Qwen's role is as a "specialized worker" for fallback and summarization without removing the infrastructure.
-
-**LiteLLM stays as the routing + fallback layer**, handling OpenAI/Anthropic API differences and executing the fallback chain `external → local` (reversed direction from pre-flip implementation). **Local bypasses LiteLLM** — native `/completion` is required to pass `slot_id` for KV cache targeting. The branch point is at `main.py:405-415`.
-
-**Tool-use on both paths** uses an XML sentinel: `<tool_call>{"name":"search_documents","args":{"query":"…"}}</tool_call>`. Both external and internal paths emit and parse this sentinel. Sonnet handles it reliably. Native Anthropic `tools=[...]` + `tool_use` content blocks remain a deferred follow-up; unifying the two paths isn't blocking current quality.
+> **Warning — `/v1/models/health` is not free.** `SmartRouter.health_check()` loops over every
+> `model_list` entry, including the paid `anthropic/*` and `ollama-cloud/*` entries, and sends
+> each one a real 1-token request. It also counts as a chat request for llama-swap, so calling it
+> evicts the audio engines and the resident 9B (see §10). Do not poll it during meetings.
 
 ---
 
-## 1. Cline VSCode plugin — OpenAI-compatible path
+## 2. Model list, aliases and name resolution
 
-### Endpoints
+### 2.1 Models exposed on `/proxy/v1`
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | `/proxy/v1/models` | OpenAI-compatible model list — all public IDs from `_PROXY_EXPOSED_MODELS` (including `anthropic/*`) |
-| GET | `/proxy/v1/model/info` | LiteLLM-compatible model info (`max_input_tokens`, `context_window`) — Cline reads this to set its context-window display |
-| POST | `/proxy/v1/chat/completions` | Stateless OpenAI chat completions, streaming supported |
+The public ID is what a client sends. The internal alias is the `model_list` `model_name` the
+router uses. Context figures come from the `model_info` of the entry that
+`_build_proxy_model_entry()` reads.
 
-### Model mapping (`_PROXY_EXPOSED_MODELS` in `main.py`)
-
-`_PROXY_EXPOSED_MODELS` maps public IDs to internal LiteLLM `model_name` aliases in
-`SoHoAI-config.yaml`. For local and Ollama cloud models the mapping is an identity
-(public ID == model_name). For Anthropic models the public ID carries the `anthropic/`
-prefix while the internal alias is the bare name — this ensures the LiteLLM router
-picks the bare-name YAML entry that carries `ANTHROPIC_API_KEY` for authentication.
-
-**Anthropic models have two distinct entries in `SoHoAI-config.yaml`:**
-- `anthropic/claude-*` — no `api_key`; consumed by Claude Code via transparent forward
-  (`POST /v1/messages`); authentication is client-side (OAuth or `x-api-key`).
-- `claude-*` (bare name) — carries `api_key: os.environ/ANTHROPIC_API_KEY`; consumed by
-  Cline / OpenCode via the LiteLLM proxy (`POST /proxy/v1/chat/completions`); SoHoAI
-  authenticates on behalf of the client.
-
-| Public ID | Internal alias | Path | Auth | Context window |
+| Public ID | Internal alias | Backend | Key | Context in `/proxy/v1/model/info` |
 |---|---|---|---|---|
-| `local/qwen3.5-9b-q4` | `local/qwen3.5-9b-q4` | LiteLLM | dummy key | 131,072 |
-| `local/qwen3.5-9b-agentic` | `local/qwen3.5-9b-agentic` | LiteLLM | dummy key | 131,072 |
-| `anthropic/claude-haiku-5-5` | `claude-haiku-5-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
-| `anthropic/claude-sonnet-5` | `claude-sonnet-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
-| `anthropic/claude-opus-5-5` | `claude-opus-5-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
-| `anthropic/claude-fable-5` | `claude-fable-5` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
-| `anthropic/claude-fable-5-1` | `claude-fable-5-1` | LiteLLM | SoHoAI `ANTHROPIC_API_KEY` | 1,000,000 |
-| `ollama-cloud/deepseek-v4-flash` | `ollama-cloud/deepseek-v4-flash` | LiteLLM | Ollama API key | — |
-| `ollama-cloud/deepseek-v4-pro` | `ollama-cloud/deepseek-v4-pro` | LiteLLM | Ollama API key | **~70% 503 rate** — see §2.3 |
-| `ollama-cloud/minimax-m3` | `ollama-cloud/minimax-m3` | LiteLLM | Ollama API key | — |
-| `ollama-cloud/kimi-k3` | `ollama-cloud/kimi-k3` | LiteLLM | Ollama API key | **402 paid-tier gate** — see below |
-| `ollama-cloud/kimi-k2.7-code` | `ollama-cloud/kimi-k2.7-code` | LiteLLM | Ollama API key | — |
-| `ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | LiteLLM | Ollama API key | — |
-| `ollama-cloud/glm-5.3-flash` | `ollama-cloud/glm-5.3-flash` | LiteLLM | Ollama API key | — |
+| `local/qwen3.5-9b-q4` | same | llama-swap on 192.168.1.95:8000 → Qwen3.5-9B Q4, `--reasoning off` | `dummy-key` | 131,072 |
+| `local/qwen3.5-9b-agentic` | same | same llama-swap process; sends `chat_template_kwargs.enable_thinking: true` via `extra_body` | `dummy-key` | 131,072 |
+| `anthropic/claude-haiku-5-5` | `claude-haiku-5-5` | Anthropic API | `ANTHROPIC_API_KEY` (bare entry) | **none** (see §2.3) |
+| `anthropic/claude-sonnet-5-5` | `claude-sonnet-5-5` | Anthropic API | `ANTHROPIC_API_KEY` (bare entry) | **none** (see §2.3) |
+| `anthropic/claude-opus-5-5` | `claude-opus-5-5` | Anthropic API | `ANTHROPIC_API_KEY` (bare entry) | 1,000,000 |
+| `anthropic/claude-fable-5` | `claude-fable-5` | Anthropic API | `ANTHROPIC_API_KEY` (bare entry) | **none** (see §2.3) |
+| `anthropic/claude-fable-5-1` | `claude-fable-5-1` | Anthropic API | `ANTHROPIC_API_KEY` (bare entry) | **none** (see §2.3) |
+| `ollama-cloud/deepseek-v4.1-flash` | same | https://ollama.com/v1 | `OLLAMA_API_KEY` | 1,000,000 |
+| `ollama-cloud/deepseek-v4-pro` | same | https://ollama.com/v1 | `OLLAMA_API_KEY` | 1,000,000 |
+| `ollama-cloud/minimax-m3` | same | https://ollama.com/v1 | `OLLAMA_API_KEY` | 1,000,000 |
+| `ollama-cloud/kimi-k2.7-code` | same | https://ollama.com/v1 | `OLLAMA_API_KEY` | 256,000 |
+| `ollama-cloud/kimi-k3` | same | https://ollama.com/v1 | `OLLAMA_API_KEY` | 1,000,000 |
+| `ollama-cloud/glm-5.3` | same | https://ollama.com/v1 | `OLLAMA_API_KEY` | 1,000,000 |
+| `ollama-cloud/glm-5.3-flash` | same | https://ollama.com/v1 | `OLLAMA_API_KEY` | 1,000,000 |
 
-> **Note:** some rows in this table are still stale — see the staleness notice at the top of this document.
+Local and Ollama entries use `openai/<name>` as the LiteLLM provider with a custom `api_base`.
+Their `allowed_openai_params` setting is covered in §5.
 
-> **Fable 5.1 pricing note (verified 2026-09-08):** base rates match Fable 5
-> ($10 in / $50 out per MTok), but cache reads are 0.025x input ($0.25/MTok)
-> instead of the standard 0.1x. Registered in `main.py` via `litellm.register_model()`.
+### 2.2 The `anthropic/*` entries in `model_list`
 
-> **glm-5.3-flash (added 2026-09-08):** substitute for the retired
-> `ollama-cloud/qwen3-coder-next` (410 Gone since 2026-07-15 — see catalog note
-> below). 1M context, multimodal, tool calling; Ollama Cloud tag `glm-5.3-flash:cloud`.
+`SoHoAI-config.yaml` holds two kinds of Anthropic entry:
 
-**Why `/proxy/v1/models` exposes all of these — including `anthropic/*`:** Cline builds its
-model dropdown entirely from this endpoint; it has no hardcoded built-in model list.
-Exposing `anthropic/*` here simply tells Cline those models are selectable — no
-duplication risk. This differs from the old `GET /v1/models` endpoint: that endpoint excluded `anthropic/*` because Claude Code
-already has those IDs in its native built-in list and would show each model twice if
-the gateway also returned them.
+- `anthropic/<name>` — carries no `api_key`. `_build_proxy_tables()` maps the public name
+  `anthropic/<name>` to the bare internal name `<name>`, so proxy traffic never resolves to these
+  entries. They are still loaded by `SmartRouter` and pinged by `/v1/models/health`.
+- `<name>` (bare) — carries `api_key: os.environ/ANTHROPIC_API_KEY`. This is the entry that serves
+  proxy requests.
 
-Model name resolution (`_resolve_proxy_model()` in `main.py`) supports two mechanisms:
+### 2.3 Known gap: `model_info` missing on most bare Anthropic entries
 
-1. **Legacy bare names** — derived generically from `model_list` by stripping provider prefixes (e.g. `qwen3.5-9b-q4`, `deepseek-v4-pro`, `claude-sonnet-5`). These are generated automatically for backward compat with existing Cline configs.
+`_build_proxy_model_entry()` copies `model_info` from the **bare** entry, not from the
+`anthropic/*` entry. As of 2026-11-12 only `claude-opus-5-5` has `model_info` among the bare
+Anthropic entries. For `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-fable-5` and
+`claude-fable-5-1`, `/proxy/v1/model/info` returns `model_info: {}`. Clients that read
+`max_input_tokens` or `context_window` from there (Cline does, for its context display) fall back
+to their own defaults. Fix by adding `model_info` to those four bare entries in
+`SoHoAI-config.yaml`. This document does not make that change.
 
-2. **Config-driven meta-alias `local`** — defined in `proxy.aliases` in `SoHoAI-config.yaml` and validated against `model_list` at import time by `_build_proxy_aliases()` in `main.py`. This allows a single alias to map to a model name that may change without updating all client configs.
+### 2.4 Name resolution — `_resolve_proxy_model()`
 
-**Breaking change**: The hard-coded short alias `qwen3-4b` has been **removed**. Use `qwen3.5-9b-q4` (the full model name) or the `local` meta-alias instead. The previously-documented `"auto"` alias was never implemented and has been removed from the codebase.
+A client may send any of the forms below. The lookup order is the code's order:
 
-**Model name normalization** (2026-05-22): `_resolve_proxy_model()` now strips CC
-context-window annotations (`[1m]`) and Anthropic date suffixes (`-20251001`) before
-lookup, so `claude-sonnet-5[1m]` and `claude-haiku-4-5-20251001` both resolve
-correctly. The `anthropic_messages` and `count_tokens` endpoints also strip `[…]` from
-the model name before forwarding to `api.anthropic.com` (Anthropic only accepts bare
-names; the annotation caused a 404 that blocked CC's auto-mode Bash safety classifier).
+1. Meta-alias from `proxy.aliases` — currently only `local` → `local/qwen3.5-9b-q4`. Validated against `model_list` at import by `_build_proxy_aliases()`.
+2. Exact public name in `_PROXY_EXPOSED_MODELS` (built by `_build_proxy_tables()`).
+3. Legacy bare name in `_LEGACY_ALIASES` — the `local/`, `ollama-cloud/` and `anthropic/` prefixes stripped, and bare `model_list` names mapped to themselves.
+4. The name with any provider prefix (`openai/`, `anthropic/`, `ollama-cloud/`, `local/`) stripped, retried against steps 2–3.
+5. The raw internal alias, passed through.
+6. The name with a trailing `[…]` annotation and a trailing `-YYYYMMDD` date removed, then retried from step 1.
 
-**Ollama cloud models are reasoning models** (DeepSeek V4 Pro, Kimi K3/K2.7-Code,
-GLM-5.2 in particular). They spend a variable number of tokens on internal reasoning
-before emitting visible output. Use `max_tokens ≥ 500` for these models; requests with
-low limits (e.g. `max_tokens=20`) will hit the limit during the thinking phase and
-return empty `content[0].text` with `stop_reason: max_tokens`.
+Anything else returns **HTTP 400** with the accepted names listed.
 
-> **Ollama Cloud catalog changes — verified live 2026-07-30:** `qwen3-coder-next` was
-> retired by Ollama on 2026-07-15 (confirmed via direct `POST /v1/chat/completions`
-> against `https://ollama.com/v1` — returns `410 Gone`) and has been removed from
-> `SoHoAI-config.yaml`. The plain `kimi-k2.7` tag is also gone (confirmed `404 Not
-> Found` against the same endpoint) — Ollama split it into two successors: `kimi-k2.7-code`
-> (works on the standard plan, added here as `ollama-cloud/kimi-k2.7-code`) and `kimi-k3`
-> (works, but returns `402 Payment Required` — *"this model uses extra usage only... your
-> extra usage balance is empty"* — until extra-usage billing/auto-reload is enabled at
-> https://ollama.com/settings). **Because `router_settings.fallbacks` silently reroutes a
-> failed `ollama-cloud/kimi-k3` call to `anthropic/claude-sonnet-5`, requesting `kimi-k3`
-> today quietly bills Anthropic tokens instead of failing loudly or staying free** — check
-> `GET /v1/usage/stats` for unexpected Sonnet 5 cost if you request `kimi-k3` before
-> enabling extra usage.
+Results of calling `_resolve_proxy_model()` directly on the current config (2026-11-12):
 
-### Cline configuration
+| Sent | Resolves to |
+|---|---|
+| `local` | `local/qwen3.5-9b-q4` |
+| `qwen3.5-9b-q4` | `local/qwen3.5-9b-q4` |
+| `openai/qwen3.5-9b-q4` | `local/qwen3.5-9b-q4` |
+| `anthropic/claude-sonnet-5-5` | `claude-sonnet-5-5` |
+| `claude-sonnet-5-5[1m]` | `claude-sonnet-5-5` |
+| `claude-opus-5-5-20251001` | `claude-opus-5-5` |
+| `kimi-k3` | `ollama-cloud/kimi-k3` |
+| `claude-sonnet-5` | **None → HTTP 400** (renamed to `claude-sonnet-5-5`) |
+| `local/qwen3-asr` | **None → HTTP 400** (audio models are not chat models; use §10) |
 
-In Cline VSCode settings, choose **LiteLLM** as the provider (not "OpenAI Compatible"):
+Renamed or retired names:
+
+- `claude-sonnet-5` is now `claude-sonnet-5-5`. The bare old name no longer resolves.
+- `ollama-cloud/qwen3-coder-next` was retired by Ollama Cloud on 2026-07-15 (`410 Gone`) and removed from config.
+- `ollama-cloud/kimi-k2.7` (plain tag) returned `404` on 2026-07-30. Ollama split it into `kimi-k2.7-code` and `kimi-k3`.
+
+---
+
+## 3. Routing, fallbacks and failure behaviour
+
+### 3.1 Which model a request uses
+
+`proxy_chat_completions()` resolves the public name (§2.4) and always passes it to
+`SmartRouter.complete(model=...)`. In `SmartRouter.select_model()` an explicit `model` wins
+over everything else.
+
+The rest of `select_model()` (`routing.default_model`, `routing.cloud_model`,
+`routing.complexity_threshold_tokens`) runs only when `model` is `None`. No remaining caller
+does that: the two `/proxy/v1` handlers pass a resolved model, and the RAG
+`variant_llm_fn` in `main.py` passes `rag.multi_query.variant_model`. These routing keys are
+therefore inert for current traffic. `routing.default_model` is still required at startup
+(`SmartRouter.__init__` raises if it is missing). `routing.summarization_model` is not read
+by any code.
+
+### 3.2 LiteLLM fallbacks — `router_settings.fallbacks`
+
+LiteLLM retries a failed deployment (`Router(num_retries=2, timeout=60)`), then tries the
+fallback for that name. Current rules:
+
+| Requested | Falls back to |
+|---|---|
+| `ollama-cloud/minimax-m3` | `anthropic/claude-opus-5-5` |
+| `ollama-cloud/kimi-k3` | `anthropic/claude-sonnet-5-5` |
+| `ollama-cloud/kimi-k2.7-code` | `anthropic/claude-sonnet-5-5` |
+| `ollama-cloud/glm-5.3` | `anthropic/claude-sonnet-5-5` |
+| `ollama-cloud/glm-5.3-flash` | `anthropic/claude-sonnet-5-5` |
+
+`ollama-cloud/deepseek-v4-pro` and `ollama-cloud/deepseek-v4.1-flash` have **no** fallback, so
+they fail outright.
+
+> **Silent cost switch.** A failed call to one of the five names above is answered by an
+> Anthropic model and billed to SoHoAI's `ANTHROPIC_API_KEY`. The client is not told. The
+> non-streaming handler overwrites the response's `model` with the name the client sent
+> (`resp_dict["model"] = reported_model`), and the streaming handler does the same for each
+> chunk. Nothing else in the gateway records which model answered. Check the Anthropic usage
+> dashboard if an Ollama model's calls look expensive.
+
+This is a per-request fallback, so a model that recovers on the next turn answers again. That
+can mix models within one agent task.
+
+### 3.3 Retries and timeouts (`SmartRouter.complete()`)
+
+- **Non-Anthropic targets** (`ollama-cloud/*`, `local/*`) get three attempts with increasing
+  request timeouts, 60 s → 90 s → 120 s. Only `litellm.Timeout` triggers a retry. Auth errors
+  and 4xx responses propagate at once. Worst case is 270 s in total. After the third timeout,
+  `complete()` logs `all 3 attempts timed out` and re-raises.
+- **Anthropic targets** get one call with no extra timeout, so LiteLLM's `timeout=60` from the
+  `Router` constructor applies.
+
+Errors reach the client as follows:
+
+| Path | After the final failure |
+|---|---|
+| Non-streaming | Exception propagates. `main.py` defines no exception handler, so FastAPI returns its default HTTP 500. |
+| Streaming (`stream: true`) | HTTP 200 is already sent. The handler emits `data: {"error": {"message", "type"}}` followed by `data: [DONE]`. |
+
+**Idle-stream watchdog.** Every streaming response from `complete()` is wrapped in
+`_with_idle_timeout()`. If no chunk arrives for `IDLE_CHUNK_TIMEOUT_S` (60 s), it raises
+`StreamStalledError`. The streaming handler reports that as the SSE error event above. This
+guards against an upstream that opens a stream and then goes silent.
+
+---
+
+## 4. Client setup and request parameters
+
+### 4.1 Cline (VSCode plugin)
+
+Choose **LiteLLM** as the provider, not "OpenAI Compatible":
 
 ```
 Base URL : http://192.168.1.93:8000/proxy/v1
-API Key  : sohoai-local  (any non-empty string)
-Model    : qwen3.5-9b-q4  (local, 131K ctx)  OR  claude-sonnet-5  (cloud, 1M ctx)
+API Key  : sohoai-local     (any non-empty string)
+Model    : local/qwen3.5-9b-q4 (131K ctx)   or   claude-sonnet-5-5 (1M ctx)
 ```
 
-The Base URL **must end in `/v1`**: Cline appends `/chat/completions` to it, and SoHoAI only
-serves `/proxy/v1/chat/completions` — `http://192.168.1.93:8000/proxy` alone yields a 404
-(verified 2026-10-10; Cline's model-info fetch tolerates either form, chat does not).
+- The Base URL **must end in `/v1`**. Cline appends `/chat/completions`, and only
+  `/proxy/v1/chat/completions` is served. `http://192.168.1.93:8000/proxy` alone returns 404 on
+  chat (verified 2026-10-10).
+- The API key must be non-empty, because Cline rejects an empty string on the client side.
+- Cline's model dropdown is built from `/proxy/v1/models`. This was observed earlier and not
+  re-checked on 2026-11-12.
+- Cline was previously observed to read context limits from `/proxy/v1/model/info`. Entries
+  without `model_info` (§2.3) give it no limit. Not re-checked on 2026-11-12.
 
-API key must be non-empty — Cline's client-side gate rejects an empty string regardless
-of server-side validation.
-
-### Reasoning effort (`reasoning_effort`)
-
-Cline's reasoning-level setting is sent as the OpenAI `reasoning_effort` field and flows
-unchanged through `POST /proxy/v1/chat/completions` into LiteLLM. Who honours it
-(all verified by direct probe, 2026-10-10):
-
-| Model family | Honours `reasoning_effort`? | Notes |
-|---|---|---|
-| `ollama-cloud/*` | Yes | Ollama's `/v1/chat/completions` maps it to its native think level (`none` disables thinking; `low`/`medium`/`high` set depth). Reasoning comes back in `reasoning`. Probed in detail on `minimax-m3`; the other six models accepted `low` and answered, but their per-level behaviour was not compared (`glm-5.3*` returned no reasoning text at `low`). |
-| `anthropic/*` (Opus 5.5, Sonnet 5, Haiku 5.5) | Yes | LiteLLM >= 1.104 translates it to `thinking: {type: adaptive}` + `output_config: {effort}`; `none` sends nothing. Older LiteLLM (1.82.6) sent the legacy `thinking.type=enabled`, which Anthropic rejects for these models. |
-| `local/qwen3.5-9b-q4`, `local/qwen3.5-9b-agentic` | **No — accepted and ignored** | llama-server takes the field without error but any level (`none`/`low`/`high`) behaves identically, with thinking on or off. Thinking is binary: off by default (`--reasoning off`), on via the `agentic` alias (`extra_body.chat_template_kwargs.enable_thinking`). |
-
-**Why `allowed_openai_params` is needed.** Every non-Anthropic model is routed as
-`openai/<name>` with a custom `api_base`. LiteLLM decides supported parameters from the
-provider and model name, and only allows `reasoning_effort` for OpenAI's own reasoning
-models, so any other `openai/*` deployment raised `UnsupportedParamsError` and (for
-Ollama Cloud) fell through to the Anthropic fallback. Each `ollama-cloud/*` and `local/*`
-deployment in `SoHoAI-config.yaml` therefore carries
-`allowed_openai_params: ["reasoning_effort"]`. A global `drop_params: true` was rejected:
-it would silently discard every unsupported parameter, including the reasoning level the
-user wants honoured. **A new `openai/*` model added to `model_list` needs the same line.**
-
-### Verify proxy model info
+To check model info by hand:
 
 ```bash
 curl http://192.168.1.93:8000/proxy/v1/model/info | python3 -m json.tool | grep -E "model_name|max_input_tokens"
 ```
 
-### Shared llama-server slot race
+### 4.2 OpenCode
 
-Both SoHoAI's `local` path (summarization, offline fallback) and Cline's
-`qwen3.5-9b-q4` proxy path hit the same llama-server on Server 2. The `local` meta-alias
-resolves to the same model, so both share the same KV cache slot. A Cline request that
-lands on a slot between SoHoAI's `restore → inference → save` sequence will corrupt that
-chat's KV state. Accepted risk: SoHoAI's local usage is rare post-flip, and the
-corruption self-heals on the next turn.
+OpenCode reads a provider from its own config, `~/.config/opencode/opencode.json` on each
+OpenCode host. That file is outside this repository and is deployed from oconona. The relevant
+block as of 2026-11-12:
+
+- Provider `sohoai`, npm package `@ai-sdk/openai-compatible`.
+- `options.baseURL`: `http://192.168.1.93:8000/proxy/v1`, `apiKey`: `sohoai-local`,
+  `chunkTimeout: 45000`, `headerTimeout: 20000`.
+- Models map to `ollama-cloud/deepseek-v4.1-flash`, `ollama-cloud/deepseek-v4-pro`,
+  `ollama-cloud/minimax-m3`, `ollama-cloud/kimi-k3`, `ollama-cloud/glm-5.3`,
+  `ollama-cloud/glm-5.3-flash`, `local/qwen3.5-9b-q4`, and `anthropic/claude-haiku-5-5`.
+
+A separate provider named `anthropic` in the same file calls Anthropic directly and does not
+pass through SoHoAI.
+
+### 4.3 Request parameters
+
+`proxy_chat_completions()` consumes `model`, `messages` and `stream`, and drops the
+SoHoAI-internal keys `force_cloud`, `chat_id` and `user_id`. Every other OpenAI-standard
+parameter goes unchanged to LiteLLM through `**body`. That covers `tools`, `tool_choice`,
+`max_tokens`, `temperature`, `reasoning_effort`, and `user`.
+
+Whether a model acts on `tools` depends on the provider. This document makes no claim for
+any model. Earlier smoke records came from `utils/tool_use_smoke_test.py`, which was removed on
+2026-11-12.
+
+Ollama Cloud reasoning models (DeepSeek V4, Kimi K3 / K2.7-Code, GLM-5.x, MiniMax M3) spend
+tokens on hidden reasoning before visible output. Use `max_tokens ≥ 500`. At very low limits
+such as 20, the reply can come back with empty visible content (observed on the Anthropic-format
+path before 2026-11-12; not re-checked on the OpenAI-format path).
 
 ---
 
-## 2. Claude Code — Anthropic Messages API path
+## 5. Reasoning effort
 
-### Endpoint
+Cline's reasoning setting is sent as the OpenAI `reasoning_effort` field and passes through
+unchanged. Who honours it (probed directly, 2026-10-10):
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| POST | `/v1/messages` | Anthropic Messages API with model-aware routing |
+| Model family | Honours `reasoning_effort`? | Notes |
+|---|---|---|
+| `ollama-cloud/*` | Yes | Ollama maps it to its native think level. `none` disables thinking. Reasoning text comes back in `reasoning`. Only `minimax-m3` was compared across levels; `glm-5.3*` returned no reasoning text at `low`. |
+| `anthropic/*` bare entries | Yes | LiteLLM ≥ 1.104 translates it to adaptive thinking with an effort setting. The repo pins `litellm==1.104.2`. Older LiteLLM sent a legacy `thinking.type=enabled` that Anthropic rejects for these models. |
+| `local/qwen3.5-9b-q4`, `local/qwen3.5-9b-agentic` | **No — accepted and ignored** | llama-server takes the field without error, and any level behaves the same. Thinking is on/off only: off for `local/qwen3.5-9b-q4` (`--reasoning off`), on for `local/qwen3.5-9b-agentic` (`extra_body.chat_template_kwargs.enable_thinking`). |
 
-### Configuration
+**Why `allowed_openai_params` is set.** Non-Anthropic models are routed as `openai/<name>`
+with a custom `api_base`. LiteLLM allows `reasoning_effort` only for OpenAI's own reasoning
+models, so any other `openai/*` deployment raised `UnsupportedParamsError`. Every `local/*` and
+`ollama-cloud/*` entry in `SoHoAI-config.yaml` therefore carries
+`allowed_openai_params: ["reasoning_effort"]`. A global `drop_params: true` was rejected because
+it would also silently drop the reasoning level the user asked for. **Any new `openai/*` entry
+in `model_list` needs the same line.**
 
-Set in `~/.claude/settings.json`:
+---
 
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://192.168.1.93:8000",
-    "ANTHROPIC_API_KEY": "<your-real-anthropic-api-key>"
-  }
-}
-```
+## 6. Ollama Cloud reliability and timeouts
 
-Claude Code sends the real API key in the `x-api-key` header on every request. The
-proxy extracts it and forwards it to `api.anthropic.com` on the transparent path.
+These are observations, not guarantees. Ollama shared inference carries no SLA.
 
-**OAuth mode (alternative)**: You can also use `claude login` for OAuth authentication
-instead of `ANTHROPIC_API_KEY`. When Claude Code uses OAuth, it sends `Authorization: Bearer <token>`
-instead of `x-api-key`. The gateway detects this automatically and forwards the Bearer token
-unchanged to Anthropic — no configuration change is needed. Both auth modes work alongside
-each other.
+- **`ollama-cloud/deepseek-v4-pro`** had a ~70% HTTP 500/503 failure rate on Ollama's shared
+  tier, reported in April 2026 (Ollama GitHub issues #15832, #15934). A live run on 2026-05-11
+  failed with a 503. It has no LiteLLM fallback (§3.2).
+- **`ollama-cloud/kimi-k3`** returned `402 Payment Required` on 2026-07-30 ("extra usage"
+  balance empty). A later check, recorded in the operator's notes on 2026-09-18, reported it
+  live. Re-probe before relying on it. While it fails, its fallback bills Sonnet 5.5 (§3.2).
+- Retry and timeout behaviour for non-Anthropic targets is in §3.3. The timeouts were raised
+  from 30/60/90 s to 60/90/120 s on 2026-05-15, after logs showed `kimi-k2.7` routinely needed
+  30–60 s on complex coding requests.
 
-### Model-aware routing
+---
 
-The proxy inspects the `model` field and branches on two paths:
+## 7. Anthropic prompt caching on /proxy/v1
 
-```
-REQUEST arrives at POST /v1/messages
-  │
-  ├─ model starts with "local/" (local/qwen3-4b-q6, local/qwen3-9b-q4)
-  │     → _anthropic_messages_litellm()
-  │     → Anthropic→OpenAI format conversion (tools, tool_use, tool_result forwarded)
-  │     → LiteLLM Router → llama-server (Server 2)
-  │     → tools forwarded; Qwen synthetic-smoke PASS, broader workload validation pending.
-     llama-swap hot-swaps models on Server 2 with 60→90→120s geometric backoff.
-  │
-  ├─ model starts with "ollama-cloud/" (all Ollama cloud models)
-  │     → _anthropic_messages_litellm() [same conversion path]
-  │     → Anthropic→OpenAI format conversion (tools, tool_use, tool_result forwarded)
-  │     → LiteLLM Router → https://ollama.com/v1 (OLLAMA_API_KEY from .env)
-  │     → tools forwarded
-  │     → NOTE: reasoning models — use max_tokens ≥ 500
-  │     → NOTE: Claude Code system prompt causes model to identify as Claude
-  │
-  └─ model starts with "anthropic/" (or unresolved)
-        → "anthropic/" prefix stripped before forwarding
-        → _anthropic_messages_forward()
-        → transparent HTTP forward to api.anthropic.com/v1/messages
-        → full fidelity: tools, history, caching, streaming all preserved
-```
+`SmartRouter.complete()` adds Anthropic `cache_control: {type: ephemeral}` markers only when the
+target's `litellm_params.model` starts with `anthropic/` (`_uses_anthropic()`). The helper
+`_apply_cache_control()` places two markers:
 
-### §2.1 Transparent forward path (Anthropic models)
+1. On the system message, when it is a plain string. This is the long-lived anchor.
+2. On `messages[-2]`, when there are at least three messages. This is the rolling prefix anchor.
 
-`_anthropic_messages_forward()` in `main.py` acts as a pure HTTP relay:
+Messages whose content is already a list of blocks are left alone. The helper returns a new list
+and does not mutate the caller's messages. Ollama and `local/*` targets receive the messages
+unchanged.
 
-- Forwards the **exact request body bytes** — no parsing, no modification
-- Forwards **Anthropic-specific headers**: `x-api-key`, `anthropic-version`, `anthropic-beta`
-- Streams the **raw response bytes** back — no re-encoding of SSE events
+A caching test on 2026-05-04 showed `cache_creation_input_tokens: 0` on the account, which
+suggested caching was not active. That result is dated and was not re-run on 2026-11-12.
 
-**What this preserves and why it matters:**
+---
 
-| Preserved | Consequence |
+## 8. Prices
+
+SoHoAI records no cost any more (see the removals list). These figures are LiteLLM's native cost
+map for the installed `litellm==1.104.2`, read on 2026-11-12. They have not been checked against
+Anthropic's price page. Units are USD per million tokens.
+
+| Model (bare name) | Input | Cached read | Output |
+|---|---|---|---|
+| `claude-opus-5-5` | $4.00 | $0.20 | $20.00 |
+| `claude-sonnet-5-5` | $2.00 | $0.10 | $10.00 |
+| `claude-haiku-5-5` | $0.10 | $0.01 | $0.50 |
+| `claude-fable-5` | $10.00 | $1.00 | $50.00 |
+| `claude-fable-5-1` | $10.00 | $0.25 | $50.00 |
+
+- `local/*` runs on the operator's own hardware and costs $0 per token.
+- Ollama Cloud prices are not held in this repo. Usage is billed against the Ollama account.
+
+---
+
+## 9. Implementation reference and `model_info` semantics
+
+### 9.1 Code map
+
+- **`main.py`**
+  - Proxy tables: `_build_proxy_tables()` (→ `_PROXY_EXPOSED_MODELS`, `_LEGACY_ALIASES`), `_build_proxy_aliases()` (→ `_PROXY_ALIASES`).
+  - Resolution and listing: `_resolve_proxy_model()`, `_build_proxy_model_entry()`, `proxy_models()`, `proxy_model_info()`.
+  - Chat: `proxy_chat_completions()`, which also builds the `metadata` passed to LiteLLM.
+  - Session tagging: `inject_orchestra_session_id` (middleware) sets `source: "orchestra"` in that metadata when an orchestra `.lck` file is live. Nothing in SoHoAI reads that metadata now that UsageTracker is gone.
+  - Audio: `_build_audio_table()` (→ `_AUDIO_MODELS`, `_AUDIO_ACCEPTED_NAMES`), `upstream_audio_forwarder()`.
+- **`router.py`** — `SmartRouter`: `select_model()`, `complete()`, `_with_idle_timeout()` (`IDLE_CHUNK_TIMEOUT_S`), `_uses_anthropic()`, `_apply_cache_control()`, `health_check()`, `available_models`.
+- **`SoHoAI-config.yaml`**
+  - `model_list`, `proxy.aliases`, `routing`, `router_settings.fallbacks`, `audio_models`.
+  - `router_settings` sets only `routing_strategy` and `fallbacks`.
+  - `litellm_settings` is `{}`.
+
+### 9.2 `model_info` — what it does
+
+`model_info` is never sent to a provider. It is read only by `_build_proxy_model_entry()`, which
+copies it into `/proxy/v1/model/info`. Its fields are:
+
+| Field | Used by |
 |---|---|
-| `tools` array | Model knows all Claude Code tools (Read, Write, Bash, Agent, etc.) on every turn |
-| `tool_use` blocks in assistant messages | Full multi-turn tool-call history reaches the model; it knows what it already requested |
-| `tool_result` blocks in user messages | File contents, bash outputs, and sub-agent results from past turns are visible to the model |
-| `cache_control: ephemeral` markers | Anthropic caches the system prompt + rolling message prefix; after turn 1 the ~100K token context costs ~10% per turn instead of 100% |
-| `anthropic-beta` headers | Features like `interleaved-thinking`, extended output, etc. work unchanged |
-| Native SSE event types | Claude Code's Ink UI receives `content_block_start {type:tool_use}` events and renders compact one-line tool-call status instead of scrolling file contents |
+| `max_input_tokens`, `context_window` | Client context-window display (Cline). |
+| `max_tokens` | Output cap metadata. |
 
-**Without transparent forward** (the old single LiteLLM path): cache_control was
-stripped → no caching → every turn paid full input-token cost; tools were stripped →
-model could not call Read/Write/Bash → Claude Code fell back to injecting file contents
-as inline text that scrolled on screen.
+Not configured, so not active:
 
-### §2.2 LiteLLM path (local/* and ollama-cloud/*)
-
-`_anthropic_messages_litellm()` in `main.py` converts the Anthropic-format request to
-OpenAI format and routes through LiteLLM Router to the target provider.
-
-**Tool use is now supported on this path** (implemented 2026-05-10).
-
-The conversion now handles full Anthropic→OpenAI transformation:
-- `tools` array: wrapped in OpenAI `{"type":"function","function":{...}}` format
-- `tool_use` blocks (assistant): converted to OpenAI `tool_calls` with serialized `arguments`
-- `tool_result` blocks (user): converted to OpenAI `role:"tool"` messages
-- Streaming responses: emit proper Anthropic SSE `content_block_start/delta/stop` events for tool calls
-- Image blocks (user): converted to OpenAI `image_url` format for vision-capable models
-- `cache_control` markers: forwarded (irrelevant for local inference, but preserved)
-
-**What is now forwarded and how the model can use it:**
-
-| Forwarded | What the model receives | Use case |
-|---|---|---|
-| `tools` array | Full knowledge of Read/Write/Bash tools | Model can request file reads, code writes, bash execution |
-| `tool_use` blocks (assistant) | Complete prior tool-call requests from history | Model reasons about previous attempts and iterations |
-| `tool_result` blocks (user) | File contents and command outputs from past turns | Model uses retrieved data to refine answers |
-| `cache_control` markers | Forwarded to provider (has no effect on llama-server) | Prepared for future local models with caching support |
-
-**Qwen reliability — validated 2026-05-15:**
-- **Sequential (single tool):** `local/qwen3-4b-q6` PASS on both stream and no-stream. Proxy conversion is correct.
-- **Parallel (5 simultaneous tools):** FAIL on both stream and no-stream. Model emits 1 `tool_use` block instead of all requested. Root cause confirmed from raw llama-server response: `reasoning_content` correctly reasons "I'll make all five function calls at the same time" but `tool_calls` array contains only the first call. This is a 4B-scale model-capacity limitation — not a proxy, template, or streaming-parsing issue. `--no-stream` produces the identical result.
-- **Verdict:** Use `local/qwen3-4b-q6` for single-tool-per-turn tasks (sequentially chained tool calls are fine). Parallel tool dispatch requires an ollama-cloud or Anthropic model. Grammar-constrained generation (`--grammar`) is unlikely to help since the failure is in generation scope, not argument formatting. See `docs/TODO.md` for the remaining real-orchestra validation open item.
-
-For `ollama-cloud/deepseek-v4-pro` and `ollama-cloud/kimi-k2.7-code`: both support OpenAI
-function calling natively and are expected to be reliable for tool use **when the endpoint
-is reachable** — see §2.3 for the reliability caveat on deepseek-v4-pro specifically.
-(`ollama-cloud/qwen3-coder-next`, previously recommended here for coding, was retired by
-Ollama Cloud on 2026-07-15 — removed from config.)
-
-**Appropriate use cases for the LiteLLM path:**
-- Full Claude Code sessions with ollama-cloud models (kimi-k2.7-code recommended for coding; deepseek-v4-pro usable but unreliable — see §2.3)
-- Sub-agents using ollama-cloud models that need to read files, write code, or run bash commands
-- Multi-turn tool call chains with cloud models (zero API cost vs Anthropic)
-- Summarization tasks (`local/qwen3-9b-q4` used by `maybe_summarize()`)
-- Offline/background drafting when Anthropic is unreachable (`local/qwen3-4b-q6`)
-- Exploratory prompting with Ollama cloud models
-- Cost-sensitive deployments where cloud model cost is critical (Ollama cloud ≈ $0 vs Anthropic)
-
-**Inappropriate use cases:**
-- `local/qwen3-4b-q6` for tool-requiring workloads (until post-swap reliability is validated)
-- Tasks where tool-call reliability is mission-critical and cannot tolerate failures
-- `ollama-cloud/deepseek-v4-pro` for mission-critical or long-running agent tasks given its current instability
-
-**Claude Code identity note:** When using `ollama-cloud/*` models via `claude --model`,
-Claude Code injects its own system prompt ("You are Claude Code..."). Ollama cloud models
-follow this persona and will self-identify as Claude. The actual model is confirmed by
-the status bar and server logs — not the model's self-description.
-
-### §2.3 Ollama cloud reliability, timeout backoff, and 503 guard
-
-**deepseek-v4-pro has a documented ~70% HTTP 500/503 failure rate** on Ollama's shared
-inference tier since its April 2026 release (GitHub issues #15832, #15934). Ollama shared
-inference carries **no SLA**. The other three models (kimi-k2.7, glm-5.1, qwen3-coder-next)
-are substantially more reliable.
-
-**Why not a silent fallback?** A LiteLLM Router fallback (deepseek → Sonnet) was
-considered and rejected: LiteLLM fallback is per-request, so if deepseek recovers on the
-next turn it resumes answering. Within a single sub-agent task this produces alternating
-models mid-task — worse than a clean failure. It also incurs unexpected cost when the user
-explicitly chose a $0 model.
-
-**Timeout and backoff (updated 2026-05-16):** Instead of a single 30s timeout that immediately
-surfaces as HTTP 529, the proxy uses a **3-step increasing-timeout backoff** in
-`SmartRouter.complete()` (`router.py`). This now covers **all non-Anthropic models**
-(ollama-cloud/* and local/* — the latter for llama-swap hot-swapping delays on Server 2):
-
-| Attempt | Timeout | Log |
-|---------|---------|-----|
-| 1 | 60 s | (silent) |
-| 2 | 90 s | WARNING: `<model> timed out on attempt 1/3, retrying (timeout=90s)…` |
-| 3 | 120 s | WARNING: `<model> timed out on attempt 2/3, retrying (timeout=120s)…` |
-| exhausted | — | ERROR: `<model> … all 3 attempts timed out` → HTTP 529 |
-
-Worst-case total: 60+90+120 = 270 s — within CC's 300 s httpx limit. Only `litellm.Timeout`
-triggers a retry; auth errors and 4xx responses propagate immediately.
-
-> **Note (2026-05-15):** Initial implementation used 30s→60s→90s (180s worst-case). Production
-> logs showed kimi-k2.7 regularly needs 30–60s for complex coding tasks, so every non-trivial
-> request failed attempt 1 and incurred an unnecessary 30s penalty. Raised to 60s→90s→120s.
-
-**How final failures are reported:**
-
-| Path | behavior after all 3 attempts exhausted |
-|------|----------------------------------------|
-| Streaming (`stream: true`) | SSE `error` event emitted in-stream; HTTP 200 (stream already open) |
-| Non-streaming | HTTP **529** `overloaded_error` with Anthropic-format JSON body |
-
-```json
-{
-  "type": "error",
-  "error": {
-    "type": "overloaded_error",
-    "message": "Model 'ollama-cloud/deepseek-v4-pro' is temporarily unavailable (Ollama cloud overloaded or timed out). Retry or switch models with /model. ..."
-  }
-}
-```
-
-HTTP 529 is Anthropic's own "overloaded" code — Claude Code renders it as a clean
-user-visible error rather than an opaque crash. The message includes a `/model` hint.
-
-**Recommendation:** For interactive Claude Code sessions that need reliability, use
-`ollama-cloud/kimi-k2.7-code` (coding) or an `anthropic/*` model. Reserve deepseek-v4-pro
-for exploratory/disposable sessions where occasional failures are acceptable.
-
-### §2.4 Subagent blocking for Ollama Cloud sessions
-
-When Claude Code uses an Ollama Cloud model as its main model, it
-internally auto-spawns `claude-haiku-4-5-20251001` for lightweight background tasks.
-These would otherwise be transparently forwarded to Anthropic — incurring unexpected cost
-while the user expects a $0 Ollama session.
-
-**Guard in place (2026-05-15):** `proxy.blocked_models` in `SoHoAI-config.yaml` contains
-`claude-haiku-4-5-20251001`. In `anthropic_messages()`, any request whose `model` is in
-this list returns HTTP 400 (`not_supported_error`) before routing. CC does not retry 400s
-and falls back to the main model.
-
-```yaml
-proxy:
-  blocked_models:
-    - claude-haiku-4-5-20251001
-    - claude-haiku-5-5
-```
-
-Add future versioned Haiku model names here as needed.
-
-⚠️ **Status (2026-10-09):** `proxy.blocked_models` is present in `SoHoAI-config.yaml` but **NOT enforced by any code in `main.py`**. The enforcement added in commit b9a47f5 is no longer present. The blocklist remains as a placeholder for future re-implementation.
-
-### §2.5 Tool_use ID sanitization
-
-Ollama Cloud models (confirmed: kimi-k3) return tool call IDs in the format
-`functions.{name}:{index}` — e.g. `functions.Bash:38`. These contain `.` and `:` which
-violate Anthropic's required pattern `^[a-zA-Z0-9_-]+$`. Without sanitization, CC stores
-these IDs in its conversation history and the next call to an Anthropic-native model fails
-with HTTP 400.
-
-**Guard in place (2026-05-15):** `_sanitize_tool_use_id()` in `main.py` replaces invalid
-characters with `_` (`functions.Bash:38` → `functions_Bash_38`). Applied in both the
-streaming and non-streaming paths of `_anthropic_messages_litellm()`. Substitution is
-deterministic, so the ID round-trips correctly when CC sends it back as `tool_use_id`.
-
----
-
-## 3. Sub-agent mechanics and model-tier routing
-
-### How Claude Code dispatches sub-agents
-
-Claude Code dispatches sub-agents via its built-in `Agent` tool (used by `/duo`,
-`/brain`, and other pipelines). Each sub-agent is defined in a markdown file under
-`~/.claude/agents/` or the project's `.claude/agents/`. The relevant frontmatter fields:
-
-```yaml
-model: claude-haiku-5-5          # which model to use for this agent
-description: "Actor — implementation"
-tools: [Read, Write, Bash, Glob, Grep]
-```
-
-When a sub-agent runs:
-1. Claude Code spawns a new Claude Code process (headless, non-interactive)
-2. That process reads the `model` field from the agent's frontmatter
-3. It calls `POST /v1/messages` with `"model": "claude-haiku-5-5"` to whatever
-   `ANTHROPIC_BASE_URL` is configured (inherited from `~/.claude/settings.json`)
-4. SoHoAI proxy receives the request, sees `claude-haiku-5-5` → transparent forward → Anthropic Haiku
-
-**Note**: `api_base_url` is NOT a documented Claude Code agent frontmatter field.
-All agents share the same `ANTHROPIC_BASE_URL`. The `model` field is the only
-supported mechanism for per-agent model selection. Routing is determined by whatever
-model name the sub-agent sends in its request body.
-
-### /duo pipeline model tiers
-
-```
-Parent session (Brain + Planner) — Sonnet 4.6
-  source: settings.json "model": "sonnet[1m]"
-  request: POST /v1/messages {"model": "claude-sonnet-4-6", ...}
-  routing: transparent forward → Anthropic Sonnet 4.6
-  tools: ✅ full (Read, Write, Bash, Agent, Glob, Grep, ...)
-  caching: ✅ full (system prompt + rolling prefix cached after turn 1)
-
-Actor subagent — Haiku 5.5
-  source: agent frontmatter "model: claude-haiku-5-5"
-  request: POST /v1/messages {"model": "claude-haiku-5-5", ...}
-  routing: transparent forward → Anthropic Haiku 5.5
-  tools: ✅ full (same tool loop as parent)
-  caching: ✅ full (independent cache slot from parent)
-```
-
-Both are independent Anthropic API calls with independent prompt-cache slots.
-
-### /brain pipeline model tiers
-
-```
-Brain    — claude-opus-5     → transparent forward → Anthropic Opus 5     (tools ✅, cache ✅)
-Planner  — claude-sonnet-4-6 → transparent forward → Anthropic Sonnet 4.6 (tools ✅, cache ✅)
-Actor    — claude-haiku-5-5  → transparent forward → Anthropic Haiku 5.5  (tools ✅, cache ✅)
-Reviewer — claude-sonnet-4-6 → transparent forward → Anthropic Sonnet 4.6 (tools ✅, cache ✅)
-```
-
-Each tier has its own Anthropic API call, its own context window, and its own
-independent prompt-cache slot. The Brain's long research context does not inflate
-the Actor's costs.
-
-### Local sub-agent (qwen3-4b) — tool-use status
-
-A sub-agent with `model: local/qwen3-4b-q6` or `model: ollama-cloud/*` routes via the LiteLLM local path.
-**Tool use is now supported on this path** (implemented 2026-05-10). Validated target models (as `ollama-cloud/kimi-k2.7` — retired by Ollama Cloud 2026-07-15, renamed `ollama-cloud/kimi-k2.7-code` in config, smoke not yet re-run) — `ollama-cloud/deepseek-v4-pro` and `ollama-cloud/glm-5.1` — passed the synthetic two-turn smoke (`utils/tool_use_smoke_test.py`) on both streaming and non-streaming. `ollama-cloud/qwen3-coder-next` was also validated at the time but has since been retired by Ollama Cloud (2026-07-15) and removed from config. `ollama-cloud/deepseek-v4-flash` and `ollama-cloud/minimax-m2.5` are not yet smoke-validated.
-
-For `ollama-cloud/*` models (deepseek-v4-pro, kimi-k2.7-code, kimi-k3), such an agent can:
-- Read files (Read tool supported, smoke-validated)
-- Write or edit files (Write/Edit tools supported)
-- Run bash commands (Bash tool supported)
-- Use sub-agents (Agent tool supported)
-- Perform complex multi-turn tool call chains
-
-For `local/qwen3-4b-q6`, such an agent was validated with the previous Gemma model on simple-tool smoke. Real-world claude-orchestra workloads (full Claude Code tool catalogue, parallel tool calls, deeply-nested arguments) are the remaining open question — see `docs/TODO.md` "Tool-use deferred: local/qwen3-4b-q6 broader reliability verification".
-
-Recommended Actor-tier model selection:
-- **Anthropic transparent forward** (`anthropic/claude-haiku-4-5`): the safest choice for production-grade Actor tasks that require reliable tools. Cost ≈ $0.01/session.
-- **Ollama cloud** (`ollama-cloud/kimi-k2.7-code` for coding tasks, `ollama-cloud/deepseek-v4-pro` for reasoning): smoke-validated, cost ≈ $0/session. Reasoning models need `max_tokens ≥ 500`. (`ollama-cloud/kimi-k3` also works, but currently returns HTTP 402 from Ollama Cloud until extra-usage billing is enabled — see the note in §2.)
-- **Local Qwen** (`local/qwen3-4b-q6`): previously validated with Gemma model, cost = $0, post-swap validation pending. Recommended for cost-sensitive non-critical Actor work; not yet recommended for primary tool-using subagents until broader validation completes.
-
----
-
-## 4. Claude Code Integration
-
-This section consolidates how Claude Code uses SoHoAI as a transparent proxy — both as
-the primary interactive client and as a sub-agent dispatcher.
-
-### 4.1 Two paths
-
-| Path | Config | Endpoint | Use case |
-|------|--------|----------|----------|
-| **Direct Anthropic** | `ANTHROPIC_BASE_URL=http://192.168.1.93:8000` in `~/.claude/settings.json` | `POST /v1/messages` | Interactive Claude Code sessions; all `anthropic/*` models |
-| **Sub-agent / proxy** | `api_base_url: http://192.168.1.93:8000/proxy` in agent frontmatter | `POST /proxy/v1/chat/completions` | Stateless sub-agent dispatch; `local/*` + `anthropic/*` + `ollama-cloud/*` |
-
-**Direct Anthropic path** (transparent forward): the proxy relays the exact request bytes
-to `api.anthropic.com`. Tools, `tool_use`, `tool_result`, `cache_control`, and
-`anthropic-beta` headers are fully preserved. Prompt caching, streaming, and native SSE
-event types all work unchanged.
-
-**Sub-agent / proxy path** (`/proxy/v1/chat/completions`): stateless OpenAI-compatible
-pass-through. Sub-agents in claude-orchestra (`/brain`, `/duo`) use this path when
-given an `api_base_url` override in their frontmatter. The full model list is available.
-
-### 4.2 Available models for sub-agents
-
-All models exposed via `_PROXY_EXPOSED_MODELS` in `main.py`:
-
-| Model ID | Path | Backend | Notes |
-|----------|------|---------|-------|
-| `local/qwen3-4b-q6` | LiteLLM conversion | llama-server, Server 2 | $0/session; tool-use smoke PASS (Gemma); post-swap validation pending |
-| `anthropic/claude-haiku-4-5` | Transparent forward | Anthropic API | Safest Actor-tier choice; ~$0.01/session |
-| `anthropic/claude-sonnet-5` | Transparent forward | Anthropic API | Default interactive model |
-| `anthropic/claude-opus-5-5` | Transparent forward | Anthropic API | Brain tier in /brain pipeline (oconona-side config not yet updated to the new model name) |
-| `ollama-cloud/deepseek-v4-flash` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; not yet validated |
-| `ollama-cloud/deepseek-v4-pro` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; **~70% 503 rate** — see §2.3; not recommended for critical tasks |
-| `ollama-cloud/minimax-m2.5` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; not yet validated |
-| `ollama-cloud/kimi-k3` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; **HTTP 402 from Ollama Cloud** — extra-usage billing required (verified 2026-07-30); silently falls back to `anthropic/claude-sonnet-5` (paid) until enabled at ollama.com/settings |
-| `ollama-cloud/kimi-k2.7-code` | LiteLLM conversion | Ollama cloud | Coding model; `max_tokens ≥ 500`; replaces retired `ollama-cloud/qwen3-coder-next`; pending re-validation (smoke test target updated 2026-07-30, not yet re-run); **recommended** for $0 coding tasks |
-| `ollama-cloud/glm-5.1` | LiteLLM conversion | Ollama cloud | Reasoning model; `max_tokens ≥ 500`; tool-use smoke PASS |
-
-### 4.3 Tool calling via sub-agents (LiteLLM path)
-
-When a sub-agent uses a `local/*` or `ollama-cloud/*` model, Claude Code sends
-requests in Anthropic Messages API format. `_anthropic_messages_litellm()` in `main.py`
-converts them to OpenAI format for LiteLLM using four helpers:
-
-| Helper | Converts |
-|--------|---------|
-| `_convert_tools()` | Anthropic `tools` array → OpenAI `{"type":"function","function":{...}}` |
-| `_convert_tool_choice()` | Anthropic `tool_choice` → OpenAI `tool_choice` |
-| `_convert_assistant_message()` | `tool_use` content blocks → OpenAI `tool_calls` with JSON `arguments` |
-| `_convert_user_message()` | `tool_result` blocks → OpenAI `role:"tool"` messages; `image` blocks → `image_url` |
-
-Streaming responses emit proper Anthropic SSE `content_block_start/delta/stop` events
-for tool calls, including `message_delta` with `stop_reason: "tool_use"`.
-
-**Validation status:**
-
-| Model | Single-tool smoke | 5-tool parallel smoke | Notes |
-|-------|------------------|-----------------------|-------|
-| `local/qwen3-4b-q6` | PASS (streaming + non-streaming, 2026-05-10 with Gemma) | INFO: 1/5 tools only | Post-swap validation pending |
-| `ollama-cloud/deepseek-v4-flash` | — | — | Not yet validated |
-| `ollama-cloud/deepseek-v4-pro` | PASS (streaming, 2026-05-10) | FAIL — live 503 (2026-05-11) | Reasoning model: `max_tokens ≥ 500`; see §2.3 |
-| `ollama-cloud/minimax-m2.5` | — | — | Not yet validated |
-| `ollama-cloud/kimi-k2.7-code` | pending (as `kimi-k2.7`: PASS streaming 2026-05-10, PASS parallel 2026-05-11) | pending | Renamed 2026-07-30 (Ollama retired plain `kimi-k2.7`); smoke not yet re-run |
-| `ollama-cloud/kimi-k3` | pending | pending | Reasoning model: `max_tokens ≥ 500`; currently HTTP 402 (extra-usage billing required) — smoke will fail until enabled |
-| `ollama-cloud/glm-5.1` | PASS (streaming, 2026-05-10) | PASS (streaming, 2026-05-11) | Reasoning model: `max_tokens ≥ 500` |
-
-`ollama-cloud/qwen3-coder-next` — retired by Ollama Cloud 2026-07-15 (confirmed `410 Gone`, verified 2026-07-30) and removed from `SoHoAI-config.yaml`. Its prior PASS/PASS smoke record is historical only.
-
-Smoke harness: `utils/tool_use_smoke_test.py`
-- Standard: `--server http://192.168.1.93:8000` — 2-turn, single tool
-- Parallel: `--parallel` — 2-turn, 5 simultaneous tools (get_file_size, get_file_owner,
-  get_file_permissions, get_file_modification_time, get_file_line_count)
-
-**Remaining open item**: real claude-orchestra sub-agent session with full Claude Code tool
-catalogue (Read/Write/Edit/Bash/Glob/Grep) and parallel sub-agent dispatch. The 5-tool
-parallel smoke covers parallel tool calls in a single turn; multi-agent parallelism
-remains unvalidated. See `docs/TODO.md`.
-
-### 4.4 Identity caveat
-
-When an `ollama-cloud/*` model receives a Claude Code sub-agent request, it also
-receives Claude Code's system prompt ("You are Claude Code…"). These models follow
-the persona and **self-identify as "Claude"**. The actual model is confirmed by:
-- The status bar model indicator in the Claude Code UI
-- Server logs on Server 1 (`uvicorn` stdout shows `model=ollama-cloud/...`)
-
-Model self-description is not a reliable indicator of which model is handling the request.
-
----
-
-## 5. Alternative - Anthropic passthrough — and comparison
-
-
-The problem: LiteLLM's standard proxy endpoint (`/v1/messages`) strips/transforms certain Anthropic-specific elements (cache_control markers, tools array, anthropic-beta headers) when it converts requests. 
-
-This causes tool calls to be stripped—forcing Claude Code to fall back on inline file injection—and strips cache_control markers, eliminating prompt caching and incurring full costs every turn.
-
-
-The general recommendation from practitioners is: Only use LiteLLM as a fallback router or when wrapping an OpenAI-compatible local endpoint that needs format translation.
-
-For the Brain/Planner/Reviewer tiers in claude-orchestra that use Anthropic models, pointing directly at `api.anthropic.com` or LiteLLM's `/anthropic` passthrough is the correct path. 
-
-
-LiteLLM's passthrough URL approach uses `ANTHROPIC_BASE_URL=http://localhost:8000/anthropic` to route Claude Code directly to LiteLLM's built-in passthrough endpoint, which forwards requests transparently without any transformation. SoHoAI's solution implements the same transparent relay by creating a custom HTTP endpoint that forwards the exact request body bytes without modification.
-
-The real distinction is that SoHoAI operates at the server level with model-aware routing—Anthropic requests get forwarded transparently while local models get converted through LiteLLM—whereas the LiteLLM passthrough is purely Anthropic-focused with no branching logic, where the client -- e.g. claude code -- would use a custom URL, with no ability for the LiteLLM to do mode-aware routing 
-
-
-### 5.1 In-depth comparison
-
-Both are two implementations of the same fix. In more detail: 
-
-The root cause in both cases is identical: LiteLLM's standard `/v1/messages` endpoint **transforms** requests — it parses, modifies, and re-serialises them. In doing so it strips `cache_control` markers, drops the `tools` array, and does not forward `anthropic-beta` headers. Claude Code, receiving responses from this path, loses the SSE event types it needs for compact tool rendering and falls back to injecting file contents as scrolling inline text.
-
-**LiteLLM's `/anthropic` passthrough** fixes this by telling LiteLLM: skip transformation entirely, relay bytes to `api.anthropic.com` unchanged.
-
-**SoHoAI's `_anthropic_messages_forward()`** fixes this by implementing the same relay directly inside the FastAPI app — exact body bytes forwarded, `x-api-key` / `anthropic-version` / `anthropic-beta` headers preserved, raw SSE bytes streamed back.
-
-### 5.2 Why SoHoAI's approach is strictly more capable
-
-The critical difference is the **model-aware branching** at the `POST /v1/messages` handler:
-
-```
-model = "claude-*"        →  _anthropic_messages_forward()   (transparent relay)
-model = "local/qwen3-*"   →  _anthropic_messages_litellm()  (LiteLLM conversion)
-```
-
-LiteLLM's `/anthropic` passthrough endpoint has no such branching — it can only forward to Anthropic. It cannot route local models. SoHoAI's implementation handles both paths behind the same `ANTHROPIC_BASE_URL`, which is what allows `claude-haiku-4-5`, `claude-sonnet-5`, `claude-opus-5-5`, and `local/qwen3-4b-q6` to all be valid `model:` values in agent frontmatter while sharing one endpoint configuration in `settings.json`.
-
-### 5.3 Observation regarding caching — the one finding worth noting
-
-Section §6 below contains an important empirical result: prompt caching is **not currently active** on your account — `cache_creation_input_tokens: 0` and `inference_geo: not_available` on both proxy and direct Anthropic calls. 
-
-The transparent forward is correctly preserving `cache_control` markers; the limitation is account-tier or region on Anthropic's side. 
-
-This means the cost tables in §6 are the target state once caching activates, not the current state. The transparent forward implementation is correct and future-proof — no changes needed when caching becomes available.
-
-
-
----
-
-## 6. Prompt caching and cost implications
-
-### How Anthropic prompt caching works (transparent path only)
-
-Claude Code injects `cache_control: {type: ephemeral}` markers on:
-1. The system prompt (CLAUDE.md + project context — typically 20K–100K tokens)
-2. `messages[-2]` — the penultimate message (rolling prefix breakpoint)
-
-On the transparent forward path these markers reach Anthropic unchanged.
-After turn 1, Anthropic reports `cache_read_input_tokens` instead of `input_tokens`
-for the cached portion — the cached tokens cost ~10% of uncached input price.
-
-On the LiteLLM local path, cache_control markers are stripped by the conversion.
-This is irrelevant because local inference has no per-token API cost.
-
-**Note — account-tier / region dependency (verified 2026-05-04):** Prompt caching
-requires Anthropic to serve the request from a caching-enabled inference region.
-Smoke testing showed `cache_creation_input_tokens: 0` and `inference_geo: not_available`
-on both proxy and direct Anthropic calls with the current API key — indicating caching
-is not active for this account tier or routing configuration. The proxy forwards
-`cache_control` markers correctly; the limitation is on Anthropic's side. If caching
-becomes available (account upgrade, region change), no proxy changes are needed.
-
-### Approximate cost per tier (Anthropic API pricing, May 2026)
-
-| Model | Input (uncached) | Input (cached read) | Output |
-|---|---|---|---|
-| Opus 5.5 | $4/MTok | $0.20/MTok | $20/MTok |
-| Sonnet 5 | $2/MTok | $0.20/MTok | $10/MTok |
-| Haiku 5.5 | $0.10/MTok | $0.01/MTok | $0.50/MTok |
-| Qwen3.5 (local) | $0 | $0 | $0 |
-
-**Note:** Haiku 5.5 is priced by prompt length (cache reads/writes count). The row above is the ≤100K-token tier; prompts over 100,000 tokens pay $0.50 input / $2.50 output / $0.625 cache write / $0.05 cache read. LiteLLM's cost calculator cannot apply a length tier, so SoHoAI registers ONE level in `main.py` — the higher >100K rates — and recorded cost (`usage_events`) is therefore 5× too high for prompts ≤100K and exact above. Chosen so cost is never under-reported.
-
-### /duo session cost breakdown (typical task, 5 parent turns + 1 actor execution)
-
-**Parent (Sonnet 5) — transparent forward, prompt caching active**
-
-| Turn | Input (system+history) | Cache hit? | Effective input cost |
-|---|---|---|---|
-| 1 (cold) | ~30K tokens | ❌ | 30K × $2/MTok = $0.060 |
-| 2 | ~32K (30K cached + 2K new) | ✅ 30K cached | 2K×$2 + 30K×$0.20 = $0.010 |
-| 3–5 | ~34K (growing) | ✅ rolling cache | ~$0.010/turn |
-| Output | ~500 tok/turn × 5 | — | 2.5K × $10/MTok = $0.025 |
-| **Parent total** | | | **~$0.13** |
-
-**Actor (Haiku 5.5) — transparent forward, narrower context**
-
-| Turn | Input | Cache hit? | Cost |
-|---|---|---|---|
-| 1 (cold) | ~5K tokens | ❌ | 5K × $0.10/MTok = $0.0005 |
-| 2–3 | cached | ✅ | ~$0.00005/turn |
-| Output | ~1K tok × 2 | — | 2K × $0.50/MTok = $0.001 |
-| **Actor total** | | | **~$0.0015** |
-
-**Session total (approx)**: **~$0.14**
-
-**Without transparent forward (broken LiteLLM path, pre-fix)**:
-- cache_control stripped → every turn cold → 30K × $3/MTok × 5 = $0.45 input alone
-- Tools broken → task fails or Claude Code injects files inline (even larger context)
-- Effective cost 3–5× higher and task likely incomplete
-
-### /brain session cost (Opus 5 Brain tier)
-
-| Tier | Model | Turns | Est. cost |
-|---|---|---|---|
-| Brain | Opus 5 | 3–5 research turns | $0.15–$0.40 |
-| Planner | Sonnet 4.6 | 1–2 planning turns | $0.05–$0.10 |
-| Actor | Haiku 5.5 | implementation | $0.0005–$0.003 |
-| Reviewer | Sonnet 4.6 | 1 review turn | $0.03–$0.05 |
-| **Total** | | | **$0.23–$0.55** |
-
-Prompt caching cuts the Opus Brain cost by ~70% after the first turn (large research
-context is re-read cached). Without caching (broken path), costs would be 3–4× higher.
-
----
-
-## 7. LiteLLM `model_info` parameter semantics
-
-These fields in `SoHoAI-config.yaml model_info` are **not** forwarded to the provider API.
-
-| Field | Controls | Needed in config? |
-|---|---|---|
-| `max_tokens` | Output cap metadata | Only to enforce a lower cap than the model's native output limit |
-| `max_input_tokens` | Input size guard (pre-call check) | Only for models not in LiteLLM's registry (e.g. `internal`/llama-server) |
-| `context_window` | Router metadata for routing/cost | Only for models not in LiteLLM's registry |
-
-For `anthropic/claude-*` models: LiteLLM can auto-resolve context windows from its
-internal registry, but `model_info` **is still required** on these entries — proxy
-consumers (Cline, OpenCode) read `max_input_tokens` and `context_window` from
-`/proxy/v1/model/info`, which is built from `model_info` in `SoHoAI-config.yaml`.
-
-For `internal` (Qwen3.5 / llama-server): explicit `model_info` is required because
-llama-server is not in LiteLLM's registry. Cline reads `max_input_tokens` from
-`/proxy/v1/model/info` to set its context-window display.
-
-`enable_pre_call_checks: true` (set in `router_settings` in `SoHoAI-config.yaml`) activates
-input-size enforcement using these values.
-
----
-
-## 8. Future work
-
-Basic tool-use support for the local-model path (qwen3-4b and Ollama cloud models) is now implemented
-and smoke-validated for the original 5 targets (see `docs/TODO.md` IMPLEMENTED banner). The following deferred items remain:
-
-- **Full Claude Code tool catalogue + parallel tool calls** — the 2-turn single-tool smoke is validated; multi-tool
-  parallel invocation (multiple `tool_use` blocks in one response) and the full claude-orchestra tool catalogue
-  (Read/Write/Bash/Glob/Grep/Edit/TodoWrite/Agent) remain unvalidated. See `docs/TODO.md`.
-- Qwen3.5-4B broader workload reliability (smoke PASS with Gemma model; real claude-orchestra sessions not yet run post-swap)
-- Image-block conversion live validation (waiting for vision-capable model)
-- Grammar-constrained generation fallback (conditional on Qwen reliability findings; likely unnecessary)
-- `disable_parallel_tool_use` semantic parity across providers
-- `is_error: true` semantic parity across providers
-- Helper extraction to a dedicated module (trigger: when a second consumer appears)
-
-See `docs/TODO.md` for full detail on each deferred item.
-
----
-
-## 9. Implementation reference
-
-- **`main.py`**: `_ANTHROPIC_API_BASE`, `_PROXY_EXPOSED_MODELS`, `_resolve_proxy_model()`,
-  `_build_proxy_model_entry()`, `proxy_model_info()`, `proxy_chat_completions()`,
-  `anthropic_messages()` (with `proxy.blocked_models` check),
-  `_anthropic_messages_forward()`, `_anthropic_messages_litellm()`,
-  `_anthropic_stop_reason()`, `_TOOL_ID_VALID`, `_sanitize_tool_use_id()`,
-  `_LITELLM_ROUTED`, `anthropic_count_tokens()` (token counting endpoint)
-- **`router.py`**: `SmartRouter` — used by Cline path and LiteLLM local path;
-  3-step timeout backoff for `ollama-cloud/*`; `enable_pre_call_checks` and
-  `context_window_fallbacks` wired from `SoHoAI-config.yaml`
-- **`SoHoAI-config.yaml`**: `model_list` entries; `proxy.blocked_models`;
-  `router_settings.enable_pre_call_checks: true`; `litellm_settings.context_window_fallbacks`
-- **`docs/TODO.md`**: deferred work — local-model tool-use implementation plan
-- **Audio forwarder (§10 below)**: `main.py` `_build_audio_table()`, `_AUDIO_MODELS`,
-  `upstream_audio_forwarder()`; `SoHoAI-config.yaml` `audio_models:` section
+- `enable_pre_call_checks` is absent from `router_settings`, so `SmartRouter` passes `False`.
+- `litellm_settings.context_window_fallbacks` is absent.
 
 ---
 
 ## 10. Audio engines (ASR + diarization) — transparent forwarder
 
 Added 2026-10-07. Qwen3-ASR and Nemotron-3-Diarization run under llama-swap on Server 2 (see
-`docs/design-history.md` 2026-10-03 and 2026-10-04). They are **not inference/chat models**, so they
-are deliberately kept out of `model_list` and out of every chat path in this document.
+`docs/design-history.md` 2026-10-03 and 2026-10-04). They are **not chat models**, so they are
+kept out of `model_list` and out of `/proxy/v1`.
 
-### Endpoint
+### 10.1 Endpoint
 
-`ANY /upstream/{model}/{path}` on the orchestrator mirrors llama-swap's own `/upstream/<model>/<path>`
-form, so a client moves from llama-swap to SoHoAI by changing only host:port (`192.168.1.95:8000` →
-`192.168.1.93:8000`):
+`ANY /upstream/{model}/{path}` on the orchestrator mirrors llama-swap's own
+`/upstream/<model>/<path>` form. A client moves from llama-swap to SoHoAI by changing only the
+host and port (`192.168.1.95:8000` → `192.168.1.93:8000`).
 
 | Engine | SoHoAI URL | Forwarded to (llama-swap) |
 |---|---|---|
 | Diarization | `POST /upstream/nemotron-3-diarization/v1/audio/diarizations` (multipart `file`) | `/upstream/nemotron-3-diarization/v1/audio/diarizations` |
 | ASR | `POST /upstream/qwen3-asr/v1/chat/completions` (`input_audio` content part) | `/upstream/qwen3-asr-1.7b-q8/v1/chat/completions` |
 
-- **Names.** SoHoAI's name for the ASR engine is the shortened `qwen3-asr`; llama-swap's key is
-  `qwen3-asr-1.7b-q8`. The mapping is applied to the **URL path only** — the request body (including any
-  `model` field) is never read or rewritten. `local/qwen3-asr` and `local/nemotron-3-diarization`
-  are accepted too (`/upstream/local/qwen3-asr/...`).
-- **ASR cannot keep `/v1/chat/completions`.** That path is SoHoAI's own stateful chat endpoint, so the ASR
-  client must use the `/upstream/qwen3-asr/...` form. The diarizer path is unchanged apart from host.
-- **Allowlist.** Only the two engines are forwarded; any other name (including `qwen3.5-9b-q4` and
-  `bge-reranker-v2-m3`) returns 404 listing the accepted names.
+- **Names.** SoHoAI's short name for the ASR engine is `qwen3-asr`. llama-swap's key is
+  `qwen3-asr-1.7b-q8`. The mapping is applied to the URL path only. The request body, including
+  any `model` field, is never read or rewritten.
+- **`local/` prefix.** `local/qwen3-asr` and `local/nemotron-3-diarization` are also accepted,
+  as `/upstream/local/qwen3-asr/...`. `upstream_audio_forwarder()` takes the first path segment
+  after `local` as the engine name.
+- **Why ASR cannot use `/proxy/v1/chat/completions`.** That endpoint resolves names only through
+  `model_list` (§2.4), so `local/qwen3-asr` returns HTTP 400. The ASR client must use the
+  `/upstream/qwen3-asr/...` form.
+- **Allowlist.** Only the two engines are forwarded. Any other name, including
+  `qwen3.5-9b-q4` and `bge-reranker-v2-m3`, returns **404** listing the accepted names.
 
-### Behaviour
+### 10.2 Behaviour
 
-- **Pure byte forward.** No LiteLLM, no `SmartRouter`, no Redis/RAG, no retries, no fallback to cloud
-  models, no usage-tracker row (not token-billed). Request headers pass through except `host`,
-  `content-length` and hop-by-hop; the response is streamed back with the upstream status and
-  headers (`aiter_raw()`, so `content-encoding` stays consistent).
+- **Pure byte forward.** There is no LiteLLM, no `SmartRouter`, no retry, no fallback to cloud
+  models, and no usage record (the calls are not token-billed). Request headers pass through
+  except `host`, `content-length` and hop-by-hop headers. The response streams back with the
+  upstream status and headers, through `aiter_raw()`, so `content-encoding` stays consistent.
 - **Cold swap is transparent.** llama-swap holds the request until the model is healthy
-  (`healthCheckTimeout: 180`, a 30–60 s swap in practice) and answers 502 if it fails to start; SoHoAI passes
-  that 502 through. SoHoAI's own upstream timeout is `audio_models.timeout_seconds: 300`, longer than
-  llama-swap's load window. Mapped errors: connect failure → 502, read timeout → 504.
-- **No early reply.** llama-swap sends nothing while loading, so SoHoAI cannot either; the client must
-  tolerate a silent wait (timeout ≥ ~200 s) or warm the engine first.
-- **GPU side effect (llama-swap, not SoHoAI).** Both engines live in the exclusive `asr` group: a request
-  evicts the resident 9B, and the next chat request evicts them again (9B cold-load ~48–64 s).
-  **`GET /v1/models/health` counts as a chat request**: `SmartRouter.health_check()` pings every `model_list`
-  entry with a 1-token chat completion, including the 9B aliases, so calling it unloads Qwen3-ASR and the diarizer
-  (observed 2026-10-07). Do not poll it during meetings; use `curl http://192.168.1.95:8000/v1/models` for a
-  non-evicting liveness check.
+  (`healthCheckTimeout: 180`, a 30–60 s swap in practice) and returns 502 if the start fails.
+  SoHoAI passes that 502 through. SoHoAI's own upstream timeout is
+  `audio_models.timeout_seconds: 300`, which is longer than llama-swap's load window. Mapped
+  errors: connect failure → 502, read timeout → 504.
+- **No early reply.** llama-swap sends nothing while loading, so SoHoAI cannot either. The client
+  must tolerate a silent wait of about 200 s, or warm the engine first.
+- **GPU side effect (llama-swap, not SoHoAI).** Both engines are in the exclusive `asr` group, so
+  a request evicts the resident 9B. The next chat request evicts them again, and the 9B takes
+  about 48–64 s to cold-load.
+- **`GET /v1/models/health` counts as a chat request.** It pings every `model_list` entry with
+  a 1-token completion, including the 9B aliases, so calling it unloads Qwen3-ASR and the
+  diarizer (observed 2026-10-07). It also pings the paid Anthropic and Ollama entries (§1). Do
+  not poll it during meetings. For a liveness check that does not evict anything, use
+  `curl http://192.168.1.95:8000/v1/models`.
 
-### Configuration
+### 10.3 Configuration
 
-`SoHoAI-config.yaml`, top-level `audio_models:` — `upstream_base` (`http://${server2_ip}:8000`),
-`timeout_seconds`, and `models:` keyed by SoHoAI short name (`public_name`, `upstream_key`, `kind`,
-`description`). A malformed section raises at import time.
+`SoHoAI-config.yaml`, top-level `audio_models:`:
 
-**Why not `model_list`?** Every `model_list` entry is loaded by `SmartRouter`, pinged by
-`/v1/models/health` (`SmartRouter.health_check()` sends a chat completion to *each* entry — for
-`qwen3-asr` that would load the asr group and evict the 9B), and exposed to Cline/OpenCode by
-`_build_proxy_tables()` / `/proxy/v1/models`. A separate section avoids all four.
+- `upstream_base` — `http://${server2_ip}:8000`, with the placeholder substituted at import.
+- `timeout_seconds` — must be a positive integer.
+- `models` — keyed by short name, each with `public_name`, `upstream_key`, `kind` and
+  `description`. `upstream_key` and `public_name` are required.
 
-### Verification status
+A malformed section raises at import time.
 
-Route behaviour (multipart and 3 MB bodies, name/`local/` mapping, 404 allowlist, 502 pass-through, gzip,
-connection refused) was tested against a local stub upstream on 2026-10-07.
+**Why a separate section and not `model_list`?** Every `model_list` entry is loaded by
+`SmartRouter`, pinged by `/v1/models/health`, and exposed on `/proxy/v1/models` by
+`_build_proxy_tables()`. For `qwen3-asr`, a ping would load the `asr` group and evict the 9B. A
+separate section avoids all three.
 
-Live smoke against llama-swap (separate session, 2026-10-07, reported only as a summary with no timings or
-payloads): the diarizer and ASR both responded correctly and quickly through SoHoAI, and an unsupported model
-failed fast with a 404. **Not yet tested:** cold swap-in latency through the forwarder, and a full ~100 MB
-diarization upload (the request body is buffered fully in memory, then re-sent upstream, so expect roughly twice
-the body size in RAM for that request). Also not reported: the `/v1/models/health` / `/proxy/v1/models`
-regression and the post-swap chat completion.
+### 10.4 Verification status
+
+- Route behaviour (multipart and 3 MB bodies, name and `local/` mapping, 404 allowlist, 502
+  pass-through, gzip, connection refused) was tested against a local stub upstream on
+  2026-10-07.
+- A live smoke test against llama-swap ran on 2026-10-07. The diarizer and ASR both responded
+  correctly through SoHoAI, and an unsupported model failed fast with a 404. The results are
+  not recorded here in detail.
+- **Not yet tested:** cold swap-in latency through the forwarder, and a full ~100 MB
+  diarization upload. The request body is buffered in memory and then re-sent upstream, so
+  expect roughly twice the body size in RAM for that request.
+- Not yet reported: the `/v1/models/health` and `/proxy/v1/models` regression, and the
+  post-swap chat completion.

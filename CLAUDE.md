@@ -2,8 +2,8 @@
 title: "SoHoAI — Project Context & Design Reference"
 created_at: 20260407-000000
 created_by: Florian Otel / Cline (Claude Sonnet 4.6)
-updated_by: Claude Code (Claude Opus 5.5); Claude Code (Claude Opus 5.5, 2026-11-04 -- RAG: OpenCode 2.x client, ingest endpoints removed, state DB on Server 2 only)
-updated_at: 2026-11-04--17-30
+updated_by: Claude Code (Claude Haiku 5.5)
+updated_at: 2026-11-12--17-03
 context: >
   SoHoAI project (https://github.com/FlorianOtel/SoHoAI);
   Project instructions and design decisions for Claude Code;
@@ -17,10 +17,10 @@ context: >
 
 ## What is this project?
 
-SoHoAI is a distributed, two-server home-office AI system. It provides a unified
-gateway for LLM inference (local + cloud), with conversation memory, document RAG,
-and an MCP server for tooling integration. The long-term goal includes image search
-for family photos and RL training data collection from chat interactions.
+SoHoAI is a distributed, two-server home-office AI system. It provides a stateless
+model gateway for LLM inference (local + cloud) and document RAG. The gateway keeps no
+conversation memory, no chat store, and no usage telemetry; OpenCode is the chat client.
+The long-term goal includes image search for family photos (Phase 4, see `docs/TODO.md`).
 
 ## Infrastructure
 
@@ -28,27 +28,22 @@ for family photos and RL training data collection from chat interactions.
 
 | Server | IP | Role | Hardware |
 |--------|------|------|----------|
-| Server 1 | 192.168.1.93 | Orchestrator, front-end, Redis cache, RAG, MCP server | 32GB RAM, AMD iGPU Radeon 680M |
-| Server 2 | 192.168.1.95 | LLM inference engine | 16GB RAM, Nvidia RTX 5070 12GB, llama-swap (Qwen3.5-9B + reranker; or Qwen3-ASR + Nemotron-3-Diarization + reranker, mutually exclusive) |
+| Server 1 | 192.168.1.93 | SoHoAI model gateway (FastAPI :8000), Qdrant :6333 (RAG) | 32GB RAM, AMD iGPU Radeon 680M |
+| Server 2 | 192.168.1.95 | LLM inference engine: llama-swap (Qwen3.5-9B + reranker; or Qwen3-ASR + Nemotron-3-Diarization + reranker, mutually exclusive); Ollama bge-m3 :11434 (embeddings); rag-ingest timer; 03:00 sqlite-qdrant-snapshot cron | 16GB RAM, Nvidia RTX 5070 12GB |
 | NAS | NFS-mounted | Persistent storage for everything | 27TB |
 
 ### Storage paths
 
-> SQLite and Redis paths are derived from `db_base_path` in `SoHoAI-config.yaml`. Qdrant active storage is local-only (see below).
+> SQLite paths are derived from `db_base_path` in `SoHoAI-config.yaml`. Qdrant active storage is local-only (see below).
 
-- Chat DB: `/mnt/nfs/__Backups/SoHoAI--databases/sqlite/telemetry.db` (SQLite, NAS)
 - RAG state DB: `/mnt/nfs/__Backups/SoHoAI--databases/sqlite/rag_state.db` (SQLite, NAS)
 - Vector store (active): `/var/lib/qdrant/storage` (local NVMe, Server 1 only — **not NFS**)
 - Vector store (snapshots/DR): `/mnt/nfs/__Backups/SoHoAI--databases/qdrant-snapshots/` (NAS)
   - **Note**: `/mnt/nfs/__Backups/SoHoAI--databases/qdrant/` is intentionally empty — it is NOT used.
     Qdrant server uses RocksDB which is incompatible with NFS file locking. Active data must stay local.
     Snapshots (passive files) are safe on NFS and taken daily at 03:00 via cron.
-- Redis persistence: `/mnt/nfs/__Backups/SoHoAI--databases/redis/`
-- KV cache slots: `/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/k-v-caches/` (one `.bin` per chat_id)
 - LLM model cache: `/mnt/nfs/Florian/Gin-AI/LLMs-cache/llama-server/`
 - Documents for RAG: `/mnt/nfs/Florian/Gin-AI/projects/SoHoAI/documents/`
-- RL training exports: `/mnt/nfs/Florian/Gin-AI/projects/SoHoAI/rl-data/`
-- Chat markdown exports: `/mnt/nfs/Florian/Gin-AI/projects/SoHoAI/exports/`
 
 ## Architecture
 
@@ -62,57 +57,44 @@ for family photos and RL training data collection from chat interactions.
                                     │
 Server 1 (192.168.1.93)                     Server 2 (192.168.1.95)
 ┌──────────────────────────┐  fallback/     ┌────────────────────────────────┐
-│ FastAPI orchestrator:8000│──summarize/───→│ llama-swap :8000               │
-│  SmartRouter (LiteLLM)   │   variants     │  ┌ resident + reranker ──────┐ │
-│  ConversationCache       │                │  │ qwen3.5-9b-q4      :8011  │ │
-│    Redis (short-term)    │─── /slots ────→│  │   131072 ctx (1 slot)     │ │
-│    KV cache mgr          │ (direct :8011) │  │   --reasoning off         │ │
-│    rolling summarization │                │  │   (no --slot-save-path!)  │ │
-│ SQLite (long-term)       │── /v1/rerank ─→│  │ bge-reranker-v2-m3 :8012  │ │
-│  + summary_text +        │                │  └───────────────────────────┘ │
-│    covers_through_msg_id │                │  ┌ OR asr (evicts the 9B) ───┐ │
-│                          │                │  │ qwen3-asr-1.7b-q8  :8013  │ │
-│                          │                │  │ nemotron-3-diar.   :8014  │ │
+│ FastAPI gateway :8000    │──variants─────→│ llama-swap :8000               │
+│  SmartRouter (LiteLLM)   │                │  ┌ resident + reranker ──────┐ │
+│  /proxy/v1/* (Cline,     │                │  │ qwen3.5-9b-q4      :8011  │ │
+│   OpenCode, sub-agents)  │                │  │   131072 ctx (1 slot)     │ │
+│  /upstream/* (audio)     │                │  │   --reasoning off         │ │
+│  /v1/rag/search          │── /v1/rerank ─→│  │ bge-reranker-v2-m3 :8012  │ │
 │                          │                │  └───────────────────────────┘ │
-│ MCP server :3001 (HTTP)  │                │                                │
-│ Qdrant server :6333      │                │ Ollama bge-m3 :11434 (embed)   │
-│  active storage: NVMe    │                │ CLIP (Phase 4)                 │
-│  snapshots → NAS daily   │                └────────────────────────────────┘
-└──────────────────────────┘                             │
-           │                                             │
+│ Qdrant server :6333      │                │  ┌ OR asr (evicts the 9B) ───┐ │
+│  active storage: NVMe    │                │  │ qwen3-asr-1.7b-q8  :8013  │ │
+│  snapshots → NAS daily   │                │  │ nemotron-3-diar.   :8014  │ │
+└──────────────────────────┘                │  └───────────────────────────┘ │
+           │                                │                                │
+           │                                │ Ollama bge-m3 :11434 (embed)   │
+           │                                │ CLIP (Phase 4)                 │
+           │                                └────────────────────────────────┘
            └──── both mount ──→ NAS (27TB NFS) ──────────┘
-                               (Redis AOF, SQLite, KV .bin files,
-                                model cache, Qdrant snapshots, exports)
+                               (RAG state DB, model cache, Qdrant snapshots)
 ```
 
 ## Documentation
 
 | Doc | Contents |
 |-----|---------|
-| [docs/Model-routing.md](docs/Model-routing.md) | LLM routing tiers, proxy paths (Cline + Claude Code), sub-agent mechanics, cost tables |
-| [docs/Memory-tiers.md](docs/Memory-tiers.md) | Redis / SQLite / KV cache tiers, ConversationCache API, rolling summarization design |
-| [docs/MCP-functionality.md](docs/MCP-functionality.md) | NFS-files MCP server tools, transport, path safety |
+| [docs/Model-routing.md](docs/Model-routing.md) | LLM routing tiers, proxy paths (Cline, OpenCode), `/upstream` audio forwarder, cost tables |
 | [docs/RAG-strategy.md](docs/RAG-strategy.md) | RAG pipeline design, chunking, embeddings, Qdrant schema, ingestion service, recovery/rollback (§11) |
 | [docs/design-history.md](docs/design-history.md) | Implementation milestones, benchmark results, architectural decisions |
-| [docs/TODO.md](docs/TODO.md) | Deferred work: Phase 3, Phase 4, local-model tool-use |
+| [docs/TODO.md](docs/TODO.md) | Deferred work: Phase 4 (image search + RL); Phase 3 dropped |
 | [docs/RAG-troubleshoot.md](docs/RAG-troubleshoot.md) | Qdrant troubleshooting, recovery procedures |
-| [docs/Telemetry.md](docs/Telemetry.md) | Usage telemetry design: Stage 1 schema + Stage 2 claude-orchestra migration checklist |
 
 ## Project structure
 
 ```
 SoHoAI/
-├── main.py                     # FastAPI app — the central orchestrator
-├── SoHoAI-config.yaml                 # All configuration (models, Redis, RAG, routing, llama-server)
+├── main.py                     # FastAPI app — model gateway (/proxy/v1/*, /upstream/*, /v1/rag/search)
+├── SoHoAI-config.yaml                 # All configuration (models, RAG, routing, audio models)
 ├── .env                        # ANTHROPIC_API_KEY (not committed)
-├── .mcp.json                   # Claude Code auto-discovers this
-├── schemas.py                  # Pydantic models (ChatRequest, ChatResponse, etc.)
+├── schemas.py                  # Pydantic models for the RAG endpoints (IngestRequest, SearchRequest, SearchResult)
 ├── router.py                   # SmartRouter — LiteLLM wrapper with routing logic
-├── usage_tracker.py            # UsageTracker — LiteLLM CustomLogger callback; records usage_events to telemetry.db
-├── conversation.py             # ConversationCache — Redis + KV cache coordinator
-├── kv_cache.py                 # KVCacheManager — llama-server slot save/restore + inference; apply_qwen3_template() (Qwen3.5 ChatML format)
-├── chat_store.py               # ChatStore — SQLite long-term persistence
-├── mcp_gateway.py              # MCP tool gateway (Phase 3 stub, interface defined)
 ├── pyproject.toml              # Python dependencies (uv-managed)
 ├── rag_engine/                 # RAG pipeline (Phase 2 ✅ + §8 advanced retrieval ✅)
 │   ├── __init__.py             # re-exports search_rag, multi_query_search
@@ -130,19 +112,14 @@ SoHoAI/
 │   ├── rag_ingest_daemon.py    # CLI: process pending files (parse → chunk → embed → upsert)
 │   ├── rag_status.py           # CLI: queue counts + Qdrant point stats; --ignored for detail; --watch LOG_FILE for live ETA monitor; --list-pending [N] to print pending paths (pipeable)
 │   ├── rag_search_cli.py       # CLI: retrieval-only — embed query + Qdrant search; prints top-k hits + parent_text preview
-│   ├── rag_smoke_test.py       # CLI: smoke test — Phase 1: GET /v1/rag/search retrieval; Phase 2: POST /v1/chat/completions plain chat; --expect SUBSTR assertion; pass/fail exit code
+│   ├── rag_smoke_test.py       # CLI: smoke test — GET /v1/rag/search retrieval only; --expect SUBSTR assertion; pass/fail exit code
 │   ├── rag_mmr_bench.py        # CLI: MMR benchmark harness (evaluated 2026-04-22; no-go verdict — kept for reference)
 │   ├── rag_rerank_bench.py     # CLI: dense vs reranked vs hybrid comparison bench; --mode dense|rerank|both|hybrid|hybrid+rerank
 │   ├── rag_bench_queries.txt   # 14 verified queries used by bench harnesses
 │   ├── rag_sparse_migrate.py   # CLI: one-time corpus migration to add sparse vectors (migrate / swap / status)
 │   ├── rag_purge_corrupt.py    # CLI: scan+delete corrupt/zombie Qdrant vectors; read-only SQLite (mode=ro)
 │   ├── qdrant_status.py        # CLI: Qdrant optimizer status, lag, segments; --watch for continuous monitoring
-│   ├── rag_reset.py            # CLI: reset Qdrant collection + ingestion queue
-│   ├── notebooklm_auth.py      # NotebookLM browser automation (Playwright + system Chrome)
-│   ├── snapshot_codebase.py    # Aggregate project files → codebase_snapshot.md
-│   ├── sync_to_notebook.py     # End-of-session sync: snapshot → delete old → upload
-│   ├── notebooklm_session.json # Saved Google session cookies (not committed)
-│   └── codebase_snapshot.md    # Generated snapshot (not committed)
+│   └── rag_reset.py            # CLI: reset Qdrant collection + ingestion queue
 ├── scripts/
 │   ├── rag-ingest-run.sh           # RAG ingestion wrapper: per-user sync loop + daemon; used by systemd service
 │   ├── rag-ingest.service          # systemd oneshot service (install to /etc/systemd/system/)
@@ -151,35 +128,19 @@ SoHoAI/
 │   └── qdrant/
 │       ├── qdrant-config.yaml      # Qdrant server config (storage paths, ports)
 │       ├── qdrant.service          # systemd unit file (copy to /etc/systemd/system/)
-├── sqlite-qdrant-snapshot.sh   # SQLite WAL checkpoint + Qdrant snapshot → NFS (cron: daily 03:00)
-└── NFS-files--MCP-server/      # nfs-files MCP server (✅ complete)
-    ├── nfs_files_mcp_server.py  # MCP server implementation
-    ├── nfs_files_mcp_server.sh  # Launch script (HTTP mode, port 3001)
-    ├── setup_mcp.sh             # Install + validation script
-    ├── claude_desktop_config.json # Config snippet for Claude Desktop
-    └── server_config.json       # Server configuration
+└── sqlite-qdrant-snapshot.sh   # SQLite WAL checkpoint + Qdrant snapshot → NFS (cron: daily 03:00)
 ```
 
 ## Key API endpoints (main.py)
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/v1/chat/completions` | Main chat — OpenAI-compatible, dual-mode (see below) |
-| GET | `/v1/chats` | List saved chats |
-| GET | `/v1/chats/{id}` | Get full chat history |
-| DELETE | `/v1/chats/{id}` | Delete chat from Redis, KV cache, and SQLite |
-| GET | `/v1/chats/{id}/export/markdown` | Export chat as Markdown |
-| POST | `/v1/chats/{id}/export/save` | Save Markdown to NAS |
-| GET | `/v1/chats/{id}/export/rl` | Export as JSONL for RL training |
-| POST | `/v1/chats/{id}/feedback` | Record thumbs up/down (for RL) |
-| GET | `/health` | Health check (Redis, models) |
-| GET | `/v1/models` | List models — OpenAI-compatible format |
+| GET, HEAD | `/` | Liveness probe — returns `{"status": "ok"}` |
+| GET | `/health` | Gateway liveness and configured model aliases |
 | GET | `/v1/models/health` | Check each model endpoint |
-| GET | `/v1/usage/stats` | Token usage + cost reporting (filter by user, model, source, session_id, time window) |
-| GET | `/proxy/v1/model/info` | LiteLLM-compatible model info for proxy clients (Cline, Claude Code) — max_input_tokens, context_window |
-| GET | `/proxy/v1/models` | OpenAI model list for proxy clients (Cline, Claude Code) |
-| POST | `/proxy/v1/chat/completions` | Stateless OpenAI-compatible pass-through for proxy clients (Cline, Claude Code) — no Redis/RAG/summarization |
-| POST | `/v1/messages` | Anthropic Messages API passthrough — enables `ANTHROPIC_BASE_URL` for Claude Code |
+| GET | `/proxy/v1/model/info` | LiteLLM-compatible model info for proxy clients (Cline, OpenCode) — max_input_tokens, context_window |
+| GET | `/proxy/v1/models` | OpenAI model list for proxy clients (Cline, OpenCode) |
+| POST | `/proxy/v1/chat/completions` | Stateless OpenAI-compatible pass-through for proxy clients (Cline, OpenCode) — no RAG, no memory |
 | ANY | `/upstream/{model}/{path}` | Transparent byte forwarder to llama-swap for the audio engines only (`qwen3-asr`, `nemotron-3-diarization`); cold swap is held by llama-swap — see `docs/Model-routing.md` §10 |
 | GET | `/v1/rag/search` | RAG retrieval (Qdrant only) |
 
@@ -187,40 +148,34 @@ The `/v1/rag/ingest/{sync,start,stop,status}` endpoints were removed 2026-11-04:
 on Server 2 only, because the WAL-mode state DB must not be opened from two hosts. CLI
 equivalents (on Server 2): `docs/RAG-strategy.md` §4.6.
 
-Responses use a custom `ChatResponse` model (`chat_id`, `model_used`, `message`).
-**Not** OpenAI-compatible format — the CLI reads `data["message"]["content"]`.
-OpenAI-compatible response format is a Phase 3 requirement for Open WebUI integration.
-
 ## Implementation phases
 
 | Phase | Status | Reference |
 |-------|--------|-----------|
 | Phase 1 — Core loop | ✅ complete | [docs/design-history.md](docs/design-history.md) |
 | Phase 2 — RAG | ✅ complete (2026-04-21, 98,737 points) | [docs/RAG-strategy.md](docs/RAG-strategy.md) · [docs/design-history.md](docs/design-history.md) |
-| Phase 3 — Web UI + Auth | In progress | [docs/TODO.md](docs/TODO.md) |
-| Phase 4 — Image search + RL | Future | [docs/TODO.md](docs/TODO.md) |
+| Phase 3 — Web UI + Auth | Dropped (chat UI deprecated in favour of OpenCode) | [docs/TODO.md](docs/TODO.md) |
+| Phase 4 — Image search + RL | Future — images not ingested today; self-hosted NotebookLM-style evolution of RAG planned | [docs/TODO.md](docs/TODO.md) |
 
 ## Conventions
 
 ### Code style
 - Python 3.12+, type hints everywhere
 - Pydantic v2 for all models (`model_config`, `field_validator`, `model_dump()`)
-- Async everywhere in FastAPI and Redis operations
-- SQLite operations are sync (wrapped in ChatStore class methods)
+- Async everywhere in FastAPI operations
+- SQLite operations are sync (RAG `StateDB` in `rag_engine/state.py`)
 - Logging via stdlib `logging` module
 
 ### Naming
 - Project name: **SoHoAI**
 - Python identifiers: `sohoai_*` (underscored)
-- MCP tool names: `sohoai_{action}_{resource}` (e.g. `sohoai_read_file`)
 - Env var prefix: `SOHOAI_`
 - Config file: `SoHoAI-config.yaml` (single file, all settings)
 
 ### Dependencies
 
 Managed via `pyproject.toml` (uv). Key packages:
-- Core: fastapi, uvicorn, litellm, redis, pyyaml, python-dotenv, pydantic, httpx
-- MCP: mcp[cli]
+- Core: fastapi, uvicorn, litellm, pyyaml, python-dotenv, pydantic, httpx
 - RAG: qdrant-client, docling, tiktoken (embeddings via Ollama HTTP — no Python dep)
 - Phase 4: pillow (already included)
 
@@ -289,19 +244,6 @@ bash ./llama-swap--start.sh          # or: tmux send-keys -t llama-swap:0.0 'sou
 # prematurely but successfully", because llama-swap keeps respawning onto an already-bound port
 # (ExitError exit status 1). Recovery: kill the desynced child; llama-swap respawns it cleanly.
 # Batch edits to this file into ONE write, then wait for the health checks before touching it.
-#
-# Single slot for now (no --parallel) until KV cache slot session pinning is resolved.
-# NOTE: existing .bin KV slot files are incompatible when switching models — erase k-v-caches/*.bin first
-# KV cache ops bypass llama-swap and hit the 9B natively on :8011 (llama_server.base_url).
-#
-# (!!!) KV slot save/restore is currently NON-FUNCTIONAL. llama-swap launches the 9B
-# without --slot-save-path, so POST /slots/{id}?action=save returns 501
-# "This server does not support slots action". k-v-caches/ has been empty since
-# 2026-05-15. SoHoAI-config.yaml still declares llama_server.slot_save_path, and
-# kv_cache.py still calls these endpoints. See docs/TODO.md. Fixing it means adding
-# --slot-save-path to the qwen3.5-9b-q4 cmd in llama-swap--config.yaml, but slot
-# session pinning is still unresolved (see design-history 2026-05-27) so this was
-# left alone pending a decision.
 
 # Server 2 — health checks
 curl -sS http://192.168.1.95:8000/v1/models                       # what llama-swap serves
@@ -316,21 +258,14 @@ sudo systemctl start qdrant          # starts /usr/local/bin/qdrant on port 6333
 # Manual snapshot: bash scripts/sqlite-qdrant-snapshot.sh   (auto-runs daily 03:00 via cron)
 # Restore from snapshot: PUT http://192.168.1.93:6333/collections/documents/snapshots/recover
 
-# Server 1 — Redis
-redis-server --appendonly yes --dir /mnt/nfs/__Backups/SoHoAI--databases/redis
-
 # Server 1 — orchestrator
 cd ~/Gin-AI/projects/SoHoAI
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload --reload-include "SoHoAI-config.yaml"
 
-# Server 1 — MCP server (HTTP mode for remote access)
-bash NFS-files--MCP-server/nfs_files_mcp_server.sh
-
-# Cline VSCode plugin and Claude Code proxy — see docs/Model-routing.md
+# Cline VSCode plugin and OpenCode — see docs/Model-routing.md
 # Quick reference:
 #   Cline (LiteLLM provider):  Base URL http://192.168.1.93:8000/proxy/v1  API key sohoai-local
-#   Claude Code (ANTHROPIC_BASE_URL): http://192.168.1.93:8000
-#   Claude Code (sub-agent frontmatter): api_base_url http://192.168.1.93:8000/proxy
+#   OpenCode (provider baseURL): http://192.168.1.93:8000/proxy/v1
 
 # RAG ingestion — automated service on SERVER 2 (live since 2026-05-05; see RAG-strategy.md §10)
 # rag_state.db (WAL-mode SQLite on NFS) is opened from Server 2 ONLY: run every command below
@@ -352,39 +287,22 @@ python utils/rag_status.py --list-pending              # print every pending fil
 
 # RAG testing
 python utils/rag_search_cli.py --query "certifications" --user florian        # retrieval only; add --no-rerank to skip cross-encoder reranking
-python utils/rag_smoke_test.py --query "AWS certifications" --user florian --expect "AWS-Certification"  # Phase 1: retrieval + Phase 2: plain chat; pass/fail exit
+python utils/rag_smoke_test.py --query "AWS certifications" --user florian --expect "AWS-Certification"  # retrieval only (GET /v1/rag/search); pass/fail exit
 python utils/rag_rerank_bench.py --user florian                               # dense-only vs reranked top-5 comparison
 
 # RAG sparse migration — one-time, required to enable hybrid search (see RAG-strategy.md §14)
 python utils/rag_sparse_migrate.py status                       # check migration state
 python utils/rag_sparse_migrate.py migrate                      # phase 1: migrate data (live)
 python utils/rag_sparse_migrate.py swap --confirm               # phase 2: swap (stop uvicorn first)
-
-# Tool-use smoke test — validates LiteLLM path for ollama-cloud/* and internal/qwen3-4b
-# Run against worktree port 8001 (or 8000 after merge)
-python utils/tool_use_smoke_test.py --server http://192.168.1.93:8001
-python utils/tool_use_smoke_test.py --server http://192.168.1.93:8001 --no-stream
-python utils/tool_use_smoke_test.py --server http://192.168.1.93:8001 --model ollama-cloud/qwen3-coder-next
-
-# NotebookLM — first-time login (requires X display)
-DISPLAY=:1 python utils/notebooklm_auth.py --login
-# NotebookLM — verify saved session
-python utils/notebooklm_auth.py --verify
-
-# End-of-session sync: regenerate snapshot + delete old source + upload fresh
-python utils/sync_to_notebook.py
-# Options:
-#   --no-snapshot  skip regeneration, upload existing codebase_snapshot.md
-#   --no-delete    keep old source instead of replacing it
 ```
 
 ### Testing a change
 
 After modifying any orchestrator code:
 1. The FastAPI app reloads automatically if run with `--reload`
-2. Test via curl: `curl -X POST http://192.168.1.93:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"hello"}]}'`
+2. Test via curl: `curl -X POST http://192.168.1.93:8000/proxy/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"local/qwen3.5-9b-q4","messages":[{"role":"user","content":"hello"}]}'`
 3. Check health: `curl http://192.168.1.93:8000/health`
-4. RAG regression: `python utils/rag_smoke_test.py --query "..." --user florian --expect "<known-source-substring>"` (non-zero exit on failure)
+4. RAG regression (retrieval only): `python utils/rag_smoke_test.py --query "..." --user florian --expect "<known-source-substring>"` (non-zero exit on failure)
 
 ### Performance benchmarks
 
